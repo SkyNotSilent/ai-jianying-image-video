@@ -7,7 +7,7 @@ import json
 import logging
 from pathlib import Path
 
-import requests
+import litellm
 
 from src.config import Config
 
@@ -21,7 +21,7 @@ class ArticleGenerator:
         self.config_path = Path(config_path)
         self.prompt_config = self._load_config()
         self.llm_config = Config.llm_config()
-        self.protocol = (self.llm_config.get("protocol") or "anthropic").lower()
+        self.protocol = (self.llm_config.get("protocol") or "openai").lower()
         self.api_key = self.llm_config.get("api_key") or ""
         self.model = self.llm_config.get("model") or Config.LLM_MODEL or Config.ANTHROPIC_MODEL
         self.api_url = self._build_api_url(
@@ -30,8 +30,6 @@ class ArticleGenerator:
 
         if not self.api_key:
             raise ValueError("LLM API Key 未配置")
-
-        self.headers = self._build_headers()
 
     def _load_config(self) -> dict:
         try:
@@ -58,49 +56,47 @@ class ArticleGenerator:
             return f"{base}/messages"
         return f"{base}/v1/messages"
 
-    def _build_headers(self) -> dict:
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
-        }
-        if self.protocol != "openai":
-            headers["x-api-key"] = self.api_key
-            headers["anthropic-version"] = "2023-06-01"
-        return headers
+    def _build_litellm_model(self) -> str:
+        """根据协议和模型名构建 LiteLLM 的 model 参数。"""
+        model = self.model
+        if "/" in model:
+            return model
+        if self.protocol == "anthropic":
+            return f"anthropic/{model}"
+        return f"openai/{model}"
+
+    def _build_litellm_base(self) -> str:
+        """构建 LiteLLM 的 api_base，去掉 /chat/completions 等端点路径，保留 /v1。"""
+        base = (self.api_url or "").rstrip("/")
+        for suffix in ("/chat/completions", "/messages"):
+            if base.endswith(suffix):
+                base = base[:-len(suffix)].rstrip("/")
+                break
+        return base
 
     def _call_api(self, messages: list, max_tokens: int = 2048) -> str:
-        import time
-        if self.protocol == "openai":
-            payload = {
-                "model": self.model,
-                "messages": messages,
-                "max_tokens": max_tokens,
-            }
-        else:
-            payload = {
-                "model": self.model,
-                "max_tokens": max_tokens,
-                "messages": messages,
-            }
+        litellm_model = self._build_litellm_model()
+        kwargs = {
+            "model": litellm_model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "api_key": self.api_key,
+        }
+        if self.api_url and self.protocol != "anthropic":
+            kwargs["api_base"] = self._build_litellm_base()
 
-        # 重试机制：最多尝试 3 次
         for attempt in range(3):
             try:
-                resp = requests.post(self.api_url, headers=self.headers, json=payload, timeout=120, verify=False)
-                resp.raise_for_status()
-                data = resp.json()
-                return self._extract_text(data)
-            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.SSLError) as e:
-                if attempt == 2:  # 最后一次尝试失败
+                response = litellm.completion(**kwargs)
+                return response.choices[0].message.content
+            except Exception as e:
+                if attempt == 2:
                     logger.error(f"API 调用失败，已重试 3 次: {e}")
                     raise
-                wait_time = (attempt + 1) * 5  # 5秒、10秒
+                wait_time = (attempt + 1) * 5
                 logger.warning(f"API 调用失败（第 {attempt + 1} 次），{wait_time} 秒后重试: {e}")
+                import time
                 time.sleep(wait_time)
-            except requests.exceptions.HTTPError as e:
-                # HTTP 错误不重试（如 401、403、429 等）
-                logger.error(f"API HTTP 错误: {e}")
-                raise
 
     def _extract_text(self, data: dict) -> str:
         """兼容 Anthropic Messages 与 OpenAI Chat Completions 的常见返回格式。"""

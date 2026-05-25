@@ -1,16 +1,12 @@
 anthropic>=0.94.0
 requests>=2.31.0
+litellm>=1.40.0
 python-dotenv>=1.0.0
 fastapi
 uvicorn
-oss2>=2.18.0
 python-multipart
 pyjianyingdraft==0.2.6
 imageio==2.37.2
 imageio-ffmpeg
 pymediainfo==7.0.1
-pymysql>=1.0.2
-DBUtils>=3.0.2
-redis>=4.5.0
-cos-python-sdk-v5>=1.9.0
 websockets>=10.0
