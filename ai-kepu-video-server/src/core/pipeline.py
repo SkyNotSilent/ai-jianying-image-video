@@ -16,6 +16,7 @@ from src.draft.voiceover import VoiceOverGenerator
 from src.draft.builder import DraftBuilder
 from src.export.ffmpeg_exporter import FFmpegExporter
 from src.utils.rendering import canvas_for_ratio
+from src.config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -177,31 +178,29 @@ class VideoEditorPipeline:
         self.media_paths = [None] * len(self.segments)
         self.voiceover_files = [None] * len(self.segments)
 
-        import threading
         image_prompts = self.image_prompts
-        img_sem = threading.Semaphore(3)   # Seedream 限并发 3
-        vo_sem  = threading.Semaphore(5)   # 豆包 TTS 限并发 5
+        generation_config = Config.generation_config()
+        image_workers = max(1, min(8, int(generation_config.get("image_concurrency", 1) or 1)))
+        tts_workers = max(1, min(8, int(generation_config.get("tts_concurrency", 1) or 1)))
 
         def gen_image(i):
             prompt = image_prompts[i]
             logger.info(f"  [图像 {i+1}/{len(self.segments)}] {prompt[:50]}...")
-            with img_sem:
-                path = self.image_generator.generate(
-                    prompt, index=i, style=visual_style,
-                    style_suffix=visual_style_suffix,
-                    width=self._canvas_width, height=self._canvas_height,
-                )
+            path = self.image_generator.generate(
+                prompt, index=i, style=visual_style,
+                style_suffix=visual_style_suffix,
+                width=self._canvas_width, height=self._canvas_height,
+            )
             return ("image", i, path)
 
         def gen_voice(i):
             seg = self.segments[i]
             logger.info(f"  [配音 {i+1}/{len(self.segments)}] {seg[:20]}...")
-            with vo_sem:
-                path = self.voiceover_generator.generate(seg, filename=f"seg_{i:03d}")
+            path = self.voiceover_generator.generate(seg, filename=f"seg_{i:03d}")
             return ("voice", i, path)
 
-        # 配音和图像并行，各自内部限并发 2，互不干扰
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        # 配音和图像并行，具体并发由模型配置统一控制。
+        with ThreadPoolExecutor(max_workers=tts_workers + image_workers) as executor:
             voice_futures = {executor.submit(gen_voice, i): i for i in range(len(self.segments))}
             image_futures = {executor.submit(gen_image, i): i for i in range(len(self.segments))}
 

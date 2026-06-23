@@ -417,7 +417,7 @@ class FFmpegExporter:
             output_path,
         ]
 
-        logger.info(f"  [FFmpeg 段 {index+1}] 编码 {duration_s:.1f}s ...")
+        logger.debug(f"  [FFmpeg 段 {index+1}] 编码 {duration_s:.1f}s ...")
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=600,
             encoding="utf-8", errors="replace",
@@ -437,7 +437,7 @@ class FFmpegExporter:
             shutil.copy2(clip_paths[0], output_path)
             return output_path
 
-        logger.info(f"  [FFmpeg] 拼接 {len(clip_paths)} 段视频")
+        logger.debug(f"  [FFmpeg] 拼接 {len(clip_paths)} 段视频")
 
         # 创建 concat 列表文件
         import tempfile
@@ -460,7 +460,7 @@ class FFmpegExporter:
                 output_path,
             ]
 
-            logger.info(f"  [FFmpeg] 执行拼接命令...")
+            logger.debug(f"  [FFmpeg] 执行拼接命令...")
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=120,
                 encoding="utf-8", errors="replace",

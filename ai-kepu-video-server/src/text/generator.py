@@ -7,8 +7,6 @@ import json
 import logging
 from pathlib import Path
 
-import litellm
-
 from src.config import Config
 
 logger = logging.getLogger(__name__)
@@ -75,12 +73,15 @@ class ArticleGenerator:
         return base
 
     def _call_api(self, messages: list, max_tokens: int = 2048) -> str:
+        import litellm
+
         litellm_model = self._build_litellm_model()
         kwargs = {
             "model": litellm_model,
             "messages": messages,
             "max_tokens": max_tokens,
             "api_key": self.api_key,
+            "timeout": 90,
         }
         if self.api_url and self.protocol != "anthropic":
             kwargs["api_base"] = self._build_litellm_base()

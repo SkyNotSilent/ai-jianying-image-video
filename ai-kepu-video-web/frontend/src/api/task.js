@@ -31,6 +31,14 @@ export function updateConfig(data) {
   })
 }
 
+export function fetchConfigModels(data) {
+  return request({
+    url: '/ai/native/video/kepu/config/models',
+    method: 'post',
+    data
+  })
+}
+
 export function getRenderConfig() {
   return request({
     url: '/ai/native/video/kepu/render-config',

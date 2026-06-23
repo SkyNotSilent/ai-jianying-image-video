@@ -116,7 +116,7 @@ import { createExport, getExportJob, getExportState, selectDraftFolder } from '.
 const route = useRoute()
 const router = useRouter()
 const taskId = route.params.taskId
-const baseURL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8001'
+const baseURL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:2002'
 
 const loading = ref(true)
 const state = ref(null)

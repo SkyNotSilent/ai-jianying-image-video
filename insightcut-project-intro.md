@@ -199,7 +199,7 @@ InsightCut 支持两种结果出口：
 | **Image Generation** | 兼容 OpenAI 格式的生图 API | 支持多种生图模型 |
 | **TTS** | 字节跳动 TTS API | 高质量中文配音 |
 | **Video Export** | FFmpeg + pyjianyingdraft | MP4 导出和剪映草稿生成 |
-| **Storage** | 本地文件 / 阿里云 OSS / 腾讯云 COS | 支持本地和云端素材存储 |
+| **Storage** | 本地文件 | 素材和导出文件统一保存到本地媒体目录 |
 
 ---
 

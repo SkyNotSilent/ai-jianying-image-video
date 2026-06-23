@@ -5,6 +5,7 @@
 
 import base64
 import logging
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -14,6 +15,9 @@ import requests
 from src.config import Config
 
 logger = logging.getLogger(__name__)
+_RATE_LIMIT_LOCK = threading.Lock()
+_LAST_IMAGE_REQUEST_AT = 0.0
+_DEFAULT_REQUEST_INTERVAL_SECONDS = 3.0
 
 # 风格预设（附加到 prompt 末尾）
 STYLE_PRESETS = {
@@ -77,7 +81,7 @@ class ImageGenerator:
         # 尺寸映射（可配置，auto 时按宽高比选择常见兼容规格）
         size = self._pick_size(width, height)
 
-        logger.info(f"生成图像 [{index+1}]: {full_prompt[:60]}...")
+        logger.debug(f"生成图像 [{index+1}]: {full_prompt[:60]}...")
 
         headers = {
             "Content-Type": "application/json",
@@ -89,16 +93,23 @@ class ImageGenerator:
             "size": size,
         }
         if not self._is_openai_official_endpoint():
-            # 多数中转/兼容接口支持 response_format=url；官方 gpt-image-1 不需要该字段。
-            payload["response_format"] = "url"
+            # Agnes 等中转/兼容接口要求 response_format 放在 extra_body 中。
+            payload["extra_body"] = {"response_format": "url"}
             payload["stream"] = False
 
         resp = None
         for attempt in range(3):
             try:
+                self._wait_for_rate_limit()
                 resp = requests.post(self.api_url, headers=headers, json=payload, timeout=90)
                 resp.raise_for_status()
                 break
+            except requests.HTTPError as e:
+                if attempt == 2:
+                    raise
+                wait_seconds = self._retry_delay(resp)
+                logger.warning(f"图像生成失败（第{attempt+1}次），{wait_seconds:.0f}秒后重试: {e}")
+                time.sleep(wait_seconds)
             except Exception as e:
                 if attempt == 2:
                     raise
@@ -112,12 +123,30 @@ class ImageGenerator:
         image_bytes = self._extract_image_bytes(data)
         output_path = self.output_dir / f"{output_stem}{self._detect_image_extension(image_bytes)}"
         output_path.write_bytes(image_bytes)
-        logger.info(f"图像保存: {output_path} ({len(image_bytes)} 字节)")
+        logger.debug(f"图像保存: {output_path} ({len(image_bytes)} 字节)")
         return str(output_path)
 
     def _is_openai_official_endpoint(self) -> bool:
         parsed = urlparse(self.api_url)
         return parsed.netloc in {"api.openai.com", "api.openai.com:443"}
+
+    def _wait_for_rate_limit(self) -> None:
+        global _LAST_IMAGE_REQUEST_AT
+        with _RATE_LIMIT_LOCK:
+            now = time.monotonic()
+            elapsed = now - _LAST_IMAGE_REQUEST_AT
+            if elapsed < _DEFAULT_REQUEST_INTERVAL_SECONDS:
+                time.sleep(_DEFAULT_REQUEST_INTERVAL_SECONDS - elapsed)
+            _LAST_IMAGE_REQUEST_AT = time.monotonic()
+
+    def _retry_delay(self, resp) -> float:
+        if resp is not None and resp.status_code == 429:
+            retry_after = resp.headers.get("retry-after")
+            try:
+                return max(float(retry_after), _DEFAULT_REQUEST_INTERVAL_SECONDS)
+            except (TypeError, ValueError):
+                return 60.0
+        return _DEFAULT_REQUEST_INTERVAL_SECONDS
 
     def _extract_image_bytes(self, data: dict) -> bytes:
         item = data["data"][0]

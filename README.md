@@ -189,7 +189,7 @@ cp .env.example .env
 python api_server.py
 ```
 
-默认服务地址：`http://localhost:8000`
+默认服务地址：`http://localhost:2002`
 
 ### 前端
 
@@ -197,10 +197,10 @@ python api_server.py
 cd ai-kepu-video-web/frontend
 npm install
 cp .env.example .env.development
-npm run dev -- --host 127.0.0.1 --port 5173
+npm run dev -- --host 127.0.0.1 --port 2001
 ```
 
-默认访问地址：`http://127.0.0.1:5173`
+默认访问地址：`http://127.0.0.1:2001`
 
 ## 配置说明
 

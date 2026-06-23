@@ -1,7 +1,6 @@
 """
 SQLite 数据库客户端
-本地开发用，替代远程 MySQL
-接口与 MySQLClient 完全兼容
+本地持久化任务、分镜和素材数据
 """
 
 import logging
@@ -19,7 +18,7 @@ DB_PATH = Path(__file__).parent.parent.parent / "data" / "local.db"
 
 
 class SQLiteClient:
-    """SQLite 数据库客户端（兼容 MySQLClient 接口）"""
+    """SQLite 数据库客户端"""
 
     def __init__(self):
         self._initialized = False
@@ -130,6 +129,11 @@ class SQLiteClient:
                     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
                     updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
                 );
+
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version TEXT PRIMARY KEY,
+                    applied_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+                );
             """)
 
             # 插入默认音色数据（如果表为空）
@@ -165,6 +169,35 @@ class SQLiteClient:
                 cursor.execute("ALTER TABLE task_segments ADD COLUMN image_prompt TEXT")
             except sqlite3.OperationalError:
                 pass  # 字段已存在
+            try:
+                cursor.execute("ALTER TABLE task_segments ADD COLUMN image_status TEXT DEFAULT 'completed'")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute("ALTER TABLE task_segments ADD COLUMN image_error TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute("ALTER TABLE task_segments ADD COLUMN audio_status TEXT DEFAULT 'completed'")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute("ALTER TABLE task_segments ADD COLUMN audio_error TEXT")
+            except sqlite3.OperationalError:
+                pass
+
+            self._apply_migration(
+                cursor,
+                "20260623_operational_indexes",
+                """
+                CREATE INDEX IF NOT EXISTS idx_tasks_status_created_at
+                    ON tasks(status, created_at);
+                CREATE INDEX IF NOT EXISTS idx_task_steps_task_step
+                    ON task_steps(task_id, step_name);
+                CREATE INDEX IF NOT EXISTS idx_task_assets_task_type_segment
+                    ON task_assets(task_id, asset_type, segment_index);
+                """,
+            )
 
             conn.commit()
             conn.close()
@@ -173,6 +206,14 @@ class SQLiteClient:
         except Exception as e:
             logger.error(f"SQLite 数据库初始化失败: {e}")
             self._initialized = False
+
+    def _apply_migration(self, cursor, version: str, sql: str) -> None:
+        cursor.execute("SELECT 1 FROM schema_migrations WHERE version=?", (version,))
+        if cursor.fetchone():
+            return
+        cursor.executescript(sql)
+        cursor.execute("INSERT INTO schema_migrations (version) VALUES (?)", (version,))
+        logger.info(f"SQLite 迁移已应用: {version}")
 
     def _get_conn(self):
         """获取数据库连接"""
@@ -184,7 +225,7 @@ class SQLiteClient:
 
     @contextmanager
     def get_connection(self):
-        """获取数据库连接（上下文管理器，兼容 MySQLClient 接口）"""
+        """获取数据库连接（上下文管理器）"""
         if not self._initialized:
             self._init_db()
         if not self._initialized:
@@ -463,16 +504,27 @@ class SQLiteClient:
             cur = conn.cursor()
             for seg in segments:
                 cur.execute(
-                    """INSERT INTO task_segments (task_id, segment_index, text, image_prompt, image_path, image_url, audio_path, audio_url, duration)
-                       VALUES (?,?,?,?,?,?,?,?,?)
+                    """INSERT INTO task_segments (task_id, segment_index, text, image_prompt, image_path, image_url, image_status, image_error, audio_path, audio_url, audio_status, audio_error, duration)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(task_id, segment_index) DO UPDATE SET
                        text=excluded.text, image_prompt=excluded.image_prompt,
-                       image_path=excluded.image_path, image_url=excluded.image_url,
-                       audio_path=excluded.audio_path, audio_url=excluded.audio_url, duration=excluded.duration""",
+                       image_path=COALESCE(excluded.image_path, task_segments.image_path),
+                       image_url=COALESCE(excluded.image_url, task_segments.image_url),
+                       image_status=COALESCE(excluded.image_status, task_segments.image_status),
+                       image_error=COALESCE(excluded.image_error, task_segments.image_error),
+                       audio_path=COALESCE(excluded.audio_path, task_segments.audio_path),
+                       audio_url=COALESCE(excluded.audio_url, task_segments.audio_url),
+                       audio_status=COALESCE(excluded.audio_status, task_segments.audio_status),
+                       audio_error=COALESCE(excluded.audio_error, task_segments.audio_error),
+                       duration=COALESCE(excluded.duration, task_segments.duration),
+                       updated_at=datetime('now','localtime')""",
                     (task_id, seg['segment_index'], seg['text'],
                      seg.get('image_prompt'),
                      seg.get('image_path'), seg.get('image_url'),
-                     seg.get('audio_path'), seg.get('audio_url'), seg.get('duration'))
+                     seg.get('image_status'), seg.get('image_error'),
+                     seg.get('audio_path'), seg.get('audio_url'),
+                     seg.get('audio_status'), seg.get('audio_error'),
+                     seg.get('duration'))
                 )
             conn.commit()
             conn.close()
@@ -509,7 +561,9 @@ class SQLiteClient:
             set_parts = []
             values = []
             for key, value in updates.items():
-                if key in ['text', 'image_prompt', 'image_path', 'image_url', 'audio_path', 'audio_url', 'duration']:
+                if value is None:
+                    continue
+                if key in ['text', 'image_prompt', 'image_path', 'image_url', 'image_status', 'image_error', 'audio_path', 'audio_url', 'audio_status', 'audio_error', 'duration']:
                     set_parts.append(f"{key}=?")
                     values.append(value)
             if not set_parts:
@@ -545,19 +599,27 @@ class SQLiteClient:
                        ORDER BY id DESC LIMIT 1""",
                     (task_id, asset_type, source, path)
                 )
-                existing = cur.fetchone()
-                if existing:
-                    cur.execute(
-                        """UPDATE task_assets SET segment_index=?, source=?, url=?, label=?, prompt=?, text=?,
-                           voice_type=?, metadata_json=?, status=?, error_message=?, updated_at=datetime('now','localtime')
-                           WHERE asset_id=?""",
-                        (segment_index, source, url, label, prompt, text, voice_type, metadata_json, status, error_message, existing["asset_id"])
-                    )
-                    conn.commit()
-                    cur.execute("SELECT * FROM task_assets WHERE asset_id=?", (existing["asset_id"],))
-                    row = dict(cur.fetchone())
-                    conn.close()
-                    return row
+            else:
+                cur.execute(
+                    """SELECT * FROM task_assets
+                       WHERE task_id=? AND asset_type=? AND source=? AND segment_index=?
+                       ORDER BY id DESC LIMIT 1""",
+                    (task_id, asset_type, source, segment_index)
+                )
+            existing = cur.fetchone()
+            if existing:
+                cur.execute(
+                    """UPDATE task_assets SET segment_index=?, source=?, url=COALESCE(?, url), label=?,
+                       prompt=?, text=?, voice_type=?, metadata_json=?, status=?, error_message=?,
+                       updated_at=datetime('now','localtime')
+                       WHERE asset_id=?""",
+                    (segment_index, source, url, label, prompt, text, voice_type, metadata_json, status, error_message, existing["asset_id"])
+                )
+                conn.commit()
+                cur.execute("SELECT * FROM task_assets WHERE asset_id=?", (existing["asset_id"],))
+                row = dict(cur.fetchone())
+                conn.close()
+                return row
 
             asset_id = uuid.uuid4().hex
             cur.execute(

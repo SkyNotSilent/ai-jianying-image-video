@@ -15,10 +15,10 @@
 ```bash
 npm install
 cp .env.example .env.development
-npm run dev -- --host 127.0.0.1 --port 5173
+npm run dev -- --host 127.0.0.1 --port 2001
 ```
 
-默认后端地址为 `http://localhost:8000`，可在 `.env.development` 中通过 `VITE_API_BASE_URL` 修改。
+默认后端地址为 `http://localhost:2002`，可在 `.env.development` 中通过 `VITE_API_BASE_URL` 修改。
 
 ## 构建
 

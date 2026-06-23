@@ -1,23 +1,60 @@
 """
 任务管理模块
 负责任务的创建、状态跟踪、进度更新
-集成 MySQL 持久化和 Redis 缓存
+使用本地 SQLite 持久化和内存缓存
 """
 
 import uuid
 import time
 import logging
-from datetime import datetime
+import os
+from datetime import datetime, timedelta
 from typing import Dict, Optional, Callable
 from threading import Thread, Lock
 from .models import (
     TaskStatus, StepStatus, TaskProgress,
     StepProgress, TaskResult, TaskResponse
 )
-from src.database import mysql_client, redis_client
+from src.database import db_client, redis_client
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_STALE_TASK_TIMEOUT_SECONDS = 30 * 60
+STEP_STALE_TASK_TIMEOUT_SECONDS = {
+    "pending": 10 * 60,
+    "text_generation": 10 * 60,
+    "image_prompt_generation": 15 * 60,
+    "voiceover_generation": 30 * 60,
+    "image_generation": 45 * 60,
+    "draft_building": 5 * 60,
+    "video_synthesis": 10 * 60,
+}
+
+
+def _stale_task_timeout_seconds(step_name: str) -> int:
+    raw_value = os.getenv("TASK_STALE_TIMEOUT_SECONDS")
+    if raw_value:
+        try:
+            return max(60, int(raw_value))
+        except ValueError:
+            logger.warning("TASK_STALE_TIMEOUT_SECONDS 配置无效: %s", raw_value)
+    return STEP_STALE_TASK_TIMEOUT_SECONDS.get(step_name, DEFAULT_STALE_TASK_TIMEOUT_SECONDS)
+
+
+def _parse_task_datetime(value) -> Optional[datetime]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(str(value), fmt)
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
 
 class Task:
     """任务对象"""
@@ -74,21 +111,21 @@ class Task:
             self.step_start_times[step_name] = time.time()
             logger.info(f"[{self.task_id}] 开始步骤: {step_name}")
 
-            # 更新到 MySQL 和 Redis
-            mysql_client.update_step(self.task_id, step_name, "processing")
-            mysql_client.update_task_status(self.task_id, "processing", step_name)
-            self._sync_progress_to_redis()
+            # 更新到本地数据库和内存缓存
+            db_client.update_step(self.task_id, step_name, "processing")
+            db_client.update_task_status(self.task_id, "processing", step_name)
+            self._sync_progress_to_cache()
 
     def update_step_progress(self, step_name: str, progress: int, total: int):
         """更新步骤进度"""
         if step_name in self.steps:
             self.steps[step_name].progress = progress
             self.steps[step_name].total = total
-            logger.info(f"[{self.task_id}] {step_name} 进度: {progress}/{total}")
+            logger.debug(f"[{self.task_id}] {step_name} 进度: {progress}/{total}")
 
-            # 更新到 MySQL 和 Redis
-            mysql_client.update_step(self.task_id, step_name, "processing", progress, total)
-            self._sync_progress_to_redis()
+            # 更新到本地数据库和内存缓存
+            db_client.update_step(self.task_id, step_name, "processing", progress, total)
+            self._sync_progress_to_cache()
 
     def complete_step(self, step_name: str):
         """完成某个步骤"""
@@ -99,14 +136,14 @@ class Task:
                 self.steps[step_name].duration = round(duration, 2)
             logger.info(f"[{self.task_id}] 完成步骤: {step_name}")
 
-            # 更新到 MySQL 和 Redis
-            mysql_client.update_step(
+            # 更新到本地数据库和内存缓存
+            db_client.update_step(
                 self.task_id, step_name, "completed",
                 self.steps[step_name].progress,
                 self.steps[step_name].total,
                 self.steps[step_name].duration
             )
-            self._sync_progress_to_redis()
+            self._sync_progress_to_cache()
 
     def fail_step(self, step_name: str, error: str):
         """步骤失败"""
@@ -115,12 +152,12 @@ class Task:
             self.error = error
             logger.error(f"[{self.task_id}] 步骤失败 {step_name}: {error}")
 
-            # 更新到 MySQL 和 Redis
-            mysql_client.update_step(self.task_id, step_name, "failed")
-            self._sync_progress_to_redis()
+            # 更新到本地数据库和内存缓存
+            db_client.update_step(self.task_id, step_name, "failed")
+            self._sync_progress_to_cache()
 
-    def _sync_progress_to_redis(self):
-        """同步进度到 Redis"""
+    def _sync_progress_to_cache(self):
+        """同步进度到内存缓存"""
         steps_dict = {
             name: {
                 "name": step.name,
@@ -166,9 +203,9 @@ class TaskManager:
         with self.lock:
             self.tasks[task_id] = task
 
-        mysql_client.create_task(task_id, theme, style, length, name, ratio, voice_type)
+        db_client.create_task(task_id, theme, style, length, name, ratio, voice_type)
 
-        # 缓存到 Redis
+        # 缓存到内存
         task_data = {
             "task_id": task_id,
             "theme": theme,
@@ -185,15 +222,29 @@ class TaskManager:
         return task_id
 
     def get_task(self, task_id: str) -> Optional[Task]:
-        """获取任务（优先从内存，然后 Redis，最后 MySQL）"""
+        """获取任务（优先从运行时内存，然后缓存，最后本地数据库）"""
         # 1. 从内存获取
         with self.lock:
             if task_id in self.tasks:
+                db_data = db_client.get_task(task_id)
+                if db_data and self.fail_stale_task_data(db_data):
+                    self.tasks.pop(task_id, None)
+                    return self._rebuild_task_from_db(db_data)
                 return self.tasks[task_id]
 
-        # 2. 从 Redis 获取
+        # 2. 从缓存获取
         cached_data = redis_client.get_task(task_id)
         if cached_data:
+            if cached_data.get("status") in {"pending", "processing"}:
+                db_data = db_client.get_task(task_id)
+                if db_data:
+                    self.fail_stale_task_data(db_data)
+                    task = self._rebuild_task_from_db(db_data)
+                    if task:
+                        with self.lock:
+                            self.tasks[task_id] = task
+                        redis_client.cache_task(task_id, self._task_to_dict(task))
+                        return task
             # 重建 Task 对象
             task = self._rebuild_task_from_cache(cached_data)
             if task:
@@ -201,14 +252,15 @@ class TaskManager:
                     self.tasks[task_id] = task
                 return task
 
-        # 3. 从 MySQL 获取
-        db_data = mysql_client.get_task(task_id)
+        # 3. 从本地数据库获取
+        db_data = db_client.get_task(task_id)
         if db_data:
+            self.fail_stale_task_data(db_data)
             task = self._rebuild_task_from_db(db_data)
             if task:
                 with self.lock:
                     self.tasks[task_id] = task
-                # 回写到 Redis
+                # 回写到缓存
                 redis_client.cache_task(task_id, self._task_to_dict(task))
                 return task
 
@@ -311,6 +363,46 @@ class TaskManager:
             "result": task.result.dict() if task.result else None,
         }
 
+    def list_tasks(self, status: str = None, limit: int = 100, offset: int = 0):
+        """获取任务列表，并清理已超时的非终态任务"""
+        rows = db_client.list_tasks(status=status, limit=limit, offset=offset)
+        changed = False
+        for row in rows:
+            changed = self.fail_stale_task_data(row) or changed
+        if changed:
+            rows = db_client.list_tasks(status=status, limit=limit, offset=offset)
+        return rows
+
+    def fail_stale_task_data(self, data: dict) -> bool:
+        """将长时间无更新的 pending/processing 任务标记为失败"""
+        if not data or data.get("status") not in {"pending", "processing"}:
+            return False
+
+        step_name = data.get("current_step") or "pending"
+        updated_at = _parse_task_datetime(data.get("updated_at") or data.get("created_at"))
+        if not updated_at:
+            return False
+
+        timeout_seconds = _stale_task_timeout_seconds(step_name)
+        elapsed_seconds = (datetime.now() - updated_at).total_seconds()
+        if elapsed_seconds < timeout_seconds:
+            return False
+
+        error = f"任务在 {step_name} 阶段超过 {timeout_seconds // 60} 分钟无进度更新，已自动判定失败"
+        task_id = data["task_id"]
+        logger.warning("[%s] %s", task_id, error)
+        db_client.update_task_status(task_id, "failed", step_name, error)
+        db_client.update_step(task_id, step_name, "failed")
+        redis_client.delete_task(task_id)
+        data["status"] = "failed"
+        data["error"] = error
+        return True
+
+    def mark_stale_tasks_failed(self, limit: int = 200) -> int:
+        rows = db_client.list_tasks(status="pending", limit=limit, offset=0)
+        rows.extend(db_client.list_tasks(status="processing", limit=limit, offset=0))
+        return sum(1 for row in rows if self.fail_stale_task_data(row))
+
     def update_task_status(self, task_id: str, status: TaskStatus):
         """更新任务状态"""
         task = self.get_task(task_id)
@@ -318,10 +410,10 @@ class TaskManager:
             task.status = status
             logger.info(f"[{task_id}] 状态更新: {status}")
 
-            # 更新到 MySQL
-            mysql_client.update_task_status(task_id, status, task.current_step, task.error)
+            # 更新到本地数据库
+            db_client.update_task_status(task_id, status, task.current_step, task.error)
 
-            # 更新到 Redis
+            # 更新到内存缓存
             redis_client.cache_task(task_id, self._task_to_dict(task))
 
     def set_task_result(self, task_id: str, draft_path: str, segments_count: int, draft_url: str = None, video_url: str = None):
@@ -343,10 +435,10 @@ class TaskManager:
             if video_url:
                 logger.info(f"[{task_id}] 视频 URL: {video_url}")
 
-            # 保存到 MySQL
-            mysql_client.save_task_result(task_id, draft_path, segments_count, draft_url, video_url)
+            # 保存到本地数据库
+            db_client.save_task_result(task_id, draft_path, segments_count, draft_url, video_url)
 
-            # 更新到 Redis
+            # 更新到内存缓存
             redis_client.cache_task(task_id, self._task_to_dict(task))
 
     def set_task_error(self, task_id: str, error: str):
@@ -357,10 +449,10 @@ class TaskManager:
             task.error = error
             logger.error(f"[{task_id}] 任务失败: {error}")
 
-            # 更新到 MySQL
-            mysql_client.update_task_status(task_id, "failed", task.current_step, error)
+            # 更新到本地数据库
+            db_client.update_task_status(task_id, "failed", task.current_step, error)
 
-            # 更新到 Redis
+            # 更新到内存缓存
             redis_client.cache_task(task_id, self._task_to_dict(task))
 
     def update_extract_path(self, task_id: str, extract_path: str):
@@ -368,7 +460,7 @@ class TaskManager:
         task = self.get_task(task_id)
         if task:
             task.extract_path = extract_path
-            mysql_client.update_extract_path(task_id, extract_path)
+            db_client.update_extract_path(task_id, extract_path)
             redis_client.cache_task(task_id, self._task_to_dict(task))
 
     def delete_task(self, task_id: str) -> bool:
@@ -376,7 +468,7 @@ class TaskManager:
         with self.lock:
             self.tasks.pop(task_id, None)
         redis_client.delete_task(task_id)
-        mysql_client.delete_task(task_id)
+        db_client.delete_task(task_id)
         logger.info(f"任务已删除: {task_id}")
         return True
 

@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 data/
+*.db
 
 # Dependencies and build outputs
 node_modules/
@@ -27,10 +28,10 @@ logs/
 *.tmp
 
 # Local tooling and OS files
+.playwright-mcp/
 .claude/
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
 *.swp
-

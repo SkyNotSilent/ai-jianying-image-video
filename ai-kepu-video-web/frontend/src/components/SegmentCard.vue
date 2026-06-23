@@ -135,33 +135,40 @@ function onImageSelected(event) {
 <style scoped>
 .segment-card {
   display: grid;
-  grid-template-columns: 74px minmax(0, 1fr);
-  gap: 10px;
-  padding: 10px;
-  border: 1px solid var(--color-border);
+  grid-template-columns: 68px minmax(0, 1fr);
+  gap: 9px;
+  padding: 9px;
+  border: 1px solid transparent;
   border-left: 3px solid transparent;
-  border-radius: var(--radius-sm);
-  background: var(--color-card);
+  border-radius: 10px;
+  background: #fff;
   cursor: pointer;
-  transition: border-color 0.18s, box-shadow 0.18s, transform 0.18s;
+  box-shadow: inset 0 0 0 1px rgba(29, 29, 31, 0.08);
+  transition: border-color 0.18s, box-shadow 0.18s, transform 0.18s, background 0.18s;
 }
 
 .segment-card:hover {
-  border-color: rgba(37, 99, 235, 0.38);
+  background: #fbfcfd;
+  border-color: rgba(29, 29, 31, 0.12);
   transform: translateY(-1px);
 }
 
 .segment-card.active {
-  border-left-color: var(--color-primary);
-  box-shadow: var(--shadow-sm);
+  border-left-color: #111318;
+  background: #f8f9fb;
+  box-shadow:
+    inset 0 0 0 1px rgba(17, 19, 24, 0.18),
+    0 6px 16px rgba(20, 23, 31, 0.07);
 }
 
 .segment-thumb {
-  width: 74px;
+  width: 68px;
   aspect-ratio: v-bind(aspectRatio);
-  border-radius: 6px;
+  align-self: start;
+  border-radius: 7px;
   overflow: hidden;
-  background: var(--color-bg-secondary);
+  background: #eff2f6;
+  box-shadow: inset 0 0 0 1px rgba(29, 29, 31, 0.08);
 }
 
 .segment-thumb img {
@@ -176,8 +183,8 @@ function onImageSelected(event) {
   height: 100%;
   display: grid;
   place-items: center;
-  color: var(--color-text-placeholder);
-  border: 1px dashed var(--color-border);
+  color: var(--color-text-tertiary);
+  border: 1px dashed rgba(29, 29, 31, 0.18);
 }
 
 .thumb-empty svg {
@@ -193,8 +200,8 @@ function onImageSelected(event) {
   align-items: center;
   justify-content: center;
   gap: 4px;
-  color: #ee0a24;
-  background: rgba(238, 10, 36, 0.05);
+  color: #c9342b;
+  background: rgba(255, 59, 48, 0.07);
 }
 
 .thumb-error svg {
@@ -210,19 +217,19 @@ function onImageSelected(event) {
 .error-badges {
   display: flex;
   gap: 4px;
-  margin-bottom: 4px;
+  margin-bottom: 3px;
 }
 
 .error-badge {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  padding: 2px 6px;
-  background: rgba(238, 10, 36, 0.9);
-  color: white;
+  padding: 2px 5px;
+  background: rgba(255, 59, 48, 0.1);
+  color: #b42318;
   font-size: 10px;
   font-weight: 600;
-  border-radius: 3px;
+  border-radius: 999px;
 }
 
 .segment-main {
@@ -233,27 +240,29 @@ function onImageSelected(event) {
   display: flex;
   justify-content: space-between;
   gap: 8px;
-  margin-bottom: 4px;
+  margin-bottom: 3px;
 }
 
 .segment-index,
 .time-code {
   font-size: 11px;
-  font-weight: 800;
+  font-weight: 700;
   color: var(--color-text-tertiary);
+  letter-spacing: 0;
+  white-space: nowrap;
 }
 
 .segment-card.active .segment-index {
-  color: var(--color-primary);
+  color: #111318;
 }
 
 p {
   margin: 0;
-  height: 36px;
+  height: 34px;
   overflow: hidden;
   color: var(--color-text-secondary);
   font-size: 12px;
-  line-height: 1.5;
+  line-height: 1.42;
 }
 
 p.placeholder {
@@ -262,9 +271,9 @@ p.placeholder {
 
 .segment-preview-track {
   height: 3px;
-  margin-top: 7px;
+  margin-top: 6px;
   border-radius: 999px;
-  background: var(--color-border);
+  background: #e7eaf0;
   overflow: hidden;
 }
 
@@ -277,31 +286,33 @@ p.placeholder {
 
 .segment-tools {
   display: flex;
-  gap: 4px;
-  margin-top: 7px;
+  gap: 3px;
+  margin-top: 6px;
 }
 
 .segment-tools button {
-  width: 24px;
-  height: 24px;
+  width: 23px;
+  height: 23px;
   display: grid;
   place-items: center;
-  border: 1px solid var(--color-border);
+  border: 1px solid rgba(29, 29, 31, 0.12);
   border-radius: 6px;
-  background: #fff;
+  background: #fbfcfd;
   color: var(--color-text-tertiary);
   cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
 }
 
 .segment-tools button:hover:not(:disabled) {
-  color: var(--color-primary);
-  border-color: var(--color-primary);
+  color: #111318;
+  border-color: rgba(17, 19, 24, 0.5);
+  background: #fff;
 }
 
 .segment-tools button.playing {
   color: #fff;
-  background: var(--color-primary);
-  border-color: var(--color-primary);
+  background: #111318;
+  border-color: #111318;
 }
 
 .segment-tools button:disabled {

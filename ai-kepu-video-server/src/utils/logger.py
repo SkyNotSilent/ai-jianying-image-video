@@ -4,6 +4,7 @@
 """
 
 import logging
+import os
 import sys
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
@@ -17,6 +18,8 @@ def setup_logging(log_dir: str = "logs", log_level: str = "INFO"):
         log_dir: 日志文件目录
         log_level: 日志级别 (DEBUG, INFO, WARNING, ERROR, CRITICAL)
     """
+    os.environ.setdefault("LITELLM_LOG", "ERROR")
+
     # 创建日志目录
     log_path = Path(log_dir)
     log_path.mkdir(parents=True, exist_ok=True)
@@ -78,6 +81,9 @@ def setup_logging(log_dir: str = "logs", log_level: str = "INFO"):
     # 只记录任务相关的日志
     task_logger = logging.getLogger('src.api.task_executor')
     task_logger.addHandler(task_handler)
+
+    for noisy_logger in ("LiteLLM", "litellm", "openai", "httpx", "httpcore"):
+        logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
     logging.info(f"日志系统初始化完成，日志目录: {log_path.absolute()}")
     logging.info(f"日志级别: {log_level}")

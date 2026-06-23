@@ -101,7 +101,7 @@ import { formatTimestamp } from '../utils/format'
 
 const route = useRoute()
 const router = useRouter()
-const baseURL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8001'
+const baseURL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:2002'
 const taskId = route.params.taskId
 const loading = ref(true)
 const taskData = ref(null)

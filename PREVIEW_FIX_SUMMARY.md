@@ -85,7 +85,7 @@ const renderCanvasStyle = computed(() => {
 
 ### 1. 访问预览界面
 ```
-http://localhost:3004/preview/{task_id}
+http://localhost:2001/preview/{task_id}
 ```
 
 ### 2. 测试不同格式
@@ -166,7 +166,7 @@ http://localhost:3004/preview/{task_id}
 
 ```bash
 # 停止前端
-lsof -ti:3004 | xargs kill -9
+lsof -ti:2001 | xargs kill -9
 
 # 启动前端
 cd /Users/mima1234/Documents/AI产品经理/Auto-jianji/ai-kepu-video-web/frontend

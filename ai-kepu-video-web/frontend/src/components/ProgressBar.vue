@@ -74,11 +74,12 @@ const currentStepLabel = computed(() => {
 
 .loading-circle-progress {
   fill: none;
-  stroke: var(--color-primary);
+  stroke: var(--color-accent);
   stroke-width: 4;
   stroke-dasharray: 289;
   stroke-dashoffset: 289;
   transition: stroke-dashoffset 0.5s;
+  filter: drop-shadow(0 0 8px rgba(0, 113, 227, 0.3));
 }
 
 .loading-inner-ring {
@@ -86,7 +87,7 @@ const currentStepLabel = computed(() => {
   inset: 15%;
   border-radius: 50%;
   border: 2px solid #e5e6eb;
-  border-right-color: var(--color-primary);
+  border-right-color: var(--color-accent);
   animation: innerSpin 2s linear infinite;
 }
 
@@ -112,7 +113,8 @@ const currentStepLabel = computed(() => {
 
 .loading-task {
   font-size: 13px;
-  color: var(--color-primary);
+  color: var(--color-accent);
+  font-weight: 500;
 }
 
 @keyframes innerSpin {

@@ -19,6 +19,7 @@ if env_path.exists():
         print("未安装 python-dotenv，跳过 .env 文件加载（可使用系统环境变量）")
 
 from src.api.routes import router
+from src.api.task_manager import task_manager
 from src.utils.logger import setup_logging, get_logger
 from src.config import Config
 
@@ -45,10 +46,13 @@ app.add_middleware(
 # 注册路由
 app.include_router(router)
 
-# 本地媒体文件路由。即使使用远端数据库，也允许无 COS 环境时回退本地文件。
+# 本地媒体文件路由。
 # 这里按文件头识别 Content-Type，避免生图接口返回 PNG 但文件名为 .jpg 时被浏览器 ORB 拦截。
-media_dir = Path(__file__).parent / "data" / "media"
-media_dir.mkdir(parents=True, exist_ok=True)
+# 支持两个目录：output/（新任务）和 data/media/（旧任务）
+output_dir = Path(__file__).parent / "output"
+legacy_media_dir = Path(__file__).parent / "data" / "media"
+output_dir.mkdir(parents=True, exist_ok=True)
+legacy_media_dir.mkdir(parents=True, exist_ok=True)
 
 
 def _media_type_for_file(path: Path) -> str:
@@ -84,29 +88,40 @@ def _media_type_for_file(path: Path) -> str:
 
 @app.api_route("/media/{file_path:path}", methods=["GET", "HEAD"], name="media")
 async def serve_media(file_path: str):
-    requested = (media_dir / file_path).resolve()
-    media_root = media_dir.resolve()
-    if media_root not in requested.parents and requested != media_root:
-        raise HTTPException(status_code=404, detail="媒体文件不存在")
-    if not requested.is_file():
-        raise HTTPException(status_code=404, detail="媒体文件不存在")
-    return FileResponse(
-        requested,
-        media_type=_media_type_for_file(requested),
-        headers={
-            "Cache-Control": "public, max-age=31536000, immutable",
-            "Access-Control-Allow-Origin": "*",
-        },
-    )
+    # 优先尝试 output 目录（新任务），然后尝试 data/media（旧任务）
+    for media_dir in [output_dir, legacy_media_dir]:
+        requested = (media_dir / file_path).resolve()
+        media_root = media_dir.resolve()
+
+        # 安全检查：确保请求的文件在允许的目录内
+        if media_root not in requested.parents and requested != media_root:
+            continue
+
+        # 如果文件存在，返回它
+        if requested.is_file():
+            return FileResponse(
+                requested,
+                media_type=_media_type_for_file(requested),
+                headers={
+                    "Cache-Control": "public, max-age=31536000, immutable",
+                    "Access-Control-Allow-Origin": "*",
+                },
+            )
+
+    # 两个目录都没找到文件
+    raise HTTPException(status_code=404, detail="媒体文件不存在")
 
 
 @app.on_event("startup")
 async def startup_event():
     """应用启动事件"""
+    cleaned_count = task_manager.mark_stale_tasks_failed()
+    if cleaned_count:
+        logger.warning(f"启动时已自动标记 {cleaned_count} 个超时任务为失败")
     logger.info("=" * 60)
     logger.info("InsightCut API 启动")
-    logger.info(f"API 文档: http://0.0.0.0:8000/docs")
-    logger.info(f"健康检查: http://0.0.0.0:8000/health")
+    logger.info(f"API 文档: http://0.0.0.0:2002/docs")
+    logger.info(f"健康检查: http://0.0.0.0:2002/health")
     logger.info("=" * 60)
 
 
@@ -134,4 +149,4 @@ async def health():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=2002)

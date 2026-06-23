@@ -4,18 +4,21 @@
  */
 
 :root {
-  /* ==================== 配色：极简黑白灰 ==================== */
+  /* ==================== 配色：科技蓝 + 极简黑白 ==================== */
   /* 主色：纯黑（Apple 标志性） */
   --color-primary: #000000;
   --color-primary-hover: #1d1d1f;
 
-  /* 强调色：Apple 蓝（仅用于交互） */
+  /* 强调色：Apple 蓝（用于交互和视觉重点） */
   --color-accent: #0071e3;
   --color-accent-hover: #0077ed;
+  --color-accent-light: #e8f0fe;
+  --color-accent-subtle: rgba(0, 113, 227, 0.08);
 
-  /* 背景：纯白 + 浅灰 */
-  --color-bg: #ffffff;
-  --color-bg-secondary: #f5f5f7;
+  /* 背景：浅蓝渐变 + 纯白卡片 */
+  --color-bg: #f5f7fa;
+  --color-bg-gradient: linear-gradient(135deg, #f5f7fa 0%, #e8f0fe 100%);
+  --color-bg-secondary: #e8f0fe;
   --color-card: #ffffff;
 
   /* 文字：层次分明 */
@@ -31,12 +34,17 @@
   --color-success: #30d158;
   --color-danger: #ff3b30;
 
-  /* ==================== 阴影：轻柔自然 ==================== */
+  /* ==================== 阴影：轻柔自然 + 蓝色光晕 ==================== */
   --shadow-xs: 0 1px 3px rgba(0, 0, 0, 0.04);
   --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.08);
   --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.12);
   --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.16);
   --shadow-xl: 0 16px 64px rgba(0, 0, 0, 0.20);
+
+  /* 蓝色光晕阴影（用于卡片） */
+  --shadow-blue-sm: 0 2px 8px rgba(0, 113, 227, 0.08);
+  --shadow-blue-md: 0 4px 16px rgba(0, 113, 227, 0.12);
+  --shadow-blue-lg: 0 8px 32px rgba(0, 113, 227, 0.16);
 
   /* ==================== 圆角：大而柔和 ==================== */
   --radius-sm: 8px;
@@ -83,7 +91,7 @@ body {
   font-weight: 400;
   letter-spacing: -0.022em;
   color: var(--color-text);
-  background: var(--color-bg);
+  background: var(--color-bg-gradient);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
@@ -263,17 +271,19 @@ h1, h2, h3, h4, h5, h6 {
   border-radius: var(--radius-2xl);
 }
 
-/* ==================== 卡片：轻盈浮动 ==================== */
+/* ==================== 卡片：蓝色光晕浮动 ==================== */
 .card {
   background: var(--color-card);
   border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow-blue-md);
+  border: 1px solid rgba(0, 113, 227, 0.1);
   overflow: hidden;
   transition: all var(--duration-normal) var(--ease-out);
 }
 
 .card:hover {
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--shadow-blue-lg);
+  border-color: rgba(0, 113, 227, 0.2);
   transform: translateY(-4px);
 }
 
@@ -281,7 +291,7 @@ h1, h2, h3, h4, h5, h6 {
   padding: var(--space-xl);
 }
 
-/* ==================== 输入框：简洁边框 ==================== */
+/* ==================== 输入框：蓝色聚焦 ==================== */
 .input {
   width: 100%;
   padding: 12px 16px;
@@ -292,14 +302,15 @@ h1, h2, h3, h4, h5, h6 {
   line-height: 1.47059;
   letter-spacing: -0.022em;
   color: var(--color-text);
-  background: var(--color-bg);
+  background: #ffffff;
   transition: all var(--duration-fast) var(--ease-out);
 }
 
 .input:focus {
   outline: none;
   border-color: var(--color-accent);
-  box-shadow: 0 0 0 4px rgba(0, 113, 227, 0.1);
+  background: #ffffff;
+  box-shadow: 0 0 0 4px rgba(0, 113, 227, 0.12);
 }
 
 .input::placeholder {

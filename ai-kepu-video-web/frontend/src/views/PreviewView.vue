@@ -35,48 +35,72 @@
 
         <section class="preview-panel">
           <div class="media-stage">
-            <div class="render-canvas" :style="renderCanvasStyle">
-              <img
-                v-if="currentSegment?.image_url && !imageError"
-                :key="`${currentIndex}-${currentSegment.image_url}`"
-                :src="currentSegment.image_url"
-                :alt="`当前分镜 ${currentIndex + 1}`"
-                :style="previewImageStyle"
-                @error="handlePreviewImageError"
-                @load="handlePreviewImageLoad"
-              />
-              <div v-else-if="imageError || currentSegment?.image_status === 'failed'" class="stage-error">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="48" height="48">
-                  <circle cx="12" cy="12" r="10"/>
-                  <line x1="12" y1="8" x2="12" y2="12"/>
-                  <line x1="12" y1="16" x2="12.01" y2="16"/>
-                </svg>
-                <p>图片加载失败</p>
-                <p v-if="currentSegment?.image_error" class="error-detail">{{ currentSegment.image_error }}</p>
+            <div class="stage-topbar">
+              <div class="stage-status">
+                <span class="status-dot"></span>
+                <span>{{ currentSceneLabel }}</span>
               </div>
-              <div v-else class="stage-empty">暂无图片</div>
-              <div v-if="previewSubtitleText" class="subtitle-overlay" :style="subtitleStyle">{{ previewSubtitleText }}</div>
-              <video
-                v-if="precisePreviewUrl"
-                class="precise-video"
-                :src="precisePreviewUrl"
-                controls
-                autoplay
-                playsinline
-              ></video>
-              <button v-if="precisePreviewUrl" type="button" class="close-preview-btn" @click="precisePreviewUrl = ''">关闭精准预览</button>
+              <div class="stage-meta">
+                <span>{{ canvasRatioLabel }}</span>
+                <span>{{ canvasSizeLabel }}</span>
+                <span>{{ totalDurationLabel }}</span>
+              </div>
+            </div>
+
+            <div class="stage-shell">
+              <div class="render-canvas" :style="renderCanvasStyle">
+                <img
+                  v-if="currentSegment?.image_url && !imageError"
+                  :key="`${currentIndex}-${currentSegment.image_url}`"
+                  :src="currentSegment.image_url"
+                  :alt="`当前分镜 ${currentIndex + 1}`"
+                  :style="previewImageStyle"
+                  @error="handlePreviewImageError"
+                  @load="handlePreviewImageLoad"
+                />
+                <div v-else-if="imageError || currentSegment?.image_status === 'failed'" class="stage-error">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="48" height="48">
+                    <circle cx="12" cy="12" r="10"/>
+                    <line x1="12" y1="8" x2="12" y2="12"/>
+                    <line x1="12" y1="16" x2="12.01" y2="16"/>
+                  </svg>
+                  <p>图片加载失败</p>
+                  <p v-if="currentSegment?.image_error" class="error-detail">{{ currentSegment.image_error }}</p>
+                </div>
+                <div v-else class="stage-empty">暂无图片</div>
+                <div v-if="previewSubtitleText" class="subtitle-overlay" :style="subtitleStyle">{{ previewSubtitleText }}</div>
+                <video
+                  v-if="precisePreviewUrl"
+                  class="precise-video"
+                  :src="precisePreviewUrl"
+                  controls
+                  autoplay
+                  playsinline
+                ></video>
+                <button v-if="precisePreviewUrl" type="button" class="close-preview-btn" @click="precisePreviewUrl = ''">关闭精准预览</button>
+              </div>
+            </div>
+
+            <div class="stage-footer">
+              <span>{{ playbackSegmentLabel }}</span>
+              <span>{{ currentSegmentDurationLabel }}</span>
             </div>
           </div>
 
           <div class="playbar">
-            <button type="button" class="play-btn" @click="togglePlayback">
-              <svg v-if="!isPlaying" viewBox="0 0 24 24" fill="currentColor"><polygon points="7 4 20 12 7 20 7 4"/></svg>
-              <svg v-else viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
-            </button>
-            <div class="play-track" @click="seekByClick">
-              <div class="play-fill" :style="{ width: playbackProgress + '%' }"></div>
+            <div class="playback-main">
+              <button type="button" class="play-btn" @click="togglePlayback">
+                <svg v-if="!isPlaying" viewBox="0 0 24 24" fill="currentColor"><polygon points="7 4 20 12 7 20 7 4"/></svg>
+                <svg v-else viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+              </button>
+              <div class="play-track" @click="seekByClick">
+                <div class="play-fill" :style="{ width: playbackProgress + '%' }"></div>
+              </div>
             </div>
-            <span class="play-time">{{ playTimeLabel }}</span>
+            <div class="playback-meta">
+              <span class="play-time">{{ playTimeLabel }}</span>
+              <span class="play-segment">{{ playbackSegmentLabel }}</span>
+            </div>
             <button type="button" class="preview-action-btn" :disabled="renderingPreview" @click="onRenderPrecisePreview">
               {{ renderingPreview ? '生成中...' : '生成最终效果预览' }}
             </button>
@@ -135,14 +159,14 @@
             <label class="field">
               <span>重配音音色</span>
               <select v-model="selectedVoiceType" class="voice-select">
-                <option v-for="voice in voiceOptions" :key="voice.id" :value="voice.id">{{ voice.name }} · {{ voice.gender === 'female' ? '女声' : '男声' }}</option>
+                <option v-for="voice in voiceOptions" :key="voice.id" :value="voice.id">{{ voice.name }} · {{ voiceGenderLabel(voice.gender) }}</option>
               </select>
             </label>
 
             <div class="edit-actions">
               <button type="button" class="secondary-btn" @click="saveCurrentText">保存文案</button>
               <button type="button" class="primary-btn" @click="onRegenerateImage(currentIndex)">重生图片</button>
-              <button type="button" class="primary-btn" @click="onRegenerateAudio(currentIndex)">重配音</button>
+              <button type="button" class="primary-btn" @click="onRegenerateAudio(currentIndex)">重生配音</button>
             </div>
           </div>
 
@@ -231,7 +255,7 @@ import SegmentCard from '../components/SegmentCard.vue'
 const route = useRoute()
 const router = useRouter()
 const taskId = route.params.taskId
-const baseURL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8001'
+const baseURL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:2002'
 const loading = ref(true)
 const renderingPreview = ref(false)
 const segments = ref([])
@@ -393,14 +417,29 @@ const segmentPlaybackRatio = computed(() => {
 })
 const playTimeLabel = computed(() => {
   const total = timeline.value.total
-  return `${formatTime(playbackTime.value)} / ${formatTime(total)} · ${currentIndex.value + 1}/${segments.value.length}`
+  return `${formatTime(playbackTime.value)} / ${formatTime(total)}`
+})
+const playbackSegmentLabel = computed(() => `${currentIndex.value + 1}/${segments.value.length || 0}`)
+const currentSceneLabel = computed(() => `镜头 ${String(currentIndex.value + 1).padStart(2, '0')}`)
+const currentSegmentDurationLabel = computed(() => `${formatTime(currentDuration.value)} / 镜头`)
+const totalDurationLabel = computed(() => `${formatTime(timeline.value.total)} 总长`)
+const canvasSizeLabel = computed(() => {
+  const canvas = renderConfig.value.canvas || {}
+  return `${Number(canvas.width || 1920)}x${Number(canvas.height || 1080)}`
+})
+const canvasRatioLabel = computed(() => {
+  if (renderConfig.value.ratio) return renderConfig.value.ratio
+  const canvas = renderConfig.value.canvas || {}
+  return ratioLabelForCanvas(Number(canvas.width || 1920), Number(canvas.height || 1080))
 })
 const renderCanvasStyle = computed(() => {
   const canvas = renderConfig.value.canvas || {}
   const width = Number(canvas.width || 1920)
   const height = Number(canvas.height || 1080)
+  const ratio = width / Math.max(1, height)
   return {
     aspectRatio: `${width} / ${height}`,
+    '--canvas-ratio': ratio,
   }
 })
 const canvasAspectRatio = computed(() => {
@@ -414,7 +453,7 @@ const previewImageStyle = computed(() => {
   const shift = buildAnimationShift(Number(animation.anim_type || 0), progress)
   return {
     transform: `translate(${shift.x}%, ${shift.y}%) scale(${scale})`,
-    opacity: previewOpacity(progress),
+    opacity: isPlaying.value ? previewOpacity(progress) : 1,
   }
 })
 const subtitleStyle = computed(() => {
@@ -496,7 +535,8 @@ async function loadVoices() {
     voiceOptions.value = voices
     if (!selectedVoiceType.value && voices.length > 0) {
       const mizai = voices.find(voice => voice.name === '米仔')
-      selectedVoiceType.value = taskVoiceType.value || mizai?.id || voices[0].id
+      const mimoDefault = voices.find(voice => voice.id === '冰糖')
+      selectedVoiceType.value = taskVoiceType.value || mizai?.id || mimoDefault?.id || voices[0].id
     }
   } catch (error) {
     console.warn('[PreviewView] 音色列表加载失败:', error)
@@ -823,6 +863,12 @@ function voiceName(voiceType) {
   return voiceOptions.value.find(voice => voice.id === voiceType)?.name || ''
 }
 
+function voiceGenderLabel(gender) {
+  if (gender === 'female') return '女声'
+  if (gender === 'male') return '男声'
+  return '自动'
+}
+
 function downloadAsset(asset) {
   const url = asset.download_url || asset.file_url || asset.url
   if (url) {
@@ -1028,6 +1074,26 @@ function formatTime(seconds) {
   return `${minutes}:${String(remain).padStart(2, '0')}`
 }
 
+function ratioLabelForCanvas(width, height) {
+  const ratio = width / Math.max(1, height)
+  if (Math.abs(ratio - 16 / 9) < 0.08) return '16:9'
+  if (Math.abs(ratio - 9 / 16) < 0.08) return '9:16'
+  if (Math.abs(ratio - 3 / 4) < 0.08) return '3:4'
+  const divisor = gcd(Math.round(width), Math.round(height))
+  return `${Math.round(width / divisor)}:${Math.round(height / divisor)}`
+}
+
+function gcd(a, b) {
+  let x = Math.abs(a)
+  let y = Math.abs(b)
+  while (y) {
+    const next = x % y
+    x = y
+    y = next
+  }
+  return x || 1
+}
+
 function cleanSubtitleText(text) {
   return String(text || '')
     .trim()
@@ -1084,7 +1150,7 @@ function previewOpacity(progress) {
 <style scoped>
 .preview-view {
   height: 100vh;
-  background: var(--color-bg);
+  background: #f3f5f8;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1092,7 +1158,7 @@ function previewOpacity(progress) {
 
 .workbench {
   height: calc(100vh - 64px);
-  padding: 12px 16px;
+  padding: 12px;
   overflow: hidden;
 }
 
@@ -1100,7 +1166,7 @@ function previewOpacity(progress) {
   height: 100%;
   min-height: 0;
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr) 300px;
+  grid-template-columns: minmax(230px, 260px) minmax(520px, 1fr) minmax(270px, 292px);
   gap: 12px;
   overflow: hidden;
 }
@@ -1118,16 +1184,9 @@ function previewOpacity(progress) {
 .edit-panel {
   min-height: 0;
   background: var(--color-card);
-  border: none;
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-md);
-  transition: all var(--duration-normal) var(--ease-out);
-}
-
-.storyboard-panel:hover,
-.preview-panel:hover,
-.edit-panel:hover {
-  box-shadow: var(--shadow-lg);
+  border: 1px solid rgba(29, 29, 31, 0.08);
+  border-radius: 18px;
+  box-shadow: 0 10px 30px rgba(20, 23, 31, 0.06);
 }
 
 .storyboard-panel,
@@ -1138,35 +1197,35 @@ function previewOpacity(progress) {
 }
 
 .panel-title {
-  height: 56px;
+  height: 52px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 20px;
-  border-bottom: 1px solid var(--color-divider);
+  padding: 0 16px;
+  border-bottom: 1px solid rgba(29, 29, 31, 0.08);
 }
 
 .panel-title h2 {
-  font-size: 17px;
+  font-size: 15px;
   font-weight: 600;
-  letter-spacing: -0.022em;
+  letter-spacing: 0;
   color: var(--color-text);
 }
 
 .panel-title span {
-  font-size: 14px;
+  font-size: 12px;
   color: var(--color-text-tertiary);
-  letter-spacing: -0.016em;
+  letter-spacing: 0;
 }
 
 .segment-list {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 10px;
+  padding: 8px;
   display: grid;
   align-content: start;
-  gap: 8px;
+  gap: 6px;
 }
 
 .preview-panel {
@@ -1179,24 +1238,102 @@ function previewOpacity(progress) {
 .media-stage {
   position: relative;
   min-height: 0;
-  background: #111318;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.055), rgba(255,255,255,0)),
+    #0b0d11;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  padding: 14px 16px 12px;
+}
+
+.stage-topbar,
+.stage-footer {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: rgba(245, 247, 250, 0.74);
+  font-size: 11px;
+  letter-spacing: 0;
+}
+
+.stage-topbar {
+  padding-bottom: 10px;
+}
+
+.stage-footer {
+  padding-top: 10px;
+}
+
+.stage-status,
+.stage-meta {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.stage-status {
+  color: rgba(255, 255, 255, 0.9);
+  font-weight: 600;
+}
+
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #5ee0a0;
+  box-shadow: 0 0 12px rgba(94, 224, 160, 0.72);
+}
+
+.stage-meta {
+  overflow: hidden;
+  justify-content: flex-end;
+}
+
+.stage-meta span,
+.stage-footer span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stage-meta span {
+  padding: 3px 7px;
+  border: 1px solid rgba(255,255,255,0.11);
+  border-radius: 999px;
+  background: rgba(255,255,255,0.055);
+}
+
+.stage-shell {
+  min-width: 0;
+  min-height: 0;
   display: grid;
   place-items: center;
-  overflow: hidden;
-  padding: 18px;
+  container-type: size;
+  border-radius: 14px;
+  background:
+    linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px),
+    linear-gradient(0deg, rgba(255,255,255,0.025) 1px, transparent 1px),
+    #08090c;
+  background-size: 28px 28px;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.055);
 }
 
 .render-canvas {
   position: relative;
-  width: 100%;
-  height: 100%;
-  max-width: 100%;
-  max-height: 100%;
+  width: min(100cqw, calc(100cqh * var(--canvas-ratio)));
+  height: min(100cqh, calc(100cqw / var(--canvas-ratio)));
   background: #000;
   overflow: hidden;
   container-type: size;
-  box-shadow: 0 12px 36px rgba(0,0,0,0.25);
-  object-fit: contain;
+  border-radius: 6px;
+  box-shadow:
+    0 22px 80px rgba(0,0,0,0.42),
+    0 0 0 1px rgba(255,255,255,0.08);
 }
 
 .render-canvas img {
@@ -1215,7 +1352,11 @@ function previewOpacity(progress) {
   inset: 0;
   display: grid;
   place-items: center;
-  color: rgba(255,255,255,0.65);
+  color: rgba(255,255,255,0.58);
+  font-size: 13px;
+  background:
+    radial-gradient(circle at center, rgba(255,255,255,0.06), transparent 52%),
+    #050506;
 }
 
 .stage-error {
@@ -1265,6 +1406,7 @@ function previewOpacity(progress) {
   text-overflow: clip;
   paint-order: stroke fill;
   pointer-events: none;
+  filter: drop-shadow(0 3px 10px rgba(0,0,0,0.38));
 }
 
 .precise-video {
@@ -1279,32 +1421,41 @@ function previewOpacity(progress) {
 
 .close-preview-btn {
   position: absolute;
-  top: 10px;
-  right: 10px;
+  top: 12px;
+  right: 12px;
   z-index: 5;
-  height: 30px;
-  padding: 0 10px;
-  border: 1px solid rgba(255,255,255,0.35);
-  border-radius: 6px;
-  background: rgba(0,0,0,0.62);
+  height: 28px;
+  padding: 0 11px;
+  border: 1px solid rgba(255,255,255,0.24);
+  border-radius: 999px;
+  background: rgba(0,0,0,0.64);
+  backdrop-filter: blur(12px);
   color: #fff;
   font-size: 12px;
   cursor: pointer;
 }
 
 .playbar {
-  min-height: 48px;
+  min-height: 58px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 14px;
+  padding: 0 14px;
+  border-top: 1px solid rgba(29, 29, 31, 0.08);
+  background: #fff;
+}
+
+.playback-main {
+  min-width: 0;
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 0 16px;
-  border-top: 1px solid var(--color-border);
-  flex-wrap: wrap;
+  gap: 12px;
 }
 
 .play-btn {
-  width: 32px;
-  height: 32px;
+  width: 34px;
+  height: 34px;
   border-radius: 50%;
   background: var(--color-primary);
   border: none;
@@ -1318,7 +1469,6 @@ function previewOpacity(progress) {
 
 .play-btn:hover {
   background: var(--color-primary-hover);
-  transform: scale(1.05);
 }
 
 .play-btn:active {
@@ -1332,9 +1482,9 @@ function previewOpacity(progress) {
 
 .play-track {
   flex: 1;
-  height: 4px;
+  height: 6px;
   border-radius: 999px;
-  background: var(--color-border);
+  background: #e8ebf0;
   overflow: hidden;
   cursor: pointer;
 }
@@ -1347,20 +1497,36 @@ function previewOpacity(progress) {
 }
 
 .play-time {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.playback-meta {
+  display: grid;
+  gap: 2px;
+  justify-items: end;
+  line-height: 1.2;
+}
+
+.play-segment {
   font-size: 10px;
   color: var(--color-text-tertiary);
-  font-family: var(--font-mono);
+  white-space: nowrap;
 }
 
 .preview-action-btn {
-  height: 30px;
-  padding: 0 10px;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  background: #fff;
-  color: var(--color-text-secondary);
+  height: 34px;
+  padding: 0 14px;
+  border: 1px solid #111318;
+  border-radius: 999px;
+  background: #111318;
+  color: #fff;
   font-size: 12px;
+  font-weight: 600;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .preview-action-btn:disabled {
@@ -1374,26 +1540,29 @@ function previewOpacity(progress) {
 
 .edit-tabs {
   display: flex;
-  gap: 16px;
-  padding: 16px;
-  border-bottom: 1px solid var(--color-border);
+  gap: 4px;
+  padding: 10px;
+  border-bottom: 1px solid rgba(29, 29, 31, 0.08);
+  background: #fff;
 }
 
 .edit-tabs button {
-  font-size: 13px;
-  font-weight: 500;
-  padding-bottom: 4px;
+  flex: 1;
+  min-height: 30px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
   border: none;
   background: transparent;
   color: var(--color-text-tertiary);
   cursor: pointer;
-  border-bottom: 2px solid transparent;
   transition: all 0.2s;
 }
 
 .edit-tabs button.active {
   color: var(--color-text);
-  border-bottom-color: var(--color-primary);
+  background: #f0f2f5;
+  box-shadow: inset 0 0 0 1px rgba(29, 29, 31, 0.06);
 }
 
 .edit-tabs button:hover {
@@ -1406,30 +1575,32 @@ function previewOpacity(progress) {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 14px;
+  padding: 12px;
   display: grid;
   align-content: start;
-  gap: 14px;
+  gap: 12px;
 }
 
 .upload-box {
-  height: 96px;
-  border: 2px dashed var(--color-border);
+  height: 72px;
+  border: 1px dashed rgba(29, 29, 31, 0.24);
   border-radius: 8px;
-  background: var(--color-bg-secondary);
+  background: #f7f8fa;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 10px;
   color: var(--color-text-tertiary);
   font-size: 12px;
+  font-weight: 600;
   cursor: pointer;
   transition: all 0.2s;
 }
 
 .upload-box:hover {
-  border-color: var(--color-primary);
+  border-color: rgba(29, 29, 31, 0.58);
+  background: #fff;
 }
 
 .upload-box input {
@@ -1437,14 +1608,14 @@ function previewOpacity(progress) {
 }
 
 .upload-box svg {
-  width: 24px;
-  height: 24px;
+  width: 20px;
+  height: 20px;
 }
 
 .undo-image-btn {
-  min-width: 50px;
-  min-height: 52px;
-  border: 1px solid var(--color-border);
+  min-width: 48px;
+  min-height: 48px;
+  border: 1px solid rgba(29, 29, 31, 0.12);
   border-radius: 8px;
   background: #fff;
   color: var(--color-text-secondary);
@@ -1473,22 +1644,22 @@ function previewOpacity(progress) {
 
 .history-strip {
   min-width: 0;
-  min-height: 52px;
+  min-height: 48px;
   display: flex;
-  gap: 8px;
+  gap: 6px;
   overflow-x: auto;
   padding-bottom: 2px;
 }
 
 .history-thumb {
   position: relative;
-  width: 70px;
-  height: 52px;
+  width: 64px;
+  height: 48px;
   flex: 0 0 auto;
   overflow: hidden;
-  border: 2px solid transparent;
+  border: 1px solid transparent;
   border-radius: 8px;
-  background: var(--color-bg-secondary);
+  background: #f1f3f6;
   cursor: pointer;
 }
 
@@ -1525,11 +1696,11 @@ function previewOpacity(progress) {
 
 .voice-select {
   width: 100%;
-  min-height: 38px;
+  min-height: 36px;
   padding: 0 10px;
-  border: 1px solid var(--color-border);
+  border: 1px solid rgba(29, 29, 31, 0.13);
   border-radius: 8px;
-  background: var(--color-bg-secondary);
+  background: #f7f8fa;
   color: var(--color-text);
   outline: none;
   font-size: 12px;
@@ -1549,11 +1720,11 @@ function previewOpacity(progress) {
 
 .mine-input {
   flex: 1;
-  height: 38px;
+  height: 36px;
   padding: 0 12px;
-  border: 1px solid var(--color-border);
+  border: 1px solid rgba(29, 29, 31, 0.13);
   border-radius: 8px;
-  background: var(--color-bg-secondary);
+  background: #f7f8fa;
   color: var(--color-text);
   outline: none;
 }
@@ -1565,8 +1736,8 @@ function previewOpacity(progress) {
 }
 
 .folder-select-btn {
-  height: 38px;
-  padding: 0 16px;
+  height: 36px;
+  padding: 0 12px;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1594,26 +1765,27 @@ function previewOpacity(progress) {
 
 .field {
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
 
 .field span {
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 11px;
+  font-weight: 700;
   color: var(--color-text-secondary);
+  letter-spacing: 0;
 }
 
 .field textarea {
   width: 100%;
-  height: 96px;
+  height: 88px;
   resize: none;
-  padding: 12px;
-  border: 1px solid var(--color-border);
+  padding: 10px;
+  border: 1px solid rgba(29, 29, 31, 0.13);
   border-radius: 8px;
-  background: var(--color-bg-secondary);
+  background: #f7f8fa;
   color: var(--color-text);
   font-size: 12px;
-  line-height: 1.6;
+  line-height: 1.55;
   outline: none;
 }
 
@@ -1624,25 +1796,27 @@ function previewOpacity(progress) {
 }
 
 .edit-actions {
-  display: flex;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: 0.9fr 1fr 1fr;
+  gap: 7px;
 }
 
 .primary-btn,
 .secondary-btn {
   flex: 1;
   justify-content: center;
-  min-height: 40px;
-  border-radius: var(--radius-xl);
-  font-size: 14px;
-  font-weight: 400;
-  letter-spacing: -0.016em;
+  min-height: 34px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0;
   cursor: pointer;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   transition: all var(--duration-normal) var(--ease-out);
-  padding: 10px 16px;
+  padding: 8px 12px;
+  white-space: nowrap;
 }
 
 .primary-btn {
@@ -1662,13 +1836,14 @@ function previewOpacity(progress) {
 }
 
 .secondary-btn {
-  border: 1px solid var(--color-primary);
-  background: transparent;
-  color: var(--color-primary);
+  border: 1px solid rgba(29, 29, 31, 0.16);
+  background: #fff;
+  color: var(--color-text-secondary);
 }
 
 .secondary-btn:hover {
-  background: var(--color-primary-bg);
+  border-color: rgba(29, 29, 31, 0.42);
+  background: #f7f8fa;
 }
 
 .asset-toolbar {
@@ -1687,11 +1862,12 @@ function previewOpacity(progress) {
 .asset-actions button {
   min-height: 30px;
   padding: 0 10px;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border: 1px solid rgba(29, 29, 31, 0.13);
+  border-radius: 999px;
   background: #fff;
   color: var(--color-text-secondary);
   font-size: 12px;
+  font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
 }
@@ -1705,8 +1881,8 @@ function previewOpacity(progress) {
 .download-all-btn {
   width: 100%;
   color: #fff;
-  background: var(--color-dark);
-  border-color: var(--color-dark);
+  background: #111318;
+  border-color: #111318;
 }
 
 .asset-loading {
@@ -1721,9 +1897,9 @@ function previewOpacity(progress) {
 .asset-item {
   display: grid;
   grid-template-columns: 64px minmax(0, 1fr);
-  gap: 10px;
-  padding: 10px;
-  border: 1px solid var(--color-border);
+  gap: 9px;
+  padding: 9px;
+  border: 1px solid rgba(29, 29, 31, 0.1);
   border-radius: 8px;
   background: #fff;
 }
@@ -1807,19 +1983,20 @@ function previewOpacity(progress) {
 }
 
 .export-mode-switch button {
-  min-height: 38px;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
+  min-height: 36px;
+  border: 1px solid rgba(29, 29, 31, 0.13);
+  border-radius: 999px;
   background: #fff;
   color: var(--color-text-secondary);
   font-size: 12px;
+  font-weight: 600;
   cursor: pointer;
 }
 
 .export-mode-switch button.active {
-  border-color: var(--color-primary);
-  background: var(--color-primary-bg);
-  color: var(--color-primary);
+  border-color: #111318;
+  background: #111318;
+  color: #fff;
 }
 
 .full-btn {
@@ -1827,12 +2004,12 @@ function previewOpacity(progress) {
 }
 
 @media (max-width: 1120px) {
-  .workbench {
-    grid-template-columns: 240px minmax(0, 1fr);
+  .workbench-content {
+    grid-template-columns: minmax(220px, 260px) minmax(0, 1fr);
   }
   .edit-panel {
     grid-column: 1 / -1;
-    min-height: 360px;
+    min-height: 320px;
   }
 }
 
@@ -1841,6 +2018,11 @@ function previewOpacity(progress) {
     overflow: auto;
   }
   .workbench {
+    height: auto;
+    overflow: visible;
+    padding: 10px;
+  }
+  .workbench-content {
     height: auto;
     grid-template-columns: 1fr;
     overflow: visible;
@@ -1851,9 +2033,34 @@ function previewOpacity(progress) {
   }
   .preview-panel {
     min-height: 420px;
+    order: -1;
+  }
+  .media-stage {
+    min-height: 360px;
+    padding: 12px;
+  }
+  .stage-topbar,
+  .stage-footer {
+    align-items: flex-start;
+  }
+  .stage-meta {
+    flex-wrap: wrap;
+  }
+  .playbar {
+    grid-template-columns: 1fr;
+    gap: 8px;
+    padding: 10px;
+  }
+  .playback-meta {
+    grid-template-columns: auto auto;
+    justify-content: space-between;
+    justify-items: start;
   }
   .subtitle-overlay {
     width: 90%;
+  }
+  .edit-actions {
+    grid-template-columns: 1fr;
   }
 }
 </style>

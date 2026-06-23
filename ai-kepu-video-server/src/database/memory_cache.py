@@ -1,7 +1,6 @@
 """
 内存缓存客户端
-本地开发用，替代远程 Redis
-接口与 RedisClient 完全兼容
+缓存任务和进度数据
 """
 
 import json
@@ -14,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class MemoryCache:
-    """内存缓存（兼容 RedisClient 接口）"""
+    """内存缓存"""
 
     def __init__(self):
         self._store: Dict[str, Dict[str, Any]] = {}  # key -> {"data": ..., "expire_at": ...}

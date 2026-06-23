@@ -61,8 +61,8 @@ class TaskProgress(BaseModel):
 class TaskResult(BaseModel):
     """任务结果"""
     draft_path: str = Field(..., description="草稿路径")
-    draft_url: Optional[str] = Field(None, description="草稿下载链接（COS CDN）")
-    video_url: Optional[str] = Field(None, description="视频下载链接（COS CDN）")
+    draft_url: Optional[str] = Field(None, description="草稿下载链接")
+    video_url: Optional[str] = Field(None, description="视频下载链接")
     theme: str = Field(..., description="视频主题")
     segments_count: int = Field(..., description="段落数")
     total_duration: Optional[float] = Field(None, description="总时长（秒）")

@@ -114,12 +114,12 @@ const navItems = [
   isolation: isolate;
 }
 
-.logo-icon:hover { box-shadow: 0 0 12px rgba(37, 99, 235, 0.58); }
+.logo-icon:hover { box-shadow: 0 0 16px rgba(0, 113, 227, 0.6); }
 
 .logo-glow {
   position: absolute;
   inset: 0;
-  background: conic-gradient(from 0deg, transparent 0 60deg, #f472b6 120deg, transparent 120deg 180deg, var(--color-primary) 240deg, transparent 240deg 300deg, #818cf8 360deg);
+  background: conic-gradient(from 0deg, transparent 0 60deg, #60a5fa 120deg, transparent 120deg 180deg, var(--color-accent) 240deg, transparent 240deg 300deg, #818cf8 360deg);
   animation: logoSpin 4s linear infinite;
 }
 
@@ -153,9 +153,9 @@ const navItems = [
   z-index: 20;
   width: 3px;
   height: 3px;
-  background: var(--color-primary);
+  background: var(--color-accent);
   border-radius: 50%;
-  box-shadow: 0 0 4px rgba(37, 99, 235, 0.8);
+  box-shadow: 0 0 6px rgba(0, 113, 227, 0.9);
   animation: dotPulse 2.5s linear infinite;
 }
 
@@ -207,8 +207,9 @@ const navItems = [
 }
 
 .nav-tab.active {
-  background: var(--color-bg-secondary);
-  color: var(--color-primary);
+  background: var(--color-accent-light);
+  color: var(--color-accent);
+  font-weight: 600;
 }
 
 .tab-icon,
@@ -247,16 +248,18 @@ const navItems = [
 
 .nav-action.primary {
   padding: 8px 16px;
-  background: var(--color-primary);
-  border: 1px solid var(--color-primary);
+  background: var(--color-accent);
+  border: 1px solid var(--color-accent);
   color: #fff;
   border-radius: 6px;
   font-size: 14px;
   font-weight: 500;
+  box-shadow: 0 2px 8px rgba(0, 113, 227, 0.2);
 }
 
 .nav-action.primary:hover {
-  opacity: 0.9;
+  background: var(--color-accent-hover);
+  box-shadow: 0 4px 12px rgba(0, 113, 227, 0.3);
 }
 
 @keyframes logoSpin { to { transform: rotate(360deg); } }

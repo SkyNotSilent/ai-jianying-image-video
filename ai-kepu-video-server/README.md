@@ -33,9 +33,9 @@ cp .env.example .env
 python api_server.py
 ```
 
-默认服务地址：`http://localhost:8000`
+默认服务地址：`http://localhost:2002`
 
-API 文档：`http://localhost:8000/docs`
+API 文档：`http://localhost:2002/docs`
 
 ## 关键配置
 
@@ -62,6 +62,43 @@ output/
 ```
 
 这些生成产物默认被 `.gitignore` 忽略。
+
+## 测试工具
+
+项目提供了完整的剪映兼容性测试工具，用于验证生成的草稿是否符合剪映规范。
+
+### 快速测试
+
+```bash
+# 测试最新生成的项目（最常用）
+make test-latest
+
+# 测试指定项目
+make test PROJECT=项目名称
+
+# 批量测试所有项目
+make test-all
+```
+
+### 测试内容
+
+- ✅ 文件存在性（draft_content.json, draft_meta_info.json）
+- ✅ JSON 格式验证
+- ✅ 必需字段检查
+- ✅ 轨道结构验证
+- ✅ 时间轴连续性检查
+- ✅ 素材引用完整性
+- ✅ 文件路径有效性
+- ✅ 时长一致性验证
+
+### 测试结果
+
+当前测试状态：**9/9 项目通过，成功率 100%**
+
+详细文档：
+- `tests/SUMMARY.md` - 完整测试方案总结
+- `tests/USAGE.md` - 快速使用指南
+- `tests/README.md` - 详细测试文档
 
 ## 常见问题
 

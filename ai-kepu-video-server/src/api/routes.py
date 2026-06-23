@@ -9,6 +9,7 @@ import logging
 import hashlib
 import os
 import platform
+import requests
 import shutil
 import subprocess
 import time
@@ -18,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
 from threading import Thread, Lock
-from urllib.parse import quote
+from urllib.parse import quote, urlparse, urlunparse
 from fastapi import APIRouter, HTTPException, Query, Body, UploadFile, File, Form, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from .models import CreateTaskRequest, CreateTaskResponse, TaskResponse
@@ -26,6 +27,7 @@ from .task_manager import task_manager, TaskStatus
 from .task_executor import task_executor
 from src.config import Config
 from src.database import mysql_client
+from src.draft.voiceover import MIMO_TTS_VOICES
 from src.utils.path_fixer import (
     apply_content_info,
     apply_extract_path,
@@ -82,6 +84,63 @@ def _normalize_local_media_url(url: Optional[str], request: Request) -> Optional
         return url
     media_path = url.split("/media/", 1)[1]
     return str(request.url_for("media", file_path=media_path))
+
+
+def _build_models_url(base_url: str) -> str:
+    base_url = (base_url or "").strip()
+    if not base_url:
+        raise ValueError("请先填写 Base URL")
+
+    parsed = urlparse(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("Base URL 必须是 http:// 或 https:// 开头的完整地址")
+
+    path = (parsed.path or "").rstrip("/")
+    known_suffixes = (
+        "/chat/completions",
+        "/responses",
+        "/messages",
+        "/images/generations",
+        "/completions",
+    )
+    for suffix in known_suffixes:
+        if path.endswith(suffix):
+            path = path[: -len(suffix)].rstrip("/")
+            break
+
+    if not path.endswith("/models"):
+        path = f"{path}/models" if path else "/models"
+
+    return urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
+
+
+def _extract_model_options(payload) -> List[dict]:
+    if isinstance(payload, dict):
+        raw_items = payload.get("data") or payload.get("models") or payload.get("model_list") or []
+    elif isinstance(payload, list):
+        raw_items = payload
+    else:
+        raw_items = []
+
+    seen = set()
+    models = []
+    for item in raw_items:
+        if isinstance(item, str):
+            model_id = item
+            label = item
+        elif isinstance(item, dict):
+            model_id = item.get("id") or item.get("model") or item.get("name") or item.get("model_name")
+            label = item.get("display_name") or item.get("label") or item.get("name") or model_id
+        else:
+            continue
+
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        models.append({"id": model_id, "label": label or model_id})
+
+    models.sort(key=lambda value: value["id"])
+    return models
 
 
 def _task_ratio(task) -> str:
@@ -830,7 +889,7 @@ def _run_export_job(job_id: str, target: str, use_preview: bool, payload: Option
 
 def _export_mp4(task, segments: List[dict], use_preview: bool) -> dict:
     from src.export.ffmpeg_exporter import FFmpegExporter
-    from src.utils.cos_uploader import COSUploader
+    from src.utils.local_uploader import LocalUploader
 
     output_path = _official_video_path(task)
     preview = _preview_state(task, segments)
@@ -855,7 +914,7 @@ def _export_mp4(task, segments: List[dict], use_preview: bool) -> dict:
             animation_seed=_task_animation_seed(task.task_id),
         )
 
-    video_url = COSUploader().upload(
+    video_url = LocalUploader().upload(
         str(output_path),
         f"{task.task_id}/exports/{output_path.stem}_{_ratio_slug(_task_ratio(task))}_{int(time.time())}.mp4",
     )
@@ -894,11 +953,11 @@ def _build_editable_draft(task, segments: List[dict]) -> Path:
 
 
 def _export_draft(task, segments: List[dict]) -> dict:
-    from src.utils.cos_uploader import COSUploader
+    from src.utils.local_uploader import LocalUploader
 
     draft_path = _build_editable_draft(task, segments)
     zip_path = _pack_draft_zip(task)
-    draft_url = COSUploader().upload(
+    draft_url = LocalUploader().upload(
         str(zip_path),
         f"{task.task_id}/exports/{zip_path.stem}_{_ratio_slug(_task_ratio(task))}_{int(time.time())}.zip",
     )
@@ -969,6 +1028,48 @@ async def update_config(config: dict = Body(...)):
     return Config.save_model_config(config)
 
 
+@router.post("/config/models")
+async def fetch_config_models(config: dict = Body(...)):
+    """根据当前填写的 Base URL 和 API Key 拉取可选模型列表。"""
+    protocol = (config.get("protocol") or "openai").lower()
+    base_url = config.get("base_url") or config.get("api_url") or ""
+    api_key = config.get("api_key") or config.get("token") or ""
+    if not api_key:
+        raise HTTPException(status_code=400, detail="请先填写 API Key")
+
+    try:
+        models_url = _build_models_url(base_url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    headers = {"Accept": "application/json"}
+    if protocol == "anthropic":
+        headers["x-api-key"] = api_key
+        headers["anthropic-version"] = "2023-06-01"
+    else:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    try:
+        response = requests.get(models_url, headers=headers, timeout=20)
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"模型列表请求失败: {e}")
+
+    if response.status_code >= 400:
+        message = response.text[:300] if response.text else response.reason
+        raise HTTPException(status_code=502, detail=f"模型列表请求失败 ({response.status_code}): {message}")
+
+    try:
+        payload = response.json()
+    except ValueError:
+        raise HTTPException(status_code=502, detail="模型列表接口没有返回 JSON")
+
+    models = _extract_model_options(payload)
+    if not models:
+        raise HTTPException(status_code=502, detail="没有从响应中解析到模型列表")
+
+    return {"models_url": models_url, "models": models}
+
+
 @router.get("/render-config")
 async def get_render_config():
     """获取前端实时预览和 FFmpeg 导出共用的渲染参数。"""
@@ -980,10 +1081,14 @@ async def get_render_config():
 @router.get("/voices")
 async def get_voices():
     """
-    获取可用的 TTS 音色列表
+    获取当前 TTS provider 可用的音色列表。
 
-    返回所有启用的豆包 TTS 音色配置（从数据库读取）
+    豆包模式从数据库读取；小米 MiMo 模式返回官方预置音色。
     """
+    tts_config = Config.tts_config()
+    if (tts_config.get("provider") or "doubao").lower() == "mimo":
+        return MIMO_TTS_VOICES
+
     voices = mysql_client.get_enabled_voices()
 
     if not voices:
@@ -995,7 +1100,8 @@ async def get_voices():
             "id": v["voice_id"],
             "name": v["name"],
             "gender": v["gender"],
-            "description": v.get("description", "")
+            "description": v.get("description", ""),
+            "provider": "doubao",
         }
         for v in voices
     ]
@@ -1080,14 +1186,14 @@ async def create_task_from_images(
     )
 
     try:
-        from src.utils.cos_uploader import COSUploader
+        from src.utils.local_uploader import LocalUploader
 
         draft_name = _safe_draft_name(name or theme, task_id)
         draft_path = Path("output") / draft_name
         images_dir = draft_path / "images"
         images_dir.mkdir(parents=True, exist_ok=True)
 
-        cos_uploader = COSUploader()
+        local_uploader = LocalUploader()
         segments_data = []
 
         for index, file in enumerate(images):
@@ -1101,8 +1207,8 @@ async def create_task_from_images(
             with open(local_path, "wb") as f:
                 shutil.copyfileobj(file.file, f)
 
-            cos_path = f"{task_id}/images/{local_filename}"
-            image_url = cos_uploader.upload(str(local_path), cos_path)
+            storage_path = f"{task_id}/images/{local_filename}"
+            image_url = local_uploader.upload(str(local_path), storage_path)
 
             segments_data.append({
                 "segment_index": index,
@@ -1304,7 +1410,7 @@ async def list_tasks(
     - **limit**: 每页数量（默认 20，最大 100）
     - **offset**: 偏移量（默认 0）
     """
-    tasks = mysql_client.list_tasks(status=status, limit=limit, offset=offset)
+    tasks = task_manager.list_tasks(status=status, limit=limit, offset=offset)
     return tasks
 
 
@@ -1332,6 +1438,10 @@ async def get_segments(task_id: str, request: Request):
             'image_prompt': seg.get('image_prompt') or '',
             'image_url': _normalize_local_media_url(seg.get('image_url'), request),
             'audio_url': _normalize_local_media_url(seg.get('audio_url'), request),
+            'image_status': seg.get('image_status') or 'completed',
+            'image_error': seg.get('image_error'),
+            'audio_status': seg.get('audio_status') or 'completed',
+            'audio_error': seg.get('audio_error'),
             'duration': seg.get('duration'),
             'created_at': seg.get('created_at'),
             'updated_at': seg.get('updated_at'),
@@ -1377,7 +1487,7 @@ async def render_task_preview(
         raise HTTPException(status_code=404, detail="段落不存在")
 
     from src.export.ffmpeg_exporter import FFmpegExporter, build_animation_params
-    from src.utils.cos_uploader import COSUploader
+    from src.utils.local_uploader import LocalUploader
 
     seed = _task_animation_seed(task_id)
     all_animation_params = build_animation_params(len(segments), seed)
@@ -1416,7 +1526,7 @@ async def render_task_preview(
         animation_params=animation_params,
     )
 
-    preview_url = COSUploader().upload(str(video_path), f"{task_id}/previews/{filename}")
+    preview_url = LocalUploader().upload(str(video_path), f"{task_id}/previews/{filename}")
     manifest = None
     if segment_index is None:
         manifest = _write_preview_manifest(task, video_path, preview_url, segments)
@@ -1807,23 +1917,23 @@ async def regenerate_image(task_id: str, segment_index: int):
     )
     logger.info(f"[{task_id}] 图片生成完成: {image_path}")
 
-    # 上传到 COS
-    from src.utils.cos_uploader import COSUploader
+    # 保存到本地媒体目录
+    from src.utils.local_uploader import LocalUploader
     from pathlib import Path
 
     image_url = None
     if image_path and Path(image_path).exists():
-        logger.info(f"[{task_id}] 图片文件存在，开始上传到 COS...")
+        logger.info(f"[{task_id}] 图片文件存在，开始保存到本地媒体目录...")
         try:
-            cos_uploader = COSUploader()
+            local_uploader = LocalUploader()
             image_filename = Path(image_path).name
-            cos_path = f"{task_id}/images/{image_filename}"
-            logger.info(f"[{task_id}] COS 路径: {cos_path}")
-            image_url = cos_uploader.upload(image_path, cos_path)
-            logger.info(f"[{task_id}] 图片上传成功: {image_url}")
+            storage_path = f"{task_id}/images/{image_filename}"
+            logger.info(f"[{task_id}] 本地媒体路径: {storage_path}")
+            image_url = local_uploader.upload(image_path, storage_path)
+            logger.info(f"[{task_id}] 图片保存成功: {image_url}")
         except Exception as e:
-            logger.error(f"[{task_id}] 图片上传失败: {e}")
-            logger.exception(f"[{task_id}] 上传错误详情:")
+            logger.error(f"[{task_id}] 图片保存失败: {e}")
+            logger.exception(f"[{task_id}] 保存错误详情:")
     else:
         logger.error(f"[{task_id}] 图片文件不存在: {image_path}")
 
@@ -1901,20 +2011,20 @@ async def regenerate_audio(
     )
     logger.info(f"[{task_id}] 音频生成完成: {audio_path}")
 
-    # 上传到 COS
-    from src.utils.cos_uploader import COSUploader
+    # 保存到本地媒体目录
+    from src.utils.local_uploader import LocalUploader
     from pathlib import Path
 
     audio_url = None
     if audio_path and Path(audio_path).exists():
         try:
-            cos_uploader = COSUploader()
+            local_uploader = LocalUploader()
             audio_filename = Path(audio_path).name
-            cos_path = f"{task_id}/audio/{audio_filename}"
-            audio_url = cos_uploader.upload(audio_path, cos_path)
-            logger.info(f"[{task_id}] 段落 {segment_index} 音频重新生成并上传成功: {audio_url}")
+            storage_path = f"{task_id}/audio/{audio_filename}"
+            audio_url = local_uploader.upload(audio_path, storage_path)
+            logger.info(f"[{task_id}] 段落 {segment_index} 音频重新生成并保存成功: {audio_url}")
         except Exception as e:
-            logger.warning(f"[{task_id}] 段落 {segment_index} 音频上传失败: {e}")
+            logger.warning(f"[{task_id}] 段落 {segment_index} 音频保存失败: {e}")
 
     # 更新数据库
     mysql_client.update_segment(task_id, segment_index, {
@@ -1944,7 +2054,7 @@ async def upload_image(task_id: str, segment_index: int, file: UploadFile = File
     - **segment_index**: 段落索引
     - **file**: 图片文件
     """
-    from src.utils.cos_uploader import COSUploader
+    from src.utils.local_uploader import LocalUploader
     from pathlib import Path
     import shutil
 
@@ -1983,18 +2093,18 @@ async def upload_image(task_id: str, segment_index: int, file: UploadFile = File
     with open(local_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    # 上传到 COS
+    # 保存到本地媒体目录
     image_url = None
     try:
-        cos_uploader = COSUploader()
-        cos_path = f"{task_id}/images/{local_filename}"
-        logger.info(f"[{task_id}] COS 路径: {cos_path}")
-        image_url = cos_uploader.upload(str(local_path), cos_path)
-        logger.info(f"[{task_id}] 图片上传成功: {image_url}")
+        local_uploader = LocalUploader()
+        storage_path = f"{task_id}/images/{local_filename}"
+        logger.info(f"[{task_id}] 本地媒体路径: {storage_path}")
+        image_url = local_uploader.upload(str(local_path), storage_path)
+        logger.info(f"[{task_id}] 图片保存成功: {image_url}")
     except Exception as e:
-        logger.error(f"[{task_id}] 图片上传失败: {e}")
-        logger.exception(f"[{task_id}] 上传错误详情:")
-        raise HTTPException(status_code=500, detail=f"图片上传失败: {e}")
+        logger.error(f"[{task_id}] 图片保存失败: {e}")
+        logger.exception(f"[{task_id}] 保存错误详情:")
+        raise HTTPException(status_code=500, detail=f"图片保存失败: {e}")
 
     # 更新数据库
     logger.info(f"[{task_id}] 更新数据库...")

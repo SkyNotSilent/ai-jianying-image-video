@@ -72,6 +72,7 @@ npm run dev
 - 前端使用 Vue 3 + Vite
 - 后端使用 FastAPI + Python 3.9
 - 素材库按 `segment_index` 排序展示（播放顺序）
+- 本地维护巡检：在 `ai-kepu-video-server/` 下运行 `python scripts/maintenance_report.py --dry-run` 查看日志、数据库、媒体目录体量和未引用素材；只有显式使用 `--apply` 才会删除未被数据库引用的媒体文件。
 - **任务失败不能丢已生成内容**：任何任务被标记为 `failed` 时，已经生成的分镜文本、图片 prompt、图片、音频、草稿文件等资产必须继续入库并在素材库/预览页正常展示；失败状态只表示后续流程停止，不代表清空或隐藏已有资产。
 - **超时失败也要先保资产**：自动超时、手动失败、异常失败前，必须尽量保存当前已生成的 `task_segments` 和 `task_assets`，让用户能查看、替换、重新生成或基于已有素材继续处理。
 
@@ -90,11 +91,25 @@ npm run dev
 
 ### 生图模块
 
-独立配置，使用 OpenAI 兼容的 `/v1/images/generations` 接口。
+使用 **Agnes Image 2.1 Flash**，OpenAI 兼容 images/generations 接口：
+
+- **API URL**：`https://apihub.agnes-ai.com/v1/images/generations`
+- **模型**：`agnes-image-2.1-flash`
+- **价格**：当前免费
+- **配置方式**：`api_url` + `api_key` + `model`
+- **核心文件**：`src/media/image_generator.py`
+- **请求格式注意**：Agnes 的 `response_format` 必须放在 `extra_body.response_format`，不能放在请求体顶层
+- **免费限速注意**：附件文档未列出明确 RPM；当前按公开资料的免费 `RPM 20` 处理，项目内生图请求至少间隔 3 秒，`IMAGE_CONCURRENCY` 保持 `1`，遇到 429 按 `retry-after` 或 60 秒等待后重试
 
 ### TTS 模块
 
-独立配置，使用豆包 TTS API（provider-specific 参数，不统一）。
+独立配置，按 `tts.provider` 分发到不同 TTS provider，任务创建和重配音接口仍统一使用 `voice_type` 作为音色 ID：
+
+- **豆包 TTS**：`provider=doubao`，保留现有 `api_url/appid/token/cluster/default_voice` 配置，音色列表来自本地 SQLite。
+- **小米 MiMo TTS**：`provider=mimo`，配置保存在 `tts.mimo.base_url/api_key/model/default_voice/format/style_prompt`。
+- **小米接口注意**：MiMo TTS 不走 `/v1/audio/speech`，而是请求 OpenAI 兼容的 `/v1/chat/completions`；待合成文本放在 assistant message，风格指令放在 user message，音频从 `choices[0].message.audio.data` 读取 base64 后写出 wav。
+- **小米预置音色**：`mimo_default/冰糖/茉莉/苏打/白桦/Mia/Chloe/Milo/Dean`；`/ai/native/video/kepu/voices` 会根据当前 TTS provider 动态返回豆包或小米音色。
+- **VoiceClone 注意**：小米文档没有远端保存 `voice_id` 机制；后续接入声音克隆时，每次请求都需要携带本地参考音频 DataURL。
 
 ## 存储配置
 

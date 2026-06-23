@@ -23,7 +23,7 @@
         v-if="status === 'processing' && progress && total"
         :percentage="Math.round((progress / total) * 100)"
         :stroke-width="3"
-        color="var(--color-primary)"
+        color="var(--color-accent)"
         :show-text="false"
         class="step-progress"
       />
@@ -65,7 +65,7 @@ const stepLabel = computed(() => getStepLabel(props.name))
   background: var(--color-border);
   transition: background 0.3s;
 }
-.step-processing .indicator-dot { background: var(--color-primary); box-shadow: 0 0 0 4px var(--accent-glow); }
+.step-processing .indicator-dot { background: var(--color-accent); box-shadow: 0 0 0 4px rgba(0, 113, 227, 0.15); }
 .step-completed .indicator-dot { background: var(--color-success); }
 .step-failed .indicator-dot { background: var(--color-danger); }
 
@@ -80,7 +80,7 @@ const stepLabel = computed(() => getStepLabel(props.name))
   padding: 12px 14px;
   border: 1px solid var(--color-border);
 }
-.step-processing .step-body { border-color: rgba(37, 99, 235, 0.5); border-left: 2px solid var(--color-primary); box-shadow: var(--shadow-xs); }
+.step-processing .step-body { border-color: rgba(0, 113, 227, 0.3); border-left: 2px solid var(--color-accent); box-shadow: 0 2px 8px rgba(0, 113, 227, 0.08); }
 
 .step-header { display: flex; justify-content: space-between; align-items: center; }
 .step-name { font-size: 14px; font-weight: 500; color: var(--color-text-secondary); }
@@ -93,8 +93,8 @@ const stepLabel = computed(() => getStepLabel(props.name))
   padding: 2px 8px;
   border-radius: 4px;
   font-weight: 600;
-  color: var(--color-primary);
-  background: var(--color-primary-bg);
+  color: var(--color-accent);
+  background: var(--color-accent-light);
 }
 .step-badge.failed { color: var(--color-danger); background: var(--color-danger-bg); }
 

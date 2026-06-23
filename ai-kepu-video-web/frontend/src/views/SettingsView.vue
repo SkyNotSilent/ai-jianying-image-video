@@ -5,7 +5,7 @@
     <main class="settings-main">
       <div class="settings-header">
         <h1>模型配置</h1>
-        <p>统一管理生文、生图、豆包配音和生成并发参数。</p>
+        <p>统一管理生文、生图、配音 Provider 和生成并发参数。</p>
       </div>
 
       <div v-loading="loading" element-loading-text="加载中..." class="settings-content">
@@ -46,7 +46,17 @@
 
           <label class="field">
             <span>Model</span>
-            <input v-model.trim="form.llm.model" class="text-input" placeholder="mimo-v2.5-pro" />
+            <div class="model-picker">
+              <input v-model.trim="form.llm.model" class="text-input" placeholder="mimo-v2.5-pro" />
+              <button class="secondary-btn compact-btn" :disabled="modelLoading.llm" @click="loadModelOptions('llm')">
+                <el-icon v-if="modelLoading.llm" class="is-loading"><Loading /></el-icon>
+                <span>{{ modelLoading.llm ? '获取中' : '获取模型列表' }}</span>
+              </button>
+            </div>
+            <select v-if="modelOptions.llm.length" v-model="form.llm.model" class="text-input model-select">
+              <option value="">请选择模型</option>
+              <option v-for="model in modelOptions.llm" :key="model.id" :value="model.id">{{ model.label }}</option>
+            </select>
           </label>
         </section>
 
@@ -68,7 +78,17 @@
 
           <label class="field">
             <span>Model</span>
-            <input v-model.trim="form.image.model" class="text-input" placeholder="doubao-seedream-4-0-250828" />
+            <div class="model-picker">
+              <input v-model.trim="form.image.model" class="text-input" placeholder="agnes-image-2.1-flash" />
+              <button class="secondary-btn compact-btn" :disabled="modelLoading.image" @click="loadModelOptions('image')">
+                <el-icon v-if="modelLoading.image" class="is-loading"><Loading /></el-icon>
+                <span>{{ modelLoading.image ? '获取中' : '获取模型列表' }}</span>
+              </button>
+            </div>
+            <select v-if="modelOptions.image.length" v-model="form.image.model" class="text-input model-select">
+              <option value="">请选择模型</option>
+              <option v-for="model in modelOptions.image" :key="model.id" :value="model.id">{{ model.label }}</option>
+            </select>
           </label>
 
           <label class="field">
@@ -88,36 +108,89 @@
 
         <section class="settings-card tts-card">
           <div class="card-header">
-            <h2>豆包配音</h2>
-            <span class="card-tag">Doubao TTS</span>
+            <h2>配音模型</h2>
+            <span class="card-tag">{{ form.tts.provider === 'mimo' ? 'MiMo TTS' : 'Doubao TTS' }}</span>
           </div>
 
+          <label class="field provider-field">
+            <span>Provider</span>
+            <div class="protocol-group">
+              <button
+                type="button"
+                class="protocol-btn"
+                :class="{ active: form.tts.provider === 'doubao' }"
+                @click="form.tts.provider = 'doubao'"
+              >豆包 TTS</button>
+              <button
+                type="button"
+                class="protocol-btn"
+                :class="{ active: form.tts.provider === 'mimo' }"
+                @click="useMimoPreset"
+              >小米 MiMo TTS</button>
+            </div>
+          </label>
+
           <div class="fields-row">
-            <label class="field">
+            <label v-if="form.tts.provider === 'doubao'" class="field">
               <span>API URL</span>
               <input v-model.trim="form.tts.api_url" class="text-input" placeholder="https://openspeech.bytedance.com/api/v1/tts" />
             </label>
 
-            <label class="field">
+            <label v-if="form.tts.provider === 'doubao'" class="field">
               <span>App ID</span>
               <input v-model.trim="form.tts.appid" class="text-input" autocomplete="off" placeholder="豆包 TTS App ID" />
             </label>
 
-            <label class="field">
+            <label v-if="form.tts.provider === 'doubao'" class="field">
               <span>Access Token</span>
               <input v-model="form.tts.token" class="text-input" type="password" autocomplete="off" placeholder="豆包语音控制台 Access Token" />
             </label>
 
-            <label class="field">
+            <label v-if="form.tts.provider === 'doubao'" class="field">
               <span>Cluster</span>
               <input v-model.trim="form.tts.cluster" class="text-input" placeholder="volcano_tts" />
               <small class="field-help">标准豆包在线合成默认 volcano_tts；声音复刻或特殊资源按控制台给出的集群填写。</small>
             </label>
 
-            <label class="field">
+            <label v-if="form.tts.provider === 'doubao'" class="field">
               <span>默认音色 ID</span>
               <input v-model.trim="form.tts.default_voice" class="text-input" placeholder="zh_male_jieshuoxiaoming_moon_bigtts" />
             </label>
+
+            <template v-else>
+              <label class="field">
+                <span>Base URL</span>
+                <input v-model.trim="form.tts.mimo.base_url" class="text-input" placeholder="https://token-plan-sgp.xiaomimimo.com/v1" />
+              </label>
+
+              <label class="field">
+                <span>API Key</span>
+                <input v-model="form.tts.mimo.api_key" class="text-input" type="password" autocomplete="off" placeholder="小米 Token Plan API Key" />
+              </label>
+
+              <label class="field">
+                <span>Model</span>
+                <input v-model.trim="form.tts.mimo.model" class="text-input" placeholder="mimo-v2.5-tts" />
+              </label>
+
+              <label class="field">
+                <span>默认音色</span>
+                <select v-model="form.tts.mimo.default_voice" class="text-input">
+                  <option v-for="voice in mimoVoices" :key="voice.id" :value="voice.id">{{ voice.name }}</option>
+                </select>
+              </label>
+
+              <label class="field">
+                <span>音频格式</span>
+                <input v-model.trim="form.tts.mimo.format" class="text-input" placeholder="wav" />
+                <small class="field-help">小米 MiMo TTS 通过 /v1/chat/completions 返回 message.audio.data 的 base64 音频。</small>
+              </label>
+
+              <label class="field">
+                <span>风格指令</span>
+                <input v-model.trim="form.tts.mimo.style_prompt" class="text-input" placeholder="自然清晰，适合中文短视频旁白。" />
+              </label>
+            </template>
           </div>
         </section>
 
@@ -160,12 +233,32 @@ import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
-import { getConfig, updateConfig } from '../api/task'
+import { fetchConfigModels, getConfig, updateConfig } from '../api/task'
 import NavBar from '../components/NavBar.vue'
 
 const router = useRouter()
 const loading = ref(true)
 const saving = ref(false)
+const modelLoading = ref({ llm: false, image: false })
+const modelOptions = ref({ llm: [], image: [] })
+const mimoPreset = {
+  base_url: 'https://token-plan-sgp.xiaomimimo.com/v1',
+  model: 'mimo-v2.5-tts',
+  default_voice: '冰糖',
+  format: 'wav',
+  style_prompt: '自然清晰，适合中文短视频旁白。',
+}
+const mimoVoices = [
+  { id: 'mimo_default', name: 'MiMo 默认' },
+  { id: '冰糖', name: '冰糖 · 女声' },
+  { id: '茉莉', name: '茉莉 · 女声' },
+  { id: '苏打', name: '苏打 · 男声' },
+  { id: '白桦', name: '白桦 · 男声' },
+  { id: 'Mia', name: 'Mia · English Female' },
+  { id: 'Chloe', name: 'Chloe · English Female' },
+  { id: 'Milo', name: 'Milo · English Male' },
+  { id: 'Dean', name: 'Dean · English Male' },
+]
 const form = ref({
   llm: {
     base_url: '',
@@ -180,11 +273,16 @@ const form = ref({
     size: 'auto',
   },
   tts: {
+    provider: 'doubao',
     api_url: '',
     appid: '',
     token: '',
     cluster: 'volcano_tts',
     default_voice: '',
+    mimo: {
+      ...mimoPreset,
+      api_key: '',
+    },
   },
   generation: {
     tts_concurrency: 1,
@@ -221,11 +319,13 @@ async function loadConfig() {
         size: config?.image?.size || 'auto',
       },
       tts: {
+        provider: config?.tts?.provider || 'doubao',
         api_url: config?.tts?.api_url || '',
         appid: config?.tts?.appid || '',
         token: config?.tts?.token || '',
         cluster: config?.tts?.cluster || 'volcano_tts',
         default_voice: config?.tts?.default_voice || '',
+        mimo: normalizeMimoConfig(config?.tts?.mimo),
       },
       generation: {
         tts_concurrency: normalizeConcurrency(config?.generation?.tts_concurrency),
@@ -240,6 +340,43 @@ async function loadConfig() {
   }
 }
 
+async function loadModelOptions(type) {
+  const isImage = type === 'image'
+  const payload = isImage
+    ? {
+        protocol: 'openai',
+        base_url: form.value.image.api_url,
+        api_key: form.value.image.api_key,
+      }
+    : {
+        protocol: form.value.llm.protocol || 'openai',
+        base_url: form.value.llm.base_url,
+        api_key: form.value.llm.api_key,
+      }
+
+  if (!payload.base_url?.trim()) { ElMessage.warning(isImage ? '请先填写生图 API URL' : '请先填写生文 Base URL'); return }
+  if (!payload.api_key?.trim()) { ElMessage.warning(isImage ? '请先填写生图 API Key' : '请先填写生文 API Key'); return }
+
+  modelLoading.value[type] = true
+  try {
+    const result = await fetchConfigModels(payload)
+    modelOptions.value[type] = result?.models || []
+    if (!modelOptions.value[type].length) {
+      ElMessage.warning('没有获取到可选模型')
+      return
+    }
+    if (!form.value[type].model && modelOptions.value[type][0]?.id) {
+      form.value[type].model = modelOptions.value[type][0].id
+    }
+    ElMessage.success(`已获取 ${modelOptions.value[type].length} 个模型`)
+  } catch (error) {
+    console.error('获取模型列表失败:', error)
+    ElMessage.error('获取模型列表失败')
+  } finally {
+    modelLoading.value[type] = false
+  }
+}
+
 async function saveConfig() {
   if (!form.value.llm.base_url.trim()) { ElMessage.warning('请输入生文 Base URL'); return }
   if (!form.value.llm.api_key.trim()) { ElMessage.warning('请输入生文 API Key'); return }
@@ -247,11 +384,19 @@ async function saveConfig() {
   if (!form.value.image.api_url.trim()) { ElMessage.warning('请输入生图 API URL'); return }
   if (!form.value.image.api_key.trim()) { ElMessage.warning('请输入生图 API Key'); return }
   if (!form.value.image.model.trim()) { ElMessage.warning('请输入生图模型'); return }
-  if (!form.value.tts.api_url.trim()) { ElMessage.warning('请输入 TTS API URL'); return }
-  if (!form.value.tts.appid.trim()) { ElMessage.warning('请输入 TTS App ID'); return }
-  if (!form.value.tts.token.trim()) { ElMessage.warning('请输入豆包 Access Token'); return }
-  if (!form.value.tts.cluster.trim()) { ElMessage.warning('请输入 TTS Cluster'); return }
-  if (!form.value.tts.default_voice.trim()) { ElMessage.warning('请输入默认音色'); return }
+  if (form.value.tts.provider === 'mimo') {
+    if (!form.value.tts.mimo.base_url.trim()) { ElMessage.warning('请输入小米 MiMo Base URL'); return }
+    if (!form.value.tts.mimo.api_key.trim()) { ElMessage.warning('请输入小米 MiMo API Key'); return }
+    if (!form.value.tts.mimo.model.trim()) { ElMessage.warning('请输入小米 MiMo TTS 模型'); return }
+    if (!form.value.tts.mimo.default_voice.trim()) { ElMessage.warning('请选择小米默认音色'); return }
+    if (!form.value.tts.mimo.format.trim()) { ElMessage.warning('请输入小米音频格式'); return }
+  } else {
+    if (!form.value.tts.api_url.trim()) { ElMessage.warning('请输入 TTS API URL'); return }
+    if (!form.value.tts.appid.trim()) { ElMessage.warning('请输入 TTS App ID'); return }
+    if (!form.value.tts.token.trim()) { ElMessage.warning('请输入豆包 Access Token'); return }
+    if (!form.value.tts.cluster.trim()) { ElMessage.warning('请输入 TTS Cluster'); return }
+    if (!form.value.tts.default_voice.trim()) { ElMessage.warning('请输入默认音色'); return }
+  }
   form.value.generation.tts_concurrency = normalizeConcurrency(form.value.generation.tts_concurrency)
   form.value.generation.image_concurrency = normalizeConcurrency(form.value.generation.image_concurrency)
 
@@ -272,6 +417,29 @@ function normalizeConcurrency(value) {
   const parsed = Number.parseInt(value, 10)
   if (!Number.isFinite(parsed)) return 1
   return Math.min(8, Math.max(1, parsed))
+}
+
+function normalizeMimoConfig(config = {}) {
+  return {
+    ...mimoPreset,
+    api_key: '',
+    ...(config || {}),
+  }
+}
+
+function useMimoPreset() {
+  const current = form.value.tts.mimo || {}
+  form.value.tts.provider = 'mimo'
+  form.value.tts.mimo = {
+    ...mimoPreset,
+    ...current,
+    api_key: current.api_key || form.value.llm.api_key || '',
+    base_url: current.base_url || mimoPreset.base_url,
+    model: current.model || mimoPreset.model,
+    default_voice: current.default_voice || mimoPreset.default_voice,
+    format: current.format || mimoPreset.format,
+    style_prompt: current.style_prompt || mimoPreset.style_prompt,
+  }
 }
 </script>
 
@@ -305,6 +473,12 @@ function normalizeConcurrency(value) {
   font-size: 14px; outline: none; transition: border-color 0.15s, box-shadow 0.15s;
 }
 .text-input:focus { border-color: var(--color-primary); box-shadow: 0 0 0 3px var(--color-primary-bg); background: var(--color-card); }
+.model-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+.model-select { margin-top: 8px; }
+.compact-btn {
+  min-width: 112px; height: 40px; padding: 0 12px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+}
 .protocol-group { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .protocol-btn {
   height: 38px; border: 1px solid var(--color-border); border-radius: var(--radius-sm);
@@ -325,5 +499,7 @@ function normalizeConcurrency(value) {
   .settings-main { width: calc(100% - 28px); padding: 24px 0 36px; }
   .settings-grid { grid-template-columns: 1fr; }
   .tts-card .fields-row, .runtime-card .fields-row { grid-template-columns: 1fr; }
+  .model-picker { grid-template-columns: 1fr; }
+  .compact-btn { width: 100%; }
 }
 </style>

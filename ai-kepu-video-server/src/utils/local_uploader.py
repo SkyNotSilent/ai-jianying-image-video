@@ -1,6 +1,5 @@
 """
 本地文件上传工具
-本地开发用，替代腾讯云 COS
 文件保存在本地目录，通过 FastAPI 静态文件路由提供访问
 """
 
@@ -16,21 +15,20 @@ logger = logging.getLogger(__name__)
 LOCAL_MEDIA_DIR = Path(__file__).parent.parent.parent / "data" / "media"
 
 # 本地开发服务器地址（会在 api_server.py 中通过挂载 /media 路由来访问）
-LOCAL_BASE_URL = os.environ.get("LOCAL_MEDIA_URL", "http://localhost:8001/media")
+LOCAL_BASE_URL = os.environ.get("LOCAL_MEDIA_URL", "http://localhost:2002/media")
 
 
 class LocalUploader:
-    """本地文件上传器（兼容 COSUploader 接口）"""
+    """本地文件上传器"""
 
     def __init__(self, **kwargs):
-        """初始化，忽略 COS 相关参数"""
         LOCAL_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
-        logger.info(f"本地文件存储目录: {LOCAL_MEDIA_DIR}")
+        logger.debug(f"本地文件存储目录: {LOCAL_MEDIA_DIR}")
 
     def upload(
         self,
         file_path: str,
-        cos_path: Optional[str] = None,
+        storage_path: Optional[str] = None,
         enable_md5: bool = False,
     ) -> str:
         """
@@ -38,7 +36,7 @@ class LocalUploader:
 
         Args:
             file_path: 本地源文件路径
-            cos_path: 存储路径（相对路径）
+            storage_path: 存储路径（相对路径）
             enable_md5: 忽略
 
         Returns:
@@ -48,27 +46,27 @@ class LocalUploader:
         if not file_path.exists():
             raise FileNotFoundError(f"文件不存在: {file_path}")
 
-        if cos_path is None:
+        if storage_path is None:
             draft_name = file_path.stem
-            cos_path = f"{draft_name}/{file_path.name}"
+            storage_path = f"{draft_name}/{file_path.name}"
 
         # 目标路径
-        dest = LOCAL_MEDIA_DIR / cos_path
+        dest = LOCAL_MEDIA_DIR / storage_path
         dest.parent.mkdir(parents=True, exist_ok=True)
 
         # 复制文件
         shutil.copy2(str(file_path), str(dest))
-        logger.info(f"文件保存到本地: {file_path.name} -> {dest}")
+        logger.debug(f"文件保存到本地: {file_path.name} -> {dest}")
 
         # 返回访问 URL
-        url = f"{LOCAL_BASE_URL}/{cos_path}"
-        logger.info(f"本地访问 URL: {url}")
+        url = f"{LOCAL_BASE_URL}/{storage_path}"
+        logger.debug(f"本地访问 URL: {url}")
         return url
 
     def upload_with_progress(
         self,
         file_path: str,
-        cos_path: Optional[str] = None,
+        storage_path: Optional[str] = None,
     ) -> str:
         """带进度的上传（本地直接复制）"""
-        return self.upload(file_path, cos_path)
+        return self.upload(file_path, storage_path)

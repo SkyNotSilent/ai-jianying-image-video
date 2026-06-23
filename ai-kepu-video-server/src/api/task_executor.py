@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 from .task_manager import task_manager, TaskStatus
 from src.core.pipeline import VideoEditorPipeline
-from src.utils.cos_uploader import COSUploader
+from src.utils.local_uploader import LocalUploader
 from src.export.ffmpeg_exporter import FFmpegExporter
 from src.utils.rendering import canvas_for_ratio, normalize_ratio
 from src.config import Config
@@ -29,6 +29,11 @@ def _bounded_concurrency(value, total: int) -> int:
         parsed = 1
     parsed = max(1, min(8, parsed))
     return min(parsed, max(1, total))
+
+
+def _asset_counts(paths: list) -> tuple[int, int]:
+    completed = sum(1 for path in paths if path)
+    return completed, max(0, len(paths) - completed)
 
 
 class TaskExecutor:
@@ -47,13 +52,20 @@ class TaskExecutor:
     def _run_task(self, task_id: str, theme: str, style: str, length: int, voice_type: Optional[str] = None, ratio: str = "16:9", input_mode: str = "script"):
         """执行任务的实际逻辑"""
         import time
-        from src.database import mysql_client
-        from src.utils.cos_uploader import COSUploader
+        from src.database import db_client
 
         task = task_manager.get_task(task_id)
         if not task:
             logger.error(f"[{task_id}] 任务不存在")
             return
+
+        started_at = time.time()
+        pipeline = None
+        segments_count = 0
+        draft_path = None
+        video_path = None
+        image_failures = []
+        voice_failures = []
 
         try:
             # 更新任务状态为处理中
@@ -128,7 +140,7 @@ class TaskExecutor:
             task.start_step("image_prompt_generation")
             image_prompts = []
             for i, seg in enumerate(pipeline.segments):
-                logger.info(f"[{task_id}] 图像描述进度: {i+1}/{segments_count}")
+                logger.debug(f"[{task_id}] 图像描述进度: {i+1}/{segments_count}")
                 prompt = pipeline.image_prompt_agent.generate_prompt(
                     segment_text=seg,
                     summary=pipeline.summary,
@@ -138,6 +150,18 @@ class TaskExecutor:
                 image_prompts.append(prompt)
                 task.update_step_progress("image_prompt_generation", i + 1, segments_count)
             pipeline.image_prompts = image_prompts
+            initial_segments_data = [
+                {
+                    "segment_index": i,
+                    "text": seg,
+                    "image_prompt": image_prompts[i] if i < len(image_prompts) else "",
+                    "image_status": "pending",
+                    "audio_status": "pending",
+                }
+                for i, seg in enumerate(pipeline.segments)
+            ]
+            db_client.save_segments(task_id, initial_segments_data)
+            logger.info(f"[{task_id}] 已提前保存分镜和图片提示词，共 {len(initial_segments_data)} 段")
             logger.info(f"[{task_id}] [3/7] 图像描述生成完成")
             task.complete_step("image_prompt_generation")
 
@@ -147,7 +171,7 @@ class TaskExecutor:
             pipeline.media_paths = [None] * segments_count
 
             def generate_voiceover_item(i: int, seg: str):
-                logger.info(f"[{task_id}] 配音进度: {i+1}/{segments_count}")
+                logger.debug(f"[{task_id}] 配音进度: {i+1}/{segments_count}")
                 try:
                     if tts_concurrency == 1 and i > 0:
                         time.sleep(0.5)
@@ -160,7 +184,7 @@ class TaskExecutor:
                     return i, {"status": "failed", "path": None, "error": str(e)}
 
             def generate_image_item(i: int, prompt: str):
-                logger.info(f"[{task_id}] 图像进度: {i+1}/{segments_count}")
+                logger.debug(f"[{task_id}] 图像进度: {i+1}/{segments_count}")
                 try:
                     path = pipeline.image_generator.generate(
                         prompt,
@@ -175,6 +199,58 @@ class TaskExecutor:
                     logger.error(f"[{task_id}] 图片生成失败 [片段 {i+1}]: {e}")
                     return i, {"status": "failed", "path": None, "error": str(e)}
 
+            local_uploader = LocalUploader()
+            upload_ts = int(time.time())
+
+            def persist_segment_asset(i: int, asset_type: str, path: str = None, url: str = None, error: str = None):
+                upload_error = None
+                if asset_type == "image" and path and Path(path).exists():
+                    try:
+                        image_ext = Path(path).suffix
+                        storage_path = f"{task_id}/images/seg_{i:03d}_{upload_ts}{image_ext}"
+                        url = local_uploader.upload(path, storage_path)
+                    except Exception as e:
+                        upload_error = str(e)
+                        logger.warning(f"[{task_id}] 段落 {i} 图片保存失败: {e}")
+                elif asset_type == "audio" and path and Path(path).exists():
+                    try:
+                        audio_ext = Path(path).suffix
+                        storage_path = f"{task_id}/audio/seg_{i:03d}_{upload_ts}{audio_ext}"
+                        url = local_uploader.upload(path, storage_path)
+                    except Exception as e:
+                        upload_error = str(e)
+                        logger.warning(f"[{task_id}] 段落 {i} 音频保存失败: {e}")
+
+                final_error = error or upload_error
+                status = "failed" if final_error else ("completed" if path else "pending")
+                updates = {}
+                if asset_type == "image":
+                    updates = {"image_path": path, "image_url": url, "image_status": status, "image_error": final_error}
+                    label = f"AI 生成 · 分镜 {i + 1}"
+                    prompt = image_prompts[i] if i < len(image_prompts) else ""
+                    voice = None
+                else:
+                    updates = {"audio_path": path, "audio_url": url, "audio_status": status, "audio_error": final_error}
+                    label = f"配音 · 分镜 {i + 1}"
+                    prompt = None
+                    voice = voice_type
+
+                db_client.update_segment(task_id, i, updates)
+                db_client.save_task_asset(
+                    task_id=task_id,
+                    asset_type=asset_type,
+                    source="generated",
+                    path=path,
+                    url=url,
+                    segment_index=i,
+                    label=label,
+                    prompt=prompt,
+                    text=pipeline.segments[i] if i < len(pipeline.segments) else None,
+                    voice_type=voice,
+                    status=status,
+                    error_message=final_error,
+                )
+
             def generate_voiceovers():
                 task.start_step("voiceover_generation")
                 completed = 0
@@ -188,9 +264,11 @@ class TaskExecutor:
                         i, result = future.result()
                         if result["status"] == "success":
                             pipeline.voiceover_files[i] = result["path"]
+                            persist_segment_asset(i, "audio", path=result["path"])
                         else:
                             failed_items.append({"index": i, "type": "audio", "error": result["error"]})
                             pipeline.voiceover_files[i] = None
+                            persist_segment_asset(i, "audio", error=result["error"])
                         completed += 1
                         task.update_step_progress("voiceover_generation", completed, segments_count)
                 if failed_items:
@@ -211,9 +289,11 @@ class TaskExecutor:
                         i, result = future.result()
                         if result["status"] == "success":
                             pipeline.media_paths[i] = result["path"]
+                            persist_segment_asset(i, "image", path=result["path"])
                         else:
                             failed_items.append({"index": i, "type": "image", "error": result["error"]})
                             pipeline.media_paths[i] = None
+                            persist_segment_asset(i, "image", error=result["error"])
                         completed += 1
                         task.update_step_progress("image_generation", completed, segments_count)
                 if failed_items:
@@ -247,16 +327,16 @@ class TaskExecutor:
             task.complete_step("draft_building")
 
             # 检查草稿目录内容
-            logger.info(f"[{task_id}] 检查草稿目录内容: {draft_dir}")
-            logger.info(f"[{task_id}] draft_path 返回值: {draft_path}")
+            logger.debug(f"[{task_id}] 检查草稿目录内容: {draft_dir}")
+            logger.debug(f"[{task_id}] draft_path 返回值: {draft_path}")
             for item in draft_dir.rglob("*"):
                 if item.is_file():
-                    logger.info(f"[{task_id}]   文件: {item.relative_to(draft_dir)} ({item.stat().st_size} bytes)")
+                    logger.debug(f"[{task_id}]   文件: {item.relative_to(draft_dir)} ({item.stat().st_size} bytes)")
                 elif item.is_dir():
-                    logger.info(f"[{task_id}]   目录: {item.relative_to(draft_dir)}/")
+                    logger.debug(f"[{task_id}]   目录: {item.relative_to(draft_dir)}/")
 
-            # 步骤 6: 打包并上传到 COS
-            logger.info(f"[{task_id}] [6/7] 开始打包并上传到 COS...")
+            # 步骤 6: 打包并保存到本地媒体目录
+            logger.info(f"[{task_id}] [6/7] 开始打包并保存到本地媒体目录...")
             zip_path = None
             draft_url = None
 
@@ -266,17 +346,17 @@ class TaskExecutor:
                     temp_draft = Path(temp_dir) / draft_name
                     temp_draft.mkdir(parents=True, exist_ok=True)
 
-                    logger.info(f"[{task_id}] 创建临时打包目录: {temp_draft}")
+                    logger.debug(f"[{task_id}] 创建临时打包目录: {temp_draft}")
 
                     # 复制所有文件到临时目录
-                    logger.info(f"[{task_id}] 复制草稿文件到临时目录...")
+                    logger.debug(f"[{task_id}] 复制草稿文件到临时目录...")
                     for item in draft_dir.rglob("*"):
                         if item.is_file():
                             rel_path = item.relative_to(draft_dir)
                             dest = temp_draft / rel_path
                             dest.parent.mkdir(parents=True, exist_ok=True)
                             shutil.copy2(item, dest)
-                            logger.info(f"[{task_id}]   复制: {rel_path}")
+                            logger.debug(f"[{task_id}]   复制: {rel_path}")
 
                     # 打包临时目录
                     zip_path = draft_dir / f"{draft_name}.zip"
@@ -288,24 +368,23 @@ class TaskExecutor:
                                 # 使用相对于临时草稿目录的路径
                                 arcname = file_path.relative_to(temp_draft)
                                 zf.write(file_path, arcname)
-                                logger.info(f"[{task_id}]   添加: {arcname}")
+                                logger.debug(f"[{task_id}]   添加: {arcname}")
 
                     zip_size = zip_path.stat().st_size / 1024 / 1024
                     logger.info(f"[{task_id}] 打包完成，大小: {zip_size:.2f} MB")
 
-                # 上传草稿到 COS
+                # 保存草稿包到本地媒体目录
                 try:
-                    cos_uploader = COSUploader()
-                    draft_url = cos_uploader.upload(str(zip_path))
-                    logger.info(f"[{task_id}] 草稿上传成功: {draft_url}")
+                    draft_url = LocalUploader().upload(str(zip_path))
+                    logger.info(f"[{task_id}] 草稿包保存成功: {draft_url}")
                 except Exception as e:
-                    logger.warning(f"[{task_id}] 草稿上传失败（不影响本地草稿）: {e}")
+                    logger.warning(f"[{task_id}] 草稿包保存失败（不影响本地草稿）: {e}")
 
             except Exception as e:
                 logger.warning(f"[{task_id}] 打包失败（不影响草稿）: {e}")
                 logger.exception(f"[{task_id}] 打包错误详情:")
 
-            # 步骤 7: 视频合成并上传到 COS
+            # 步骤 7: 视频合成并保存到本地媒体目录
             logger.info(f"[{task_id}] [7/7] 开始视频合成...")
             task.start_step("video_synthesis")
             video_path = None
@@ -326,13 +405,12 @@ class TaskExecutor:
                 video_size = video_path.stat().st_size / 1024 / 1024
                 logger.info(f"[{task_id}] 视频生成完成，大小: {video_size:.2f} MB")
 
-                # 上传视频到 COS
+                # 保存视频到本地媒体目录
                 try:
-                    cos_uploader = COSUploader()
-                    video_url = cos_uploader.upload(str(video_path))
-                    logger.info(f"[{task_id}] 视频上传成功: {video_url}")
+                    video_url = LocalUploader().upload(str(video_path))
+                    logger.info(f"[{task_id}] 视频保存成功: {video_url}")
                 except Exception as e:
-                    logger.warning(f"[{task_id}] 视频上传失败（不影响本地视频）: {e}")
+                    logger.warning(f"[{task_id}] 视频保存失败（不影响本地视频）: {e}")
 
                 task.complete_step("video_synthesis")
 
@@ -354,10 +432,6 @@ class TaskExecutor:
                 failure_map[idx][ftype] = failure["error"]
 
             segments_data = []
-            cos_uploader = COSUploader()
-
-            import time
-            upload_ts = int(time.time())
 
             for i, seg_text in enumerate(pipeline.segments):
                 image_path = pipeline.media_paths[i] if i < len(pipeline.media_paths) else None
@@ -369,27 +443,8 @@ class TaskExecutor:
                 image_status = "failed" if image_error else ("completed" if image_path else "pending")
                 audio_status = "failed" if audio_error else ("completed" if audio_path else "pending")
 
-                # 上传图片到 COS
                 image_url = None
-                if image_path and Path(image_path).exists():
-                    try:
-                        image_ext = Path(image_path).suffix
-                        cos_path = f"{task_id}/images/seg_{i:03d}_{upload_ts}{image_ext}"
-                        image_url = cos_uploader.upload(image_path, cos_path)
-                        logger.info(f"[{task_id}] 段落 {i} 图片上传成功: {image_url}")
-                    except Exception as e:
-                        logger.warning(f"[{task_id}] 段落 {i} 图片上传失败: {e}")
-
-                # 上传音频到 COS
                 audio_url = None
-                if audio_path and Path(audio_path).exists():
-                    try:
-                        audio_ext = Path(audio_path).suffix
-                        cos_path = f"{task_id}/audio/seg_{i:03d}_{upload_ts}{audio_ext}"
-                        audio_url = cos_uploader.upload(audio_path, cos_path)
-                        logger.info(f"[{task_id}] 段落 {i} 音频上传成功: {audio_url}")
-                    except Exception as e:
-                        logger.warning(f"[{task_id}] 段落 {i} 音频上传失败: {e}")
 
                 seg_data = {
                     'segment_index': i,
@@ -406,50 +461,99 @@ class TaskExecutor:
                 }
                 segments_data.append(seg_data)
 
-                # 保存图片资源（包括失败状态）
-                mysql_client.save_task_asset(
-                    task_id=task_id,
-                    asset_type="image",
-                    source="generated",
-                    path=image_path,
-                    url=image_url,
-                    segment_index=i,
-                    label=f"AI 生成 · 分镜 {i + 1}",
-                    prompt=seg_data["image_prompt"],
-                    text=seg_text,
-                    status=image_status,
-                    error_message=image_error,
-                )
+                # 保存图片资源（包括失败状态）- 容错处理
+                try:
+                    db_client.save_task_asset(
+                        task_id=task_id,
+                        asset_type="image",
+                        source="generated",
+                        path=image_path,
+                        url=image_url,
+                        segment_index=i,
+                        label=f"AI 生成 · 分镜 {i + 1}",
+                        prompt=seg_data["image_prompt"],
+                        text=seg_text,
+                        status=image_status,
+                        error_message=image_error,
+                    )
+                except Exception as e:
+                    logger.warning(f"[{task_id}] 保存图片资源失败 (段落 {i}): {e}")
 
-                # 保存音频资源（包括失败状态）
-                mysql_client.save_task_asset(
-                    task_id=task_id,
-                    asset_type="audio",
-                    source="generated",
-                    path=audio_path,
-                    url=audio_url,
-                    segment_index=i,
-                    label=f"配音 · 分镜 {i + 1}",
-                    text=seg_text,
-                    voice_type=voice_type,
-                    status=audio_status,
-                    error_message=audio_error,
-                )
+                # 保存音频资源（包括失败状态）- 容错处理
+                try:
+                    db_client.save_task_asset(
+                        task_id=task_id,
+                        asset_type="audio",
+                        source="generated",
+                        path=audio_path,
+                        url=audio_url,
+                        segment_index=i,
+                        label=f"配音 · 分镜 {i + 1}",
+                        text=seg_text,
+                        voice_type=voice_type,
+                        status=audio_status,
+                        error_message=audio_error,
+                    )
+                except Exception as e:
+                    logger.warning(f"[{task_id}] 保存音频资源失败 (段落 {i}): {e}")
 
-            mysql_client.save_segments(task_id, segments_data)
+            # 确保段落数据总是被保存，即使资源保存失败
+            try:
+                db_client.save_segments(task_id, segments_data)
+                logger.info(f"[{task_id}] 段落数据保存成功，共 {len(segments_data)} 段")
+            except Exception as e:
+                logger.error(f"[{task_id}] 保存段落数据失败: {e}")
+                # 段落数据保存失败是严重错误，但不应中断后续流程
 
             # 设置任务结果
             task_manager.set_task_result(task_id, draft_path, segments_count, draft_url, video_url)
             task_manager.update_task_status(task_id, TaskStatus.COMPLETED)
 
+            image_ok, image_failed = _asset_counts(pipeline.media_paths)
+            audio_ok, audio_failed = _asset_counts(pipeline.voiceover_files)
+            elapsed = time.time() - started_at
             logger.info(f"[{task_id}] ========== 任务完成 ==========")
-            logger.info(f"[{task_id}] 草稿路径: {draft_path}")
-            logger.info(f"[{task_id}] 段落数: {segments_count}")
+            logger.info(
+                f"[{task_id}] 摘要: 段落={segments_count}, 图片={image_ok}成功/{image_failed}失败, "
+                f"音频={audio_ok}成功/{audio_failed}失败, 草稿={draft_path}, 视频={video_path}, 耗时={elapsed:.1f}s"
+            )
 
         except Exception as e:
+            elapsed = time.time() - started_at
+            image_ok = audio_ok = image_failed = audio_failed = 0
+            if pipeline:
+                image_ok, image_failed = _asset_counts(getattr(pipeline, "media_paths", []) or [])
+                audio_ok, audio_failed = _asset_counts(getattr(pipeline, "voiceover_files", []) or [])
+                try:
+                    if getattr(pipeline, "segments", None):
+                        partial_segments = []
+                        image_prompts = getattr(pipeline, "image_prompts", []) or []
+                        media_paths = getattr(pipeline, "media_paths", []) or []
+                        voiceover_files = getattr(pipeline, "voiceover_files", []) or []
+                        for i, seg_text in enumerate(pipeline.segments):
+                            image_path = media_paths[i] if i < len(media_paths) else None
+                            audio_path = voiceover_files[i] if i < len(voiceover_files) else None
+                            partial_segments.append({
+                                "segment_index": i,
+                                "text": seg_text,
+                                "image_prompt": image_prompts[i] if i < len(image_prompts) else "",
+                                "image_path": image_path,
+                                "image_status": "completed" if image_path else "pending",
+                                "audio_path": audio_path,
+                                "audio_status": "completed" if audio_path else "pending",
+                            })
+                        if partial_segments:
+                            db_client.save_segments(task_id, partial_segments)
+                            logger.info(f"[{task_id}] 失败前已保存阶段性分镜，共 {len(partial_segments)} 段")
+                except Exception as save_error:
+                    logger.warning(f"[{task_id}] 失败后保存阶段性分镜失败: {save_error}")
             logger.error(f"[{task_id}] ========== 任务失败 ==========")
             logger.error(f"[{task_id}] 错误类型: {type(e).__name__}")
             logger.error(f"[{task_id}] 错误信息: {str(e)}")
+            logger.error(
+                f"[{task_id}] 失败摘要: 段落={segments_count}, 图片={image_ok}成功/{image_failed}失败, "
+                f"音频={audio_ok}成功/{audio_failed}失败, 草稿={draft_path}, 视频={video_path}, 耗时={elapsed:.1f}s"
+            )
             logger.exception(f"[{task_id}] 详细堆栈:")
 
             task_manager.set_task_error(task_id, str(e))

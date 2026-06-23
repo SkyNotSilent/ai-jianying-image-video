@@ -247,10 +247,11 @@
         <div v-else-if="configTab === 'clone'" class="tab-body placeholder-body">
           <div class="upload-placeholder">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-            <span>上传 10 秒以上清晰音频</span>
+            <span>声音克隆待接入</span>
           </div>
           <div class="placeholder-list">
-            <div v-for="item in ['我的克隆音色 A', '我的克隆音色 B']" :key="item">{{ item }}<span>未接入</span></div>
+            <div>小米 VoiceClone 每次请求需携带本地参考音频 DataURL<span>无远端 voice_id</span></div>
+            <div>当前已接入小米预置音色，VoiceDesign/VoiceClone 作为下一步能力<span>待接入</span></div>
           </div>
         </div>
 
@@ -477,10 +478,16 @@ onMounted(async () => {
 
   try {
     const voices = await getVoices()
-    voiceOptions.value = voices.map(v => ({ text: `${v.name} (${v.gender === 'female' ? '女' : '男'})`, value: v.id, description: v.description }))
+    voiceOptions.value = voices.map(v => ({
+      text: `${v.name} (${voiceGenderLabel(v.gender)})`,
+      value: v.id,
+      description: v.description,
+      provider: v.provider,
+      language: v.language,
+    }))
     voiceMap.value = voices.reduce((map, v) => { map[v.id] = v.name; return map }, {})
     if (voices.length > 0) {
-      const defaultVoice = voices.find(v => v.name === '米仔') || voices[0]
+      const defaultVoice = voices.find(v => v.name === '米仔') || voices.find(v => v.id === '冰糖') || voices[0]
       form.value.voice_type = defaultVoice.id
       form.value.voice_name = defaultVoice.name
     }
@@ -606,6 +613,12 @@ function removeCustomVisualStyle(value) {
 function selectVoice(voice) {
   form.value.voice_type = voice.value
   form.value.voice_name = voiceMap.value[voice.value] || voice.text
+}
+
+function voiceGenderLabel(gender) {
+  if (gender === 'female') return '女'
+  if (gender === 'male') return '男'
+  return '自动'
 }
 
 function switchInputMode(mode) {
@@ -867,7 +880,10 @@ async function onDeleteTask(task) {
 <style scoped>
 .create-view {
   height: 100vh;
-  background: var(--color-bg);
+  --create-bright-blue: #0a84ff;
+  --create-bright-blue-soft: rgba(10, 132, 255, 0.1);
+  --create-bright-blue-glow: rgba(10, 132, 255, 0.24);
+  background: #fff;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -880,6 +896,7 @@ async function onDeleteTask(task) {
   gap: 12px;
   padding: 12px 16px;
   overflow: hidden;
+  background: #fff;
 }
 
 .editor-panel,
@@ -1207,6 +1224,8 @@ label,
   flex: 1;
   min-height: 340px;
   position: relative;
+  border-radius: var(--radius-sm);
+  background: #fff;
 }
 
 .theme-textarea {
@@ -1221,7 +1240,7 @@ label,
   border-radius: var(--radius-sm);
   resize: none;
   outline: none;
-  background: var(--color-bg-secondary);
+  background: #fff;
 }
 
 .textarea-shell:not(:focus-within) .theme-textarea::placeholder {
@@ -1284,7 +1303,7 @@ label,
 }
 
 .text-bloom {
-  background: linear-gradient(to right, var(--color-text), var(--color-primary), #f472b6);
+  background: linear-gradient(to right, var(--color-text), var(--create-bright-blue), #60a5fa);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -1304,7 +1323,7 @@ label,
 }
 
 .text-push {
-  background: linear-gradient(to bottom right, var(--color-text), var(--color-primary), #f472b6);
+  background: linear-gradient(to bottom right, var(--color-text), var(--create-bright-blue), #60a5fa);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -1324,7 +1343,7 @@ label,
 }
 
 .text-breathe {
-  background: linear-gradient(to right, var(--color-primary), #f472b6, var(--color-primary));
+  background: linear-gradient(to right, var(--create-bright-blue), #1d4ed8, var(--create-bright-blue));
   background-size: 200% auto;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -1367,12 +1386,24 @@ label,
   box-shadow: inset 0 1px 2px rgba(0,0,0,0.06);
 }
 
+.slot-item:nth-child(2) {
+  border-color: rgba(10, 132, 255, 0.36);
+  background: linear-gradient(180deg, #fff, rgba(10, 132, 255, 0.06));
+  box-shadow:
+    inset 0 1px 2px rgba(10, 132, 255, 0.08),
+    0 8px 22px rgba(10, 132, 255, 0.12);
+}
+
 .slot-word {
   opacity: 0;
   font-size: 24px;
   font-weight: 700;
   color: var(--color-text);
   animation: wordSlideUp 0.8s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+.slot-item:nth-child(2) .slot-word {
+  color: var(--create-bright-blue);
 }
 
 @keyframes wordSlideUp {
@@ -1398,7 +1429,7 @@ label,
 }
 
 .text-finale span {
-  color: var(--color-primary);
+  color: var(--create-bright-blue);
 }
 
 .knob-wrapper-header {

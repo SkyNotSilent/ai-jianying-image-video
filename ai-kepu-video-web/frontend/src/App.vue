@@ -11,20 +11,23 @@
 
 <style>
 :root {
-  /* ==================== Apple 配色：极简黑白灰 ==================== */
+  /* ==================== 配色：科技蓝 + 极简黑白 ==================== */
   /* 主色：纯黑（Apple 标志性） */
   --color-primary: #000000;
   --color-primary-hover: #1d1d1f;
   --color-primary-bg: rgba(0, 0, 0, 0.04);
 
-  /* 强调色：Apple 蓝（仅用于交互） */
+  /* 强调色：Apple 蓝（用于交互和视觉重点） */
   --color-accent: #0071e3;
   --color-accent-hover: #0077ed;
+  --color-accent-light: #e8f0fe;
+  --color-accent-subtle: rgba(0, 113, 227, 0.08);
   --accent-glow: rgba(0, 113, 227, 0.2);
 
-  /* 背景：纯白 + 浅灰 */
-  --color-bg: #ffffff;
-  --color-bg-secondary: #f5f5f7;
+  /* 背景：浅蓝渐变 + 纯白卡片 */
+  --color-bg: #f5f7fa;
+  --color-bg-gradient: linear-gradient(135deg, #f5f7fa 0%, #e8f0fe 100%);
+  --color-bg-secondary: #e8f0fe;
   --color-card: #ffffff;
 
   /* 文字：层次分明 */
@@ -46,12 +49,17 @@
   /* 保留兼容性 */
   --color-dark: #1d1d1f;
 
-  /* ==================== 阴影：轻柔自然 ==================== */
+  /* ==================== 阴影：轻柔自然 + 蓝色光晕 ==================== */
   --shadow-xs: 0 1px 3px rgba(0, 0, 0, 0.04);
   --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.08);
   --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.12);
   --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.16);
   --shadow-xl: 0 16px 64px rgba(0, 0, 0, 0.20);
+
+  /* 蓝色光晕阴影（用于卡片） */
+  --shadow-blue-sm: 0 2px 8px rgba(0, 113, 227, 0.08);
+  --shadow-blue-md: 0 4px 16px rgba(0, 113, 227, 0.12);
+  --shadow-blue-lg: 0 8px 32px rgba(0, 113, 227, 0.16);
 
   /* ==================== 圆角：大而柔和 ==================== */
   --radius-sm: 8px;
@@ -100,7 +108,7 @@ body {
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
   color: var(--color-text);
-  background: var(--color-bg);
+  background: var(--color-bg-gradient);
 }
 
 #app {

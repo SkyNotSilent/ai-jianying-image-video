@@ -39,7 +39,7 @@ RUN mkdir -p /app/output/drafts /app/logs
 ENV PYTHONPATH=/app
 
 # 暴露端口
-EXPOSE 8000
+EXPOSE 2002
 
 # 启动命令
-CMD ["uvicorn", "api_server:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
+CMD ["uvicorn", "api_server:app", "--host", "0.0.0.0", "--port", "2002", "--proxy-headers", "--forwarded-allow-ips", "*"]

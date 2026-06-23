@@ -69,34 +69,22 @@ class Config:
     DOUBAO_TTS_CLUSTER: str = _env("DOUBAO_TTS_CLUSTER", "volcano_tts")
     DOUBAO_TTS_DEFAULT_VOICE: str = _env("DOUBAO_TTS_DEFAULT_VOICE", "zh_male_jieshuoxiaoming_moon_bigtts")
 
+    # 小米 MiMo TTS 配置。MiMo TTS 走 /v1/chat/completions，不走 /v1/audio/speech。
+    TTS_PROVIDER: str = _env("TTS_PROVIDER", "doubao")
+    MIMO_TTS_BASE_URL: str = _env("MIMO_TTS_BASE_URL", "https://token-plan-sgp.xiaomimimo.com/v1")
+    MIMO_TTS_API_KEY: str = _env("MIMO_TTS_API_KEY", "")
+    MIMO_TTS_MODEL: str = _env("MIMO_TTS_MODEL", "mimo-v2.5-tts")
+    MIMO_TTS_DEFAULT_VOICE: str = _env("MIMO_TTS_DEFAULT_VOICE", "冰糖")
+    MIMO_TTS_FORMAT: str = _env("MIMO_TTS_FORMAT", "wav")
+    MIMO_TTS_STYLE_PROMPT: str = _env("MIMO_TTS_STYLE_PROMPT", "自然清晰，适合中文短视频旁白。")
+
     # 图像生成配置
     SEEDREAM_API_KEY: str = _env("SEEDREAM_API_KEY", "")
-    SEEDREAM_API_URL: str = _env("SEEDREAM_API_URL", "https://api.openai.com/v1/images/generations")
-    SEEDREAM_MODEL: str = _env("SEEDREAM_MODEL", "gpt-image-1")
-
-    # 腾讯云 COS 配置
-    COS_SECRET_ID: str = _env("COS_SECRET_ID", "")
-    COS_SECRET_KEY: str = _env("COS_SECRET_KEY", "")
-    COS_REGION: str = _env("COS_REGION", "ap-guangzhou")
-    COS_BUCKET: str = _env("COS_BUCKET", "")
-    COS_BUCKET_DIR: str = _env("COS_BUCKET_DIR", "kepu")
-    COS_CDN_DOMAIN: str = _env("COS_CDN_DOMAIN", "")
-
-    # MySQL 配置
-    MYSQL_HOST: str = _env("MYSQL_HOST", "127.0.0.1")
-    MYSQL_PORT: int = _env_int("MYSQL_PORT", 3306)
-    MYSQL_USER: str = _env("MYSQL_USER", "root")
-    MYSQL_PASSWORD: str = _env("MYSQL_PASSWORD", "")
-    MYSQL_DATABASE: str = _env("MYSQL_DATABASE", "ai_kepu")
-
-    # Redis 配置
-    REDIS_HOST: str = _env("REDIS_HOST", "127.0.0.1")
-    REDIS_PORT: int = _env_int("REDIS_PORT", 6379)
-    REDIS_DB: int = _env_int("REDIS_DB", 0)
-    REDIS_PASSWORD: str = _env("REDIS_PASSWORD", "")
+    SEEDREAM_API_URL: str = _env("SEEDREAM_API_URL", "https://apihub.agnes-ai.com/v1/images/generations")
+    SEEDREAM_MODEL: str = _env("SEEDREAM_MODEL", "agnes-image-2.1-flash")
 
     # 日志配置
-    LOG_LEVEL: str = _env("LOG_LEVEL", "DEBUG")
+    LOG_LEVEL: str = _env("LOG_LEVEL", "INFO")
 
     CONFIG_FILE: Path = BASE_DIR / "data" / "config.json"
     LEGACY_CONFIG_FILE: Path = Path("data/config.json")
@@ -117,11 +105,20 @@ class Config:
                 "size": _env("SEEDREAM_SIZE", "auto"),
             },
             "tts": {
+                "provider": cls.TTS_PROVIDER,
                 "api_url": cls.DOUBAO_TTS_API_URL,
                 "appid": cls.DOUBAO_TTS_APPID,
                 "token": cls.DOUBAO_TTS_TOKEN,
                 "cluster": cls.DOUBAO_TTS_CLUSTER,
                 "default_voice": cls.DOUBAO_TTS_DEFAULT_VOICE,
+                "mimo": {
+                    "base_url": cls.MIMO_TTS_BASE_URL,
+                    "api_key": cls.MIMO_TTS_API_KEY,
+                    "model": cls.MIMO_TTS_MODEL,
+                    "default_voice": cls.MIMO_TTS_DEFAULT_VOICE,
+                    "format": cls.MIMO_TTS_FORMAT,
+                    "style_prompt": cls.MIMO_TTS_STYLE_PROMPT,
+                },
             },
             "generation": {
                 "tts_concurrency": _clamp_int(_env("TTS_CONCURRENCY", "1"), 1, 1, 8),
@@ -186,10 +183,12 @@ class Config:
     @classmethod
     def _normalize_tts_config(cls, config: dict) -> None:
         tts = config.setdefault("tts", {})
+        provider = (tts.get("provider") or cls.TTS_PROVIDER or "doubao").strip().lower()
+        tts["provider"] = provider if provider in {"doubao", "mimo"} else "doubao"
         tts["api_url"] = (
             tts.get("api_url")
             or tts.get("url")
-            or tts.get("base_url")
+            or (tts.get("base_url") if tts["provider"] == "doubao" else "")
             or cls.DOUBAO_TTS_API_URL
         )
         tts["appid"] = (
@@ -212,6 +211,25 @@ class Config:
             or tts.get("voice")
             or cls.DOUBAO_TTS_DEFAULT_VOICE
         )
+        mimo_defaults = {
+            "base_url": cls.MIMO_TTS_BASE_URL,
+            "api_key": cls.MIMO_TTS_API_KEY,
+            "model": cls.MIMO_TTS_MODEL,
+            "default_voice": cls.MIMO_TTS_DEFAULT_VOICE,
+            "format": cls.MIMO_TTS_FORMAT,
+            "style_prompt": cls.MIMO_TTS_STYLE_PROMPT,
+        }
+        raw_mimo = tts.get("mimo") if isinstance(tts.get("mimo"), dict) else {}
+        mimo = {
+            key: (raw_mimo.get(key) if raw_mimo.get(key) is not None else default)
+            for key, default in mimo_defaults.items()
+        }
+        mimo["base_url"] = mimo.get("base_url") or cls.MIMO_TTS_BASE_URL
+        mimo["model"] = mimo.get("model") or cls.MIMO_TTS_MODEL
+        mimo["default_voice"] = mimo.get("default_voice") or cls.MIMO_TTS_DEFAULT_VOICE
+        mimo["format"] = (mimo.get("format") or cls.MIMO_TTS_FORMAT).lower()
+        mimo["style_prompt"] = mimo.get("style_prompt") or cls.MIMO_TTS_STYLE_PROMPT
+        tts["mimo"] = mimo
 
     @classmethod
     def _normalize_model_config(cls, config: dict) -> None:
