@@ -21,6 +21,7 @@
     <template #footer>
       <span class="dialog-footer">
         <el-button @click="dialogVisible = false">关闭</el-button>
+        <el-button v-if="recoverLabel" @click="handleRecover">{{ recoverLabel }}</el-button>
         <el-button type="primary" @click="handleRetry">重新生成</el-button>
       </span>
     </template>
@@ -33,15 +34,17 @@ import { ref, watch } from 'vue'
 const props = defineProps({
   visible: { type: Boolean, default: false },
   errorMessage: { type: String, default: '生成过程中出现错误' },
-  errorDetail: { type: String, default: '' }
+  errorDetail: { type: String, default: '' },
+  recoverLabel: { type: String, default: '' }
 })
-const emit = defineEmits(['update:visible', 'retry'])
+const emit = defineEmits(['update:visible', 'retry', 'recover'])
 const dialogVisible = ref(props.visible)
 const activeNames = ref([])
 
 watch(() => props.visible, (val) => { dialogVisible.value = val })
 watch(dialogVisible, (val) => { emit('update:visible', val) })
 const handleRetry = () => { emit('retry'); dialogVisible.value = false }
+const handleRecover = () => { emit('recover'); dialogVisible.value = false }
 </script>
 
 <style scoped>

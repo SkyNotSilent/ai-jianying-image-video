@@ -6,7 +6,6 @@ FFmpeg 视频导出模块
 import json
 import logging
 import random
-import re
 import shutil
 import subprocess
 import tempfile
@@ -16,11 +15,9 @@ from pathlib import Path
 from typing import List, Optional
 
 from src.utils.rendering import subtitle_preset_for_canvas
+from src.utils.subtitle_text import normalize_subtitle_text
 
 logger = logging.getLogger(__name__)
-
-_LEADING_PUNCT = re.compile(r'^[。！？!?…，,；;、：:“”"‘’\'「」『』《》〈〉]+')
-_TRAILING_PUNCT = re.compile(r'[。！？!?…，,；;、：:“”"‘’\'「」『』《》〈〉\s]+$')
 
 DEFAULT_DURATION_US = 4_000_000  # 4s fallback
 DEFAULT_FADE_SECONDS = 0.3
@@ -36,7 +33,7 @@ def _load_render_config(config_path: str = "config/settings.json", canvas_overri
     fps = canvas.get("fps", 30)
     subtitle_preset = subtitle_preset_for_canvas(width, height)
     fontsize = int(height * subtitle_preset["font_size_ratio"])
-    border_width = max(2, int(round(fontsize * 0.05)))
+    border_width = 0
 
     return {
         "canvas": {
@@ -238,10 +235,7 @@ class FFmpegExporter:
     # ── drawtext 字幕 ──────────────────────────────────────────────
 
     def _drawtext_expr(self, text: str) -> str:
-        clean = _LEADING_PUNCT.sub("", text)
-        clean = _TRAILING_PUNCT.sub("", clean)
-        if not clean:
-            clean = text
+        clean = normalize_subtitle_text(text)
 
         escaped = (
             clean.replace("\\", "\\\\")

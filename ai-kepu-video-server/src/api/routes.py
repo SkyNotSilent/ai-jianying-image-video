@@ -12,9 +12,11 @@ import platform
 import requests
 import shutil
 import subprocess
+import tempfile
 import time
 import uuid
 import zipfile
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
@@ -27,7 +29,7 @@ from .task_manager import task_manager, TaskStatus
 from .task_executor import task_executor
 from src.config import Config
 from src.database import mysql_client
-from src.draft.voiceover import MIMO_TTS_VOICES
+from src.draft.voiceover import MIMO_TTS_VOICES, VoiceOverGenerator
 from src.utils.path_fixer import (
     apply_content_info,
     apply_extract_path,
@@ -38,6 +40,7 @@ from src.utils.path_fixer import (
     validate_extract_path,
 )
 from src.utils.rendering import canvas_for_ratio, normalize_ratio
+from src.utils.subtitle_text import normalize_subtitle_text
 
 router = APIRouter(prefix="/ai/native/video/kepu", tags=["tasks"])
 logger = logging.getLogger(__name__)
@@ -47,6 +50,8 @@ ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_UPLOAD_IMAGE_COUNT = 20
 EXPORT_JOBS = {}
 EXPORT_JOBS_LOCK = Lock()
+ALLOWED_DOCUMENT_EXTENSIONS = {".txt", ".md", ".markdown", ".docx", ".pdf"}
+MAX_DOCUMENT_UPLOAD_BYTES = 20 * 1024 * 1024
 
 
 def _safe_draft_name(name: str, task_id: str) -> str:
@@ -63,6 +68,100 @@ def _validate_upload_image(file: UploadFile):
     suffix = Path(file.filename or "").suffix.lower()
     if content_type not in ALLOWED_IMAGE_CONTENT_TYPES and suffix not in ALLOWED_IMAGE_EXTENSIONS:
         raise HTTPException(status_code=400, detail="只支持 JPG、PNG、WEBP 格式的图片")
+
+
+def _decode_plain_text(content: bytes) -> str:
+    for encoding in ("utf-8-sig", "utf-8", "gb18030", "gbk", "big5"):
+        try:
+            return content.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return content.decode("utf-8", errors="ignore")
+
+
+def _normalize_document_text(text: str) -> str:
+    lines = [line.rstrip() for line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    normalized = "\n".join(lines)
+    while "\n\n\n" in normalized:
+        normalized = normalized.replace("\n\n\n", "\n\n")
+    return normalized.strip()
+
+
+def _extract_docx_text(content: bytes) -> str:
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            document_xml = archive.read("word/document.xml")
+    except KeyError:
+        raise HTTPException(status_code=400, detail="DOCX 文件缺少正文内容")
+    except zipfile.BadZipFile:
+        raise HTTPException(status_code=400, detail="DOCX 文件格式无效")
+
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    try:
+        root = ET.fromstring(document_xml)
+    except ET.ParseError:
+        raise HTTPException(status_code=400, detail="DOCX 正文解析失败")
+
+    paragraphs = []
+    for paragraph in root.findall(".//w:p", ns):
+        parts = []
+        for node in paragraph.iter():
+            tag = node.tag.rsplit("}", 1)[-1]
+            if tag == "t" and node.text:
+                parts.append(node.text)
+            elif tag == "tab":
+                parts.append("\t")
+            elif tag in {"br", "cr"}:
+                parts.append("\n")
+        line = "".join(parts).strip()
+        if line:
+            paragraphs.append(line)
+    return "\n\n".join(paragraphs)
+
+
+def _extract_pdf_text(content: bytes) -> str:
+    pdftotext = shutil.which("pdftotext")
+    if not pdftotext:
+        raise HTTPException(status_code=501, detail="当前环境缺少 pdftotext，暂无法解析 PDF")
+
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as temp_file:
+            temp_file.write(content)
+            temp_path = temp_file.name
+        result = subprocess.run(
+            [pdftotext, "-layout", "-enc", "UTF-8", temp_path, "-"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=20,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="PDF 解析超时，请尝试更小的文件")
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
+    if result.returncode != 0:
+        error = result.stderr.decode("utf-8", errors="ignore").strip()
+        raise HTTPException(status_code=400, detail=f"PDF 解析失败：{error or '文件格式无效'}")
+    return result.stdout.decode("utf-8", errors="ignore")
+
+
+def _extract_uploaded_document_text(filename: str, content: bytes) -> tuple[str, str]:
+    suffix = Path(filename or "").suffix.lower()
+    if suffix not in ALLOWED_DOCUMENT_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="只支持 TXT、Markdown、DOCX、PDF 文档")
+    if suffix in {".txt", ".md", ".markdown"}:
+        return _decode_plain_text(content), "text"
+    if suffix == ".docx":
+        return _extract_docx_text(content), "docx"
+    if suffix == ".pdf":
+        return _extract_pdf_text(content), "pdf"
+    raise HTTPException(status_code=400, detail="不支持的文档格式")
 
 
 def _task_animation_seed(task_id: str) -> int:
@@ -84,6 +183,24 @@ def _normalize_local_media_url(url: Optional[str], request: Request) -> Optional
         return url
     media_path = url.split("/media/", 1)[1]
     return str(request.url_for("media", file_path=media_path))
+
+
+def _local_media_url_from_path(path: Optional[str], request: Request) -> Optional[str]:
+    if not path:
+        return None
+    try:
+        resolved = Path(path).resolve()
+    except (OSError, RuntimeError):
+        return None
+
+    for root in (Config.BASE_DIR / "output", Config.BASE_DIR / "data" / "media"):
+        try:
+            root_resolved = root.resolve()
+            rel = resolved.relative_to(root_resolved)
+        except (OSError, ValueError):
+            continue
+        return str(request.url_for("media", file_path=str(rel).replace(os.sep, "/")))
+    return None
 
 
 def _build_models_url(base_url: str) -> str:
@@ -708,7 +825,7 @@ def _write_task_srt(task, segments: List[dict]) -> Path:
         duration = _segment_duration_seconds(seg)
         start = cursor
         end = cursor + duration
-        text = str(seg.get("text") or "").strip()
+        text = normalize_subtitle_text(seg.get("text") or "")
         blocks.append(f"{index}\n{_format_srt_timestamp(start)} --> {_format_srt_timestamp(end)}\n{text}\n")
         cursor = end
     srt_path.write_text("\n".join(blocks), encoding="utf-8")
@@ -787,7 +904,7 @@ def _ensure_task_assets(task, segments: List[dict]):
             "subtitle",
             path=str(srt_path),
             label="项目字幕 SRT",
-            text="\n".join(str(seg.get("text") or "") for seg in segments),
+            text="\n".join(normalize_subtitle_text(seg.get("text") or "") for seg in segments),
         )
 
 
@@ -1028,6 +1145,44 @@ async def update_config(config: dict = Body(...)):
     return Config.save_model_config(config)
 
 
+@router.post("/config/test-tts")
+async def test_tts_config(request: Request, payload: dict = Body(...)):
+    """用当前表单配置合成一句短音频，确认 TTS 配置能真实跑通。"""
+    model_config = Config.load_model_config()
+    incoming_tts = payload.get("tts")
+    if isinstance(incoming_tts, dict):
+        model_config["tts"].update({
+            key: value
+            for key, value in incoming_tts.items()
+            if value is not None
+        })
+    Config._normalize_model_config(model_config)
+
+    test_text = str(payload.get("text") or "InsightCut 配音配置测试成功。")[:80]
+    if (model_config["tts"].get("provider") or "doubao").lower() == "mimo":
+        voice_type = payload.get("voice_type") or (model_config["tts"].get("mimo") or {}).get("default_voice")
+    else:
+        voice_type = payload.get("voice_type") or model_config["tts"].get("default_voice")
+    output_dir = Config.BASE_DIR / "data" / "media" / "_config_tests"
+    filename = f"tts_{uuid.uuid4().hex[:10]}"
+
+    try:
+        generator = VoiceOverGenerator(output_dir=str(output_dir), tts_config=model_config["tts"])
+        audio_path = Path(generator.generate(test_text, filename=filename, voice_type=voice_type))
+    except Exception as exc:
+        logger.exception("TTS 配置测试失败")
+        raise HTTPException(status_code=502, detail=f"TTS 配置测试失败: {exc}") from exc
+
+    media_path = f"_config_tests/{audio_path.name}"
+    return {
+        "ok": True,
+        "provider": model_config["tts"].get("provider"),
+        "auth_method": model_config["tts"].get("auth_method"),
+        "voice_type": voice_type,
+        "url": str(request.url_for("media", file_path=media_path)) if request else f"/media/{media_path}",
+    }
+
+
 @router.post("/config/models")
 async def fetch_config_models(config: dict = Body(...)):
     """根据当前填写的 Base URL 和 API Key 拉取可选模型列表。"""
@@ -1107,12 +1262,39 @@ async def get_voices():
     ]
 
 
+@router.post("/documents/extract-text")
+async def extract_document_text(file: UploadFile = File(...)):
+    """提取上传文档中的纯文本，用于文稿页导入。"""
+    filename = file.filename or ""
+    suffix = Path(filename).suffix.lower()
+    if suffix not in ALLOWED_DOCUMENT_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="只支持 TXT、Markdown、DOCX、PDF 文档")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="文档内容为空")
+    if len(content) > MAX_DOCUMENT_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="文档不能超过 20MB")
+
+    text, document_type = _extract_uploaded_document_text(filename, content)
+    normalized = _normalize_document_text(text)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="未能从文档中提取到可用文字")
+
+    return {
+        "filename": filename,
+        "type": document_type,
+        "text": normalized,
+        "char_count": len(normalized.replace("\n", "")),
+    }
+
+
 @router.post("/tasks", response_model=CreateTaskResponse)
 async def create_task(request: CreateTaskRequest):
     """
     创建视频生成任务
 
-    - **theme**: 视频主题或剧本文案（1-2000字；超过 200 字按用户剧本改写）
+    - **theme**: 视频主题或剧本文案（主题模式 1-100 字；文稿模式 1-5000 字）
     - **style**: 文章风格或“文章风格|画面风格”（默认：温暖感人）
     - **length**: 主题模式下的目标脚本字数（50-2000，默认：300）
     - **voice_type**: TTS 音色 ID（可选）
@@ -1399,6 +1581,7 @@ async def download_video(task_id: str):
 
 @router.get("/tasks", response_model=List[dict])
 async def list_tasks(
+    request: Request,
     status: Optional[str] = Query(None, description="任务状态筛选：pending/processing/completed/failed"),
     limit: int = Query(20, ge=1, le=100, description="每页数量"),
     offset: int = Query(0, ge=0, description="偏移量")
@@ -1411,6 +1594,12 @@ async def list_tasks(
     - **offset**: 偏移量（默认 0）
     """
     tasks = task_manager.list_tasks(status=status, limit=limit, offset=offset)
+    for task in tasks:
+        task["cover_image_url"] = (
+            _normalize_local_media_url(task.get("cover_image_url"), request)
+            or _local_media_url_from_path(task.get("cover_image_path"), request)
+        )
+        task.pop("cover_image_path", None)
     return tasks
 
 
@@ -1675,7 +1864,7 @@ async def download_task_subtitle(task_id: str):
         "subtitle",
         path=str(srt_path),
         label="项目字幕 SRT",
-        text="\n".join(str(seg.get("text") or "") for seg in segments),
+        text="\n".join(normalize_subtitle_text(seg.get("text") or "") for seg in segments),
     )
     return FileResponse(
         path=str(srt_path),

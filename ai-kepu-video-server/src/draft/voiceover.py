@@ -39,14 +39,16 @@ MIMO_TTS_VOICES = [
 class VoiceOverGenerator:
     """配音生成器 - 按配置分发到豆包或小米 MiMo TTS"""
 
-    def __init__(self, output_dir: str = "output/voiceovers"):
+    def __init__(self, output_dir: str = "output/voiceovers", tts_config: dict = None):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.tts_config = Config.tts_config()
+        self.tts_config = tts_config or Config.tts_config()
         self.provider = (self.tts_config.get("provider") or "doubao").lower()
+        self.auth_method = (self.tts_config.get("auth_method") or "access_token").lower()
         self.api_url = self.tts_config.get("api_url") or Config.DOUBAO_TTS_API_URL
         self.appid = self.tts_config.get("appid") or Config.DOUBAO_TTS_APPID
         self.token = self.tts_config.get("token") or Config.DOUBAO_TTS_TOKEN
+        self.api_key = self.tts_config.get("api_key") or Config.DOUBAO_TTS_API_KEY
         self.cluster = self.tts_config.get("cluster") or Config.DOUBAO_TTS_CLUSTER
         self.default_voice = self.tts_config.get("default_voice") or Config.DOUBAO_TTS_DEFAULT_VOICE
         self.mimo_config = self.tts_config.get("mimo") or {}
@@ -89,9 +91,18 @@ class VoiceOverGenerator:
     ) -> str:
         output_path = self._output_path(text, filename)
         logger.debug(f"生成配音: {text[:30]}... -> {output_path}")
-        logger.debug(f"使用 TTS 配置 - APPID: {'已设置' if self.appid else '未设置'}, TOKEN: {'已设置' if self.token else '未设置'}")
+        logger.debug(
+            "使用 TTS 配置 - METHOD: %s, APPID: %s, TOKEN: %s, API_KEY: %s",
+            self.auth_method,
+            "已设置" if self.appid else "未设置",
+            "已设置" if self.token else "未设置",
+            "已设置" if self.api_key else "未设置",
+        )
 
-        if not self.appid or not self.token:
+        if self.auth_method == "api_key":
+            if not self.api_key:
+                raise ValueError("豆包 TTS API Key 配置未完成，请在 API 配置页填写 DOUBAO_TTS_API_KEY")
+        elif not self.appid or not self.token:
             raise ValueError("TTS 配置未完成，请在模型配置页或 .env 中填写 DOUBAO_TTS_APPID / DOUBAO_TTS_TOKEN")
 
         voice = voice_type or self.default_voice
@@ -99,10 +110,20 @@ class VoiceOverGenerator:
 
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer;{self.token}",
         }
+        if self.auth_method == "api_key":
+            headers["X-Api-Key"] = self.api_key
+        else:
+            headers["Authorization"] = f"Bearer;{self.token}"
+
+        app_config = {"cluster": self.cluster}
+        if self.appid:
+            app_config["appid"] = self.appid
+        if self.auth_method != "api_key" and self.token:
+            app_config["token"] = self.token
+
         payload = {
-            "app": {"appid": self.appid, "token": self.token, "cluster": self.cluster},
+            "app": app_config,
             "user": {"uid": "auto_video"},
             "audio": {
                 "voice_type": voice,

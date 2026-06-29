@@ -15,21 +15,21 @@ SUBTITLE_PRESETS: Dict[str, Dict[str, float]] = {
         "y_ratio": 0.88,
         "draft_transform_y": -0.8,
         "draft_base_size": 7.0,
-        "draft_border_width": 40.0,
+        "draft_border_width": 0.0,
     },
     "9:16": {
         "font_size_ratio": 0.038,
         "y_ratio": 0.925,
         "draft_transform_y": -0.85,
         "draft_base_size": 8.0,
-        "draft_border_width": 40.0,
+        "draft_border_width": 0.0,
     },
     "3:4": {
         "font_size_ratio": 0.042,
         "y_ratio": 0.91,
         "draft_transform_y": -0.83,
         "draft_base_size": 7.6,
-        "draft_border_width": 40.0,
+        "draft_border_width": 0.0,
     },
 }
 

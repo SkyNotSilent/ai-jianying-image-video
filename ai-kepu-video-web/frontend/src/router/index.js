@@ -8,15 +8,33 @@ import { createRouter, createWebHistory } from 'vue-router'
 const routes = [
   {
     path: '/',
-    name: 'Create',
-    component: () => import('../views/CreateView.vue'),
-    meta: { title: '创建视频' }
+    name: 'HomeManuscript',
+    component: () => import('../views/ManuscriptView.vue'),
+    meta: { title: '文稿编辑' }
+  },
+  {
+    path: '/manuscript/:draftId?',
+    name: 'Manuscript',
+    component: () => import('../views/ManuscriptView.vue'),
+    meta: { title: '文稿编辑' }
+  },
+  {
+    path: '/assets',
+    name: 'ProjectAssets',
+    component: () => import('../views/ProjectAssetsView.vue'),
+    meta: { title: '项目资产' }
+  },
+  {
+    path: '/production/:draftId',
+    name: 'ProductionSetup',
+    component: () => import('../views/ProductionSetupView.vue'),
+    meta: { title: '视频生产' }
   },
   {
     path: '/settings',
     name: 'Settings',
     component: () => import('../views/SettingsView.vue'),
-    meta: { title: '模型配置' }
+    meta: { title: 'API 配置' }
   },
   {
     path: '/process/:taskId',
@@ -39,8 +57,7 @@ const routes = [
   {
     path: '/result/:taskId',
     name: 'Result',
-    component: () => import('../views/ResultView.vue'),
-    meta: { title: '生成完成' }
+    redirect: to => `/export/${to.params.taskId}`
   }
 ]
 

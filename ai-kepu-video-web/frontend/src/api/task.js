@@ -39,6 +39,28 @@ export function fetchConfigModels(data) {
   })
 }
 
+export function testTtsConfig(data) {
+  return request({
+    url: '/ai/native/video/kepu/config/test-tts',
+    method: 'post',
+    data
+  })
+}
+
+export function extractDocumentText(file) {
+  const formData = new FormData()
+  formData.append('file', file)
+  return request({
+    url: '/ai/native/video/kepu/documents/extract-text',
+    method: 'post',
+    data: formData,
+    headers: {
+      'Content-Type': 'multipart/form-data'
+    },
+    timeout: 120000
+  })
+}
+
 export function getRenderConfig() {
   return request({
     url: '/ai/native/video/kepu/render-config',
@@ -49,9 +71,9 @@ export function getRenderConfig() {
 /**
  * 创建视频生成任务
  * @param {Object} data - 任务参数
- * @param {string} data.theme - 视频主题或剧本文案（最多 2000 字）
+ * @param {string} data.theme - 剧本文稿（后端兼容字段名，最多 5000 字）
  * @param {string} data.style - 文章风格
- * @param {number} data.length - 脚本字数（主题模式使用）
+ * @param {number} data.length - 兼容旧接口的长度参数，文稿生产传 0
  * @param {string} data.visual_style - 画面风格（写实风格/电影级/油彩画/毛毡风）
  * @param {string} data.ratio - 画幅比例（16:9/9:16）
  * @param {string} data.voice_type - TTS 音色 ID（可选）

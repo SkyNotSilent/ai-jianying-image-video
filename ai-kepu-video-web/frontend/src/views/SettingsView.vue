@@ -4,11 +4,22 @@
 
     <main class="settings-main">
       <div class="settings-header">
-        <h1>模型配置</h1>
-        <p>统一管理生文、生图、配音 Provider 和生成并发参数。</p>
+        <h1>API 配置</h1>
+        <p>先完成生文、生图和配音 API 配置，再进入视频生产。</p>
       </div>
 
       <div v-loading="loading" element-loading-text="加载中..." class="settings-content">
+        <section v-if="!loading" class="readiness-summary">
+          <div v-for="item in readinessItems" :key="item.label" :class="['ready-item', item.ready ? 'ok' : 'warn']">
+            <span></span>
+            <div>
+              <strong>{{ item.label }}</strong>
+              <small>{{ item.desc }}</small>
+            </div>
+          </div>
+          <button type="button" class="secondary-btn" @click="router.back()">返回生产</button>
+        </section>
+
         <div v-if="!loading" class="settings-grid">
         <section class="settings-card">
           <div class="card-header">
@@ -131,25 +142,49 @@
           </label>
 
           <div class="fields-row">
+            <label v-if="form.tts.provider === 'doubao'" class="field auth-method-field">
+              <span>豆包认证方式</span>
+              <div class="protocol-group">
+                <button
+                  type="button"
+                  class="protocol-btn"
+                  :class="{ active: form.tts.auth_method === 'access_token' }"
+                  @click="form.tts.auth_method = 'access_token'"
+                >AppID / Access Token</button>
+                <button
+                  type="button"
+                  class="protocol-btn"
+                  :class="{ active: form.tts.auth_method === 'api_key' }"
+                  @click="form.tts.auth_method = 'api_key'"
+                >API Key</button>
+              </div>
+              <small class="field-help">豆包旧版在线合成使用 AppID/Access Token；火山新版语音接口也支持 API Key 鉴权。</small>
+            </label>
+
             <label v-if="form.tts.provider === 'doubao'" class="field">
               <span>API URL</span>
               <input v-model.trim="form.tts.api_url" class="text-input" placeholder="https://openspeech.bytedance.com/api/v1/tts" />
             </label>
 
-            <label v-if="form.tts.provider === 'doubao'" class="field">
+            <label v-if="form.tts.provider === 'doubao' && form.tts.auth_method === 'access_token'" class="field">
               <span>App ID</span>
               <input v-model.trim="form.tts.appid" class="text-input" autocomplete="off" placeholder="豆包 TTS App ID" />
             </label>
 
-            <label v-if="form.tts.provider === 'doubao'" class="field">
+            <label v-if="form.tts.provider === 'doubao' && form.tts.auth_method === 'access_token'" class="field">
               <span>Access Token</span>
               <input v-model="form.tts.token" class="text-input" type="password" autocomplete="off" placeholder="豆包语音控制台 Access Token" />
+            </label>
+
+            <label v-if="form.tts.provider === 'doubao' && form.tts.auth_method === 'api_key'" class="field">
+              <span>API Key</span>
+              <input v-model="form.tts.api_key" class="text-input" type="password" autocomplete="off" placeholder="火山控制台 API Key" />
             </label>
 
             <label v-if="form.tts.provider === 'doubao'" class="field">
               <span>Cluster</span>
               <input v-model.trim="form.tts.cluster" class="text-input" placeholder="volcano_tts" />
-              <small class="field-help">标准豆包在线合成默认 volcano_tts；声音复刻或特殊资源按控制台给出的集群填写。</small>
+              <small class="field-help">旧版在线合成通常为 volcano_tts；如果使用新版资源，请按控制台或接口文档填写对应资源/集群。</small>
             </label>
 
             <label v-if="form.tts.provider === 'doubao'" class="field">
@@ -192,6 +227,14 @@
               </label>
             </template>
           </div>
+
+          <div class="tts-test-row">
+            <button type="button" class="secondary-btn" :disabled="testingTts" @click="testTts">
+              <el-icon v-if="testingTts" class="is-loading"><Loading /></el-icon>
+              <span>{{ testingTts ? '测试中' : '测试配音配置' }}</span>
+            </button>
+            <audio v-if="ttsTestUrl" :src="ttsTestUrl" controls></audio>
+          </div>
         </section>
 
         <section class="settings-card runtime-card">
@@ -209,8 +252,8 @@
 
             <label class="field">
               <span>生图并发</span>
-              <input v-model.number="form.generation.image_concurrency" class="text-input" type="number" min="1" max="8" step="1" />
-              <small class="field-help">默认 1。接口稳定后再逐步调到 2-4。</small>
+              <input v-model.number="form.generation.image_concurrency" class="text-input" type="number" min="1" max="1" step="1" />
+              <small class="field-help">当前 Agnes 免费限速按 20 RPM 处理，生图并发固定为 1。</small>
             </label>
           </div>
         </section>
@@ -229,16 +272,18 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
-import { fetchConfigModels, getConfig, updateConfig } from '../api/task'
+import { fetchConfigModels, getConfig, testTtsConfig, updateConfig } from '../api/task'
 import NavBar from '../components/NavBar.vue'
 
 const router = useRouter()
 const loading = ref(true)
 const saving = ref(false)
+const testingTts = ref(false)
+const ttsTestUrl = ref('')
 const modelLoading = ref({ llm: false, image: false })
 const modelOptions = ref({ llm: [], image: [] })
 const mimoPreset = {
@@ -274,9 +319,11 @@ const form = ref({
   },
   tts: {
     provider: 'doubao',
+    auth_method: 'access_token',
     api_url: '',
     appid: '',
     token: '',
+    api_key: '',
     cluster: 'volcano_tts',
     default_voice: '',
     mimo: {
@@ -290,12 +337,42 @@ const form = ref({
   },
 })
 
+const llmReady = computed(() => Boolean(form.value.llm.base_url && form.value.llm.api_key && form.value.llm.model))
+const imageReady = computed(() => Boolean(form.value.image.api_url && form.value.image.api_key && form.value.image.model))
+const ttsReady = computed(() => {
+  const tts = form.value.tts
+  if (tts.provider === 'mimo') {
+    return Boolean(tts.mimo.base_url && tts.mimo.api_key && tts.mimo.model && tts.mimo.default_voice)
+  }
+  if (tts.auth_method === 'api_key') {
+    return Boolean(tts.api_url && tts.api_key && tts.cluster && tts.default_voice)
+  }
+  return Boolean(tts.api_url && tts.appid && tts.token && tts.cluster && tts.default_voice)
+})
+const readinessItems = computed(() => [
+  {
+    label: '生文 API',
+    ready: llmReady.value,
+    desc: llmReady.value ? `${form.value.llm.model} 已填写` : '缺少 Base URL、API Key 或模型名',
+  },
+  {
+    label: '生图 API',
+    ready: imageReady.value,
+    desc: imageReady.value ? `${form.value.image.model} 已填写` : '缺少 API URL、API Key 或模型名',
+  },
+  {
+    label: 'TTS API',
+    ready: ttsReady.value,
+    desc: ttsReady.value ? `${form.value.tts.provider === 'mimo' ? 'MiMo' : '豆包'} 已填写` : '缺少配音 provider 的必要配置',
+  },
+])
+
 onMounted(loadConfig)
 
 function handleNavigate(tab) {
   if (tab === 'settings') return
   if (tab === 'library') {
-    router.push({ path: '/', query: { tab: 'library' } })
+    router.push('/assets')
     return
   }
   router.push('/')
@@ -320,21 +397,23 @@ async function loadConfig() {
       },
       tts: {
         provider: config?.tts?.provider || 'doubao',
+        auth_method: config?.tts?.auth_method || 'access_token',
         api_url: config?.tts?.api_url || '',
         appid: config?.tts?.appid || '',
         token: config?.tts?.token || '',
+        api_key: config?.tts?.api_key || '',
         cluster: config?.tts?.cluster || 'volcano_tts',
         default_voice: config?.tts?.default_voice || '',
         mimo: normalizeMimoConfig(config?.tts?.mimo),
       },
       generation: {
         tts_concurrency: normalizeConcurrency(config?.generation?.tts_concurrency),
-        image_concurrency: normalizeConcurrency(config?.generation?.image_concurrency),
+        image_concurrency: normalizeImageConcurrency(config?.generation?.image_concurrency),
       },
     }
   } catch (error) {
-    console.error('加载模型配置失败:', error)
-    ElMessage.error('加载模型配置失败')
+    console.error('加载 API 配置失败:', error)
+    ElMessage.error('加载 API 配置失败')
   } finally {
     loading.value = false
   }
@@ -392,24 +471,68 @@ async function saveConfig() {
     if (!form.value.tts.mimo.format.trim()) { ElMessage.warning('请输入小米音频格式'); return }
   } else {
     if (!form.value.tts.api_url.trim()) { ElMessage.warning('请输入 TTS API URL'); return }
-    if (!form.value.tts.appid.trim()) { ElMessage.warning('请输入 TTS App ID'); return }
-    if (!form.value.tts.token.trim()) { ElMessage.warning('请输入豆包 Access Token'); return }
+    if (form.value.tts.auth_method === 'api_key') {
+      if (!form.value.tts.api_key.trim()) { ElMessage.warning('请输入豆包 API Key'); return }
+    } else {
+      if (!form.value.tts.appid.trim()) { ElMessage.warning('请输入 TTS App ID'); return }
+      if (!form.value.tts.token.trim()) { ElMessage.warning('请输入豆包 Access Token'); return }
+    }
     if (!form.value.tts.cluster.trim()) { ElMessage.warning('请输入 TTS Cluster'); return }
     if (!form.value.tts.default_voice.trim()) { ElMessage.warning('请输入默认音色'); return }
   }
   form.value.generation.tts_concurrency = normalizeConcurrency(form.value.generation.tts_concurrency)
-  form.value.generation.image_concurrency = normalizeConcurrency(form.value.generation.image_concurrency)
+  form.value.generation.image_concurrency = normalizeImageConcurrency(form.value.generation.image_concurrency)
 
   saving.value = true
   try {
     const saved = await updateConfig(form.value)
-    form.value = saved
+    form.value = {
+      ...saved,
+      generation: {
+        ...(saved?.generation || {}),
+        image_concurrency: 1,
+      },
+    }
     ElMessage.success('配置已保存')
   } catch (error) {
-    console.error('保存模型配置失败:', error)
-    ElMessage.error('保存模型配置失败')
+    console.error('保存 API 配置失败:', error)
+    ElMessage.error('保存 API 配置失败')
   } finally {
     saving.value = false
+  }
+}
+
+async function testTts() {
+  ttsTestUrl.value = ''
+  if (form.value.tts.provider === 'mimo') {
+    if (!form.value.tts.mimo.base_url.trim() || !form.value.tts.mimo.api_key.trim() || !form.value.tts.mimo.model.trim()) {
+      ElMessage.warning('请先补齐小米 MiMo TTS 配置')
+      return
+    }
+  } else if (form.value.tts.auth_method === 'api_key') {
+    if (!form.value.tts.api_url.trim() || !form.value.tts.api_key.trim() || !form.value.tts.default_voice.trim()) {
+      ElMessage.warning('请先补齐豆包 API Key、API URL 和默认音色')
+      return
+    }
+  } else if (!form.value.tts.api_url.trim() || !form.value.tts.appid.trim() || !form.value.tts.token.trim() || !form.value.tts.default_voice.trim()) {
+    ElMessage.warning('请先补齐豆包 AppID、Access Token、API URL 和默认音色')
+    return
+  }
+
+  testingTts.value = true
+  try {
+    const result = await testTtsConfig({
+      tts: form.value.tts,
+      voice_type: form.value.tts.provider === 'mimo' ? form.value.tts.mimo.default_voice : form.value.tts.default_voice,
+      text: 'InsightCut 配音配置测试成功。',
+    })
+    ttsTestUrl.value = result?.url || ''
+    ElMessage.success('TTS 配置测试通过')
+  } catch (error) {
+    console.error('TTS 配置测试失败:', error)
+    ElMessage.error(error?.response?.data?.detail || 'TTS 配置测试失败')
+  } finally {
+    testingTts.value = false
   }
 }
 
@@ -417,6 +540,10 @@ function normalizeConcurrency(value) {
   const parsed = Number.parseInt(value, 10)
   if (!Number.isFinite(parsed)) return 1
   return Math.min(8, Math.max(1, parsed))
+}
+
+function normalizeImageConcurrency() {
+  return 1
 }
 
 function normalizeMimoConfig(config = {}) {
@@ -451,9 +578,50 @@ function useMimoPreset() {
 .settings-header h1 { font-size: 28px; line-height: 1.2; margin-bottom: 8px; color: var(--color-text); }
 .settings-header p { font-size: 14px; color: var(--color-text-tertiary); }
 .settings-content { min-height: 400px; }
+.readiness-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  gap: 12px;
+  align-items: stretch;
+  margin-bottom: 18px;
+}
+.ready-item {
+  min-height: 72px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: #fff;
+  padding: 12px 14px;
+}
+.ready-item > span {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  border: 2px solid currentColor;
+  flex: 0 0 auto;
+}
+.ready-item.ok { color: var(--color-success); }
+.ready-item.warn { color: var(--color-warning); }
+.ready-item div { display: grid; gap: 3px; min-width: 0; }
+.ready-item strong { color: var(--color-text); font-size: 14px; }
+.ready-item small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.readiness-summary .secondary-btn {
+  height: auto;
+  min-width: 112px;
+}
 .settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
 .tts-card, .runtime-card { grid-column: 1 / -1; }
 .tts-card .fields-row, .runtime-card .fields-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 24px; }
+.auth-method-field { grid-column: 1 / -1; }
 .settings-card {
   background: var(--color-card); border: 1px solid var(--color-border);
   border-radius: var(--radius-sm); padding: 22px; box-shadow: var(--shadow-sm);
@@ -487,6 +655,17 @@ function useMimoPreset() {
 }
 .protocol-btn.active { border-color: var(--color-primary); background: var(--color-primary-bg); color: var(--color-primary); }
 .settings-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px; }
+.tts-test-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-top: 4px;
+}
+
+.tts-test-row audio {
+  width: min(420px, 100%);
+  height: 36px;
+}
 .secondary-btn, .primary-btn {
   height: 40px; padding: 0 22px; border-radius: var(--radius-sm);
   font-size: 14px; font-weight: 600; cursor: pointer; border: none;
@@ -497,6 +676,7 @@ function useMimoPreset() {
 
 @media (max-width: 820px) {
   .settings-main { width: calc(100% - 28px); padding: 24px 0 36px; }
+  .readiness-summary { grid-template-columns: 1fr; }
   .settings-grid { grid-template-columns: 1fr; }
   .tts-card .fields-row, .runtime-card .fields-row { grid-template-columns: 1fr; }
   .model-picker { grid-template-columns: 1fr; }

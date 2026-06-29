@@ -7,7 +7,6 @@ import json
 import logging
 import os
 import random
-import re
 import shutil
 from pathlib import Path
 from typing import List, Optional
@@ -27,10 +26,7 @@ from pyJianYingDraft.metadata.font_meta import FontType
 
 from src.draft.animation_scheduler import AnimationScheduler
 from src.utils.rendering import subtitle_preset_for_canvas
-
-# 字幕首尾不允许出现的标点
-_LEADING_PUNCT  = re.compile(r'^[。！？!?…，,；;、：:“”"‘’\'「」『』《》〈〉]+')
-_TRAILING_PUNCT = re.compile(r'[。！？!?…，,；;、：:“”"‘’\'「」『』《》〈〉\s]+$')
+from src.utils.subtitle_text import normalize_subtitle_text
 
 logger = logging.getLogger(__name__)
 
@@ -253,10 +249,7 @@ class DraftBuilder:
 
             # ── 字幕轨道（带动画）────────────────────────────────────────
             # 字幕参数和 FFmpeg/前端预览共用同一套 ratio preset；首尾不含标点。
-            clean_text = _LEADING_PUNCT.sub('', text)
-            clean_text = _TRAILING_PUNCT.sub('', clean_text)
-            if not clean_text:
-                clean_text = text  # 极端情况兜底
+            clean_text = normalize_subtitle_text(text)
             subtitle_size = self._single_line_subtitle_size(
                 clean_text,
                 width,

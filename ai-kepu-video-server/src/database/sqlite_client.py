@@ -475,14 +475,50 @@ class SQLiteClient:
             cur = conn.cursor()
             if status:
                 cur.execute(
-                    """SELECT t.*, r.draft_url, r.video_url, r.segments_count
+                    """SELECT t.*, r.draft_url, r.video_url, r.segments_count,
+                              (
+                                SELECT s.image_url
+                                FROM task_segments s
+                                WHERE s.task_id = t.task_id
+                                  AND s.image_url IS NOT NULL
+                                  AND TRIM(s.image_url) != ''
+                                ORDER BY s.segment_index ASC
+                                LIMIT 1
+                              ) AS cover_image_url,
+                              (
+                                SELECT s.image_path
+                                FROM task_segments s
+                                WHERE s.task_id = t.task_id
+                                  AND s.image_path IS NOT NULL
+                                  AND TRIM(s.image_path) != ''
+                                ORDER BY s.segment_index ASC
+                                LIMIT 1
+                              ) AS cover_image_path
                        FROM tasks t LEFT JOIN task_results r ON t.task_id = r.task_id
                        WHERE t.status=? ORDER BY t.created_at DESC LIMIT ? OFFSET ?""",
                     (status, limit, offset)
                 )
             else:
                 cur.execute(
-                    """SELECT t.*, r.draft_url, r.video_url, r.segments_count
+                    """SELECT t.*, r.draft_url, r.video_url, r.segments_count,
+                              (
+                                SELECT s.image_url
+                                FROM task_segments s
+                                WHERE s.task_id = t.task_id
+                                  AND s.image_url IS NOT NULL
+                                  AND TRIM(s.image_url) != ''
+                                ORDER BY s.segment_index ASC
+                                LIMIT 1
+                              ) AS cover_image_url,
+                              (
+                                SELECT s.image_path
+                                FROM task_segments s
+                                WHERE s.task_id = t.task_id
+                                  AND s.image_path IS NOT NULL
+                                  AND TRIM(s.image_path) != ''
+                                ORDER BY s.segment_index ASC
+                                LIMIT 1
+                              ) AS cover_image_path
                        FROM tasks t LEFT JOIN task_results r ON t.task_id = r.task_id
                        ORDER BY t.created_at DESC LIMIT ? OFFSET ?""",
                     (limit, offset)

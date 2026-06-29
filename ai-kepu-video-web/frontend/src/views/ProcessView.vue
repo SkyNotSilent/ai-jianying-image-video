@@ -53,9 +53,24 @@
           />
         </div>
       </section>
+
+      <section v-if="taskData.status === 'failed'" class="recovery-panel">
+        <div>
+          <h2>已生成内容仍可查看</h2>
+          <p>任务失败只表示后续流程停止，已经保存的分镜、图片、配音和草稿素材会保留在预览编辑页。</p>
+        </div>
+        <button type="button" class="recover-btn" @click="openRecoveredAssets">查看已保存素材</button>
+      </section>
     </template>
 
-    <ErrorDialog v-model:visible="showError" :error-message="errorMessage" :error-detail="errorDetail" @retry="handleRetry" />
+    <ErrorDialog
+      v-model:visible="showError"
+      :error-message="errorMessage"
+      :error-detail="errorDetail"
+      recover-label="查看已保存素材"
+      @retry="handleRetry"
+      @recover="openRecoveredAssets"
+    />
   </div>
 </template>
 
@@ -66,6 +81,7 @@ import { usePolling } from '../composables/usePolling'
 import ProgressBar from '../components/ProgressBar.vue'
 import StepCard from '../components/StepCard.vue'
 import ErrorDialog from '../components/ErrorDialog.vue'
+import { listDrafts } from '../utils/projectDrafts'
 
 const route = useRoute()
 const router = useRouter()
@@ -136,10 +152,18 @@ function finishLoadingAnimation() {
 }
 
 function leaveProcess() {
-  router.push('/')
+  router.push('/assets')
 }
 
-const handleRetry = () => { router.push('/') }
+const handleRetry = () => {
+  const draft = listDrafts().find((item) => item.created_task_id === taskId)
+  if (draft?.draft_id) {
+    router.push(`/production/${draft.draft_id}`)
+    return
+  }
+  router.push('/assets')
+}
+const openRecoveredAssets = () => { router.push(`/preview/${taskId}`) }
 </script>
 
 <style scoped>
@@ -317,6 +341,41 @@ const handleRetry = () => { router.push('/') }
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px 14px;
+}
+
+.recovery-panel {
+  width: min(760px, 100%);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  border: 1px solid #bde8cf;
+  border-radius: 12px;
+  background: var(--color-success-bg);
+  padding: 16px 18px;
+  color: var(--color-text);
+}
+
+.recovery-panel h2 {
+  font-size: 16px;
+  margin-bottom: 4px;
+}
+
+.recovery-panel p {
+  color: var(--color-text-secondary);
+  font-size: 13px;
+}
+
+.recover-btn {
+  height: 40px;
+  border: 1px solid var(--color-success);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--color-success);
+  padding: 0 16px;
+  font-weight: 800;
+  cursor: pointer;
+  white-space: nowrap;
 }
 
 @keyframes tickPulse {

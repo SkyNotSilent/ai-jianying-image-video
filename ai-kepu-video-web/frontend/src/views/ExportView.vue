@@ -29,7 +29,7 @@
           </div>
           <div>
             <span>剪映草稿</span>
-            <strong :class="{ ok: draftLocalJob?.status === 'completed' || state.outputs.draft.available || state }">{{ draftStatusText }}</strong>
+            <strong :class="{ ok: draftLocalJob?.status === 'completed' || state.outputs.draft.available }">{{ draftStatusText }}</strong>
           </div>
         </section>
 
@@ -40,11 +40,11 @@
             </div>
             <div class="card-copy">
               <h2>直接 MP4 视频</h2>
-              <p>{{ state.preview.valid ? '会直接复用当前最终预览，速度最快。' : '当前最终预览不可复用，会重新生成 MP4。' }}</p>
+              <p>{{ mp4HelpText }}</p>
             </div>
             <div class="card-actions">
               <button type="button" class="primary-btn" :disabled="!state.outputs.mp4.available" @click="downloadMp4">下载 MP4</button>
-              <button type="button" class="secondary-btn" :disabled="mp4Busy" @click="startExport('mp4')">{{ mp4Busy ? '生成中...' : '重新生成 MP4' }}</button>
+              <button type="button" class="secondary-btn" :disabled="mp4Busy" @click="startExport('mp4')">{{ mp4Busy ? '生成中...' : mp4ActionText }}</button>
             </div>
             <p v-if="mp4Job?.status === 'failed'" class="error-text">{{ mp4Job.error || 'MP4 导出失败' }}</p>
           </article>
@@ -90,6 +90,7 @@
             </div>
             <div class="card-actions">
               <button type="button" class="primary-btn" :disabled="draftLocalBusy || !pathCheck.valid" @click="startExport('draft_local')">{{ draftLocalBusy ? '写入中...' : '写入剪映' }}</button>
+              <button type="button" class="secondary-btn" :disabled="!state.outputs.draft.available" @click="downloadDraft">下载草稿 ZIP</button>
             </div>
             <p v-if="draftLocalJob?.status === 'failed'" class="error-text">{{ draftLocalJob.error || '写入剪映失败' }}</p>
             <p v-if="draftJob?.status === 'failed'" class="error-text">{{ draftJob.error || '草稿导出失败' }}</p>
@@ -98,7 +99,6 @@
 
           <div class="footer-actions">
             <button type="button" class="secondary-btn" @click="router.push(`/preview/${taskId}`)">返回编辑</button>
-            <button type="button" class="primary-btn" @click="router.push(`/result/${taskId}`)">查看结果页</button>
           </div>
         </template>
       </div>
@@ -133,6 +133,11 @@ const mp4Busy = computed(() => ['pending', 'processing'].includes(mp4Job.value?.
 const draftBusy = computed(() => ['pending', 'processing'].includes(draftJob.value?.status))
 const draftLocalBusy = computed(() => ['pending', 'processing'].includes(draftLocalJob.value?.status))
 const mp4ActionText = computed(() => state.value?.preview?.valid ? '使用最终预览生成 MP4' : '重新生成 MP4')
+const mp4HelpText = computed(() => {
+  if (state.value?.outputs?.mp4?.available) return 'MP4 已生成，可直接下载。'
+  if (state.value?.preview?.valid) return '会直接复用当前最终预览，速度最快。'
+  return '最终预览未生成或不可复用，需要重新生成 MP4。'
+})
 const extractPlaceholder = computed(() => targetOS.value === 'mac'
   ? '/Users/你的用户名/Movies/JianyingPro/User Data/Projects/com.lveditor.draft'
   : 'D:\\JianyingPro Drafts'
@@ -148,8 +153,8 @@ const previewStatusText = computed(() => {
 const draftStatusText = computed(() => {
   if (draftLocalJob.value?.status === 'completed') return '已写入剪映'
   if (draftLocalBusy.value) return '写入中'
-  if (state.value?.outputs?.draft?.available) return '可浏览器下载'
-  return '可浏览器下载'
+  if (state.value?.outputs?.draft?.available) return '草稿可下载'
+  return '未生成'
 })
 
 onMounted(async () => {
@@ -179,7 +184,7 @@ async function loadState() {
 
 function handleNavigate(tab) {
   if (tab === 'settings') router.push('/settings')
-  else if (tab === 'library') router.push({ path: '/', query: { tab: 'library' } })
+  else if (tab === 'library') router.push('/assets')
   else router.push('/')
 }
 

@@ -105,7 +105,7 @@ npm run dev
 
 独立配置，按 `tts.provider` 分发到不同 TTS provider，任务创建和重配音接口仍统一使用 `voice_type` 作为音色 ID：
 
-- **豆包 TTS**：`provider=doubao`，保留现有 `api_url/appid/token/cluster/default_voice` 配置，音色列表来自本地 SQLite。
+- **豆包 TTS**：`provider=doubao`，支持 `auth_method=access_token` 的 `api_url/appid/token/cluster/default_voice` 旧版配置，也支持 `auth_method=api_key` 的 `api_url/api_key/cluster/default_voice` 火山 API Key 配置；音色列表来自本地 SQLite。
 - **小米 MiMo TTS**：`provider=mimo`，配置保存在 `tts.mimo.base_url/api_key/model/default_voice/format/style_prompt`。
 - **小米接口注意**：MiMo TTS 不走 `/v1/audio/speech`，而是请求 OpenAI 兼容的 `/v1/chat/completions`；待合成文本放在 assistant message，风格指令放在 user message，音频从 `choices[0].message.audio.data` 读取 base64 后写出 wav。
 - **小米预置音色**：`mimo_default/冰糖/茉莉/苏打/白桦/Mia/Chloe/Milo/Dean`；`/ai/native/video/kepu/voices` 会根据当前 TTS provider 动态返回豆包或小米音色。

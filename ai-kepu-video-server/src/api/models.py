@@ -26,7 +26,7 @@ class StepStatus(str, Enum):
 
 class CreateTaskRequest(BaseModel):
     """创建任务请求"""
-    theme: str = Field(..., min_length=1, max_length=2000, description="视频主题或剧本文案")
+    theme: str = Field(..., min_length=1, max_length=5000, description="视频主题或剧本文案")
     name: Optional[str] = Field(None, max_length=100, description="项目名称")
     input_mode: str = Field(default="script", description="输入模式：script=写作模式，theme=主题模式")
     style: str = Field(default="温暖感人", description="文章风格")

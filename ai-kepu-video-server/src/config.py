@@ -64,8 +64,10 @@ class Config:
 
     # 豆包 TTS 配置
     DOUBAO_TTS_API_URL: str = _env("DOUBAO_TTS_API_URL", "https://openspeech.bytedance.com/api/v1/tts")
+    DOUBAO_TTS_AUTH_METHOD: str = _env("DOUBAO_TTS_AUTH_METHOD", "access_token")
     DOUBAO_TTS_APPID: str = _env("DOUBAO_TTS_APPID", "")
     DOUBAO_TTS_TOKEN: str = _env("DOUBAO_TTS_TOKEN", "")
+    DOUBAO_TTS_API_KEY: str = _env("DOUBAO_TTS_API_KEY", "")
     DOUBAO_TTS_CLUSTER: str = _env("DOUBAO_TTS_CLUSTER", "volcano_tts")
     DOUBAO_TTS_DEFAULT_VOICE: str = _env("DOUBAO_TTS_DEFAULT_VOICE", "zh_male_jieshuoxiaoming_moon_bigtts")
 
@@ -106,9 +108,11 @@ class Config:
             },
             "tts": {
                 "provider": cls.TTS_PROVIDER,
+                "auth_method": cls.DOUBAO_TTS_AUTH_METHOD,
                 "api_url": cls.DOUBAO_TTS_API_URL,
                 "appid": cls.DOUBAO_TTS_APPID,
                 "token": cls.DOUBAO_TTS_TOKEN,
+                "api_key": cls.DOUBAO_TTS_API_KEY,
                 "cluster": cls.DOUBAO_TTS_CLUSTER,
                 "default_voice": cls.DOUBAO_TTS_DEFAULT_VOICE,
                 "mimo": {
@@ -185,11 +189,21 @@ class Config:
         tts = config.setdefault("tts", {})
         provider = (tts.get("provider") or cls.TTS_PROVIDER or "doubao").strip().lower()
         tts["provider"] = provider if provider in {"doubao", "mimo"} else "doubao"
+        raw_auth_method = (tts.get("auth_method") or cls.DOUBAO_TTS_AUTH_METHOD or "").strip().lower()
+        if raw_auth_method not in {"access_token", "api_key"}:
+            raw_auth_method = "api_key" if tts.get("api_key") and not (tts.get("appid") and tts.get("token")) else "access_token"
+        tts["auth_method"] = raw_auth_method
         tts["api_url"] = (
             tts.get("api_url")
             or tts.get("url")
             or (tts.get("base_url") if tts["provider"] == "doubao" else "")
             or cls.DOUBAO_TTS_API_URL
+        )
+        tts["api_key"] = (
+            tts.get("api_key")
+            or tts.get("key")
+            or tts.get("x_api_key")
+            or cls.DOUBAO_TTS_API_KEY
         )
         tts["appid"] = (
             tts.get("appid")
@@ -201,7 +215,7 @@ class Config:
             tts.get("token")
             or tts.get("access_token")
             or tts.get("accessToken")
-            or tts.get("api_key")
+            or (tts.get("api_key") if tts["auth_method"] == "access_token" else "")
             or cls.DOUBAO_TTS_TOKEN
         )
         tts["cluster"] = tts.get("cluster") or cls.DOUBAO_TTS_CLUSTER
