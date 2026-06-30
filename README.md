@@ -1,10 +1,10 @@
 # InsightCut
 
-> All in one, 但不是画布；一键成片，但不是黑盒。
+> All in one, 但不是画布；生成效果远胜剪映的一键成片。
 
 InsightCut is a local-first AI video production workbench for explainer, knowledge, commentary, and short-form education videos. It turns a topic or manuscript into a structured video project: script, storyboard, AI images, TTS voiceover, subtitles, preview editing, MP4 export, and Jianying / CapCut draft export.
 
-InsightCut 的核心价值不是“给你一个复杂画布再从零剪辑”，而是把知识视频里最重复、最耗时、最容易断链的生产流程收成一条可恢复、可修改、可导出的工作流。
+InsightCut 的核心价值不是“给你一个复杂画布再从零剪辑”，而是把知识视频里最重复、最耗时、最容易断链的生产流程收成一条可恢复、可修改、可导出的工作流。它追求的不是模板化的一键拼接，而是让默认生成出来的画面、分镜、配音、字幕和导出结果，整体效果远胜剪映的一键成片。
 
 ![InsightCut manuscript workspace](design-qa-artifacts/current-home-manuscript.png)
 
@@ -29,7 +29,7 @@ InsightCut 的核心价值不是“给你一个复杂画布再从零剪辑”，
   -> MP4 / 剪映草稿导出
 ```
 
-普通“一键成片”经常只给一个结果文件，失败后素材消失，想修改也只能重来。InsightCut 的设计原则是：
+普通“一键成片”经常只给一个结果文件，失败后素材消失，想修改也只能重来；剪映的一键成片虽然足够快，但默认结果容易模板化、素材不可控、二次修改链路短。InsightCut 的目标是让默认生成效果远胜剪映的一键成片，同时保留完整中间资产。它的设计原则是：
 
 - Every intermediate asset is visible.
 - Every generated segment can be edited.
