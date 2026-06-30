@@ -52,6 +52,19 @@ InsightCut 的核心价值不是“给你一个复杂画布再从零剪辑”，
 | --- | --- |
 | ![9:16 preview](design-qa-artifacts/qa-preview-9x16.png) | ![3:4 preview](design-qa-artifacts/qa-preview-3x4.png) |
 
+## Generated Results / 生成效果展示
+
+These are compressed README showcase exports from real local generation results. The original full-resolution MP4 files remain in the local output directory; the versions below are kept small for GitHub browsing.
+
+| Sample | Mode | Format | Duration | Preview / MP4 |
+| --- | --- | --- | --- | --- |
+| 书 | Input mode | 16:9 | 01:02 | [![Book generated video](docs/showcase/thumbs/book-16x9.jpg)](docs/showcase/videos/book-16x9.mp4) |
+| 0623 | Long-form generation | 16:9 | 01:03 | [![Long generated video 16x9](docs/showcase/thumbs/long-0623-16x9.jpg)](docs/showcase/videos/long-0623-16x9.mp4) |
+| 主题模式一分钟测试 | Theme mode | 9:16 | 00:55 | [![Theme mode vertical generated video](docs/showcase/thumbs/theme-vertical-9x16.jpg)](docs/showcase/videos/theme-vertical-9x16.mp4) |
+| 文稿模式 3:4 测试 | Input mode | 3:4 | 00:52 | [![Script mode portrait generated video](docs/showcase/thumbs/script-portrait-3x4.jpg)](docs/showcase/videos/script-portrait-3x4.mp4) |
+
+The point is not just that the tool can export a playable file. The generated results keep the storyboard, images, voiceover, subtitles, and Jianying / CapCut draft path available for later correction. This is the practical reason InsightCut can produce results that are far stronger than Jianying's default one-click video flow.
+
 ## Core Workflow
 
 1. **Write or import manuscript**
