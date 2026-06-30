@@ -1,221 +1,219 @@
 # InsightCut
 
-**All in one, 但不是画布！**
+> All in one, 但不是画布；一键成片，但不是黑盒。
 
-InsightCut 是面向 AI 解说视频的一站式创作工作台：从一个观点、一段文案或一个选题出发，自动完成脚本改写、分镜拆解、AI 图片、TTS 配音、字幕、MP4 成片和剪映草稿导出。
+InsightCut is a local-first AI video production workbench for explainer, knowledge, commentary, and short-form education videos. It turns a topic or manuscript into a structured video project: script, storyboard, AI images, TTS voiceover, subtitles, preview editing, MP4 export, and Jianying / CapCut draft export.
 
-它全面对标剪映的一键成片体验，但定位不是“给你一块画布再让你从零搭建”。InsightCut 的目标是把解释型视频里最耗时、最重复、最依赖多工具拼接的部分收束成一条稳定链路：你只管想好故事，或者只管表达观点，剩下的交给 InsightCut。
+InsightCut 的核心价值不是“给你一个复杂画布再从零剪辑”，而是把知识视频里最重复、最耗时、最容易断链的生产流程收成一条可恢复、可修改、可导出的工作流。
 
-## 产品定位
+![InsightCut manuscript workspace](design-qa-artifacts/current-home-manuscript.png)
 
-InsightCut 是 **AI 解说视频生产工具**，重点服务科普、认知、心理学、财经解释、知识拆解、观点表达和短视频口播类内容。
+## Keywords
 
-它不是通用剪辑软件，也不是只返回一个视频文件的 Demo。它更像一个“AI 视频导演 + 素材生产线 + 可编辑工作台”：
+`AI video generation` · `AI explainer video` · `local-first video workflow` · `storyboard editor` · `image generation` · `TTS voiceover` · `subtitle generation` · `MP4 export` · `Jianying draft` · `CapCut draft` · `FastAPI` · `Vue 3` · `Vite` · `FFmpeg`
 
-1. 用 AI 把主题或原始文案整理成适合解说的视频脚本。
-2. 自动按短视频节奏切分段落，生成每段画面描述。
-3. 为每个分镜生成高质量图片和自然配音。
-4. 自动生成字幕、基础镜头运动和可预览成片。
-5. 同时保留所有图片、音频、字幕和草稿资产，支持继续二次修改。
-6. 最终可以直出 MP4，也可以导出剪映/CapCut 草稿继续精修。
+中文关键词：`AI 视频生成`、`AI 解说视频`、`知识视频工作台`、`科普视频生成`、`文稿转视频`、`分镜编辑`、`剪映草稿导出`、`本地优先素材管理`。
 
-## 我们要解决的问题
+## Why
 
-### 1. 有表达欲，但没有完整视频生产能力
-
-很多人能讲清楚一个观点，也有想传播的知识和故事，但卡在视频生产流程：写脚本、拆分镜、找图、配音、上字幕、做节奏、导出格式，每一步都需要不同工具和经验。
-
-InsightCut 希望把“表达观点”和“制作视频”之间的门槛降到最低。
-
-### 2. 一键成片经常不可控
-
-传统的一键成片很快，但常见问题是：画面质量不稳定、素材不可沉淀、修改成本高、生成结果像模板，最后还是要重做。
-
-InsightCut 的一键不是黑盒成片，而是保留完整中间资产：每段脚本、每张图、每段配音、每条字幕都能查看、替换、重生成和复用。
-
-### 3. AI 工具链割裂
-
-现实创作中通常要同时使用文本模型、生图模型、TTS、剪辑软件、文件管理和上传工具。工具之间不共享上下文，素材难管理，失败后也很难接着修。
-
-InsightCut 把这些步骤连接成一条任务链路，并在素材库中沉淀每一次生成结果。
-
-### 4. 生成质量和默认效果不够好
-
-很多自动视频工具的问题不是“不能生成”，而是默认出来的效果不值得发布。InsightCut 把默认质量作为产品核心：更好的图片质量、更适合解说节奏的分段、更自然的配音、更稳的字幕和基础动画，让用户不调参数也能得到可用结果。
-
-## 核心特点
-
-### 高质量 AI 图片
-
-InsightCut 把画面生成作为核心能力之一，而不是附属占位图。系统会基于视频主题、段落文本、内容总结和画面风格生成分镜提示词，尽量让每张图都服务于当前解说内容。
-
-默认目标是：图片清晰、风格统一、语义贴合、能直接进入视频，而不是后期再大量筛图。
-
-### 默认直出效果好
-
-InsightCut 默认会处理字幕、画面比例、基础镜头运动、音频对齐和 MP4 导出。用户不需要先理解复杂时间线，也不需要手动拖拽素材，就能得到一条可以预览、评估甚至直接发布的成片。
-
-### 支持详细二次修改
-
-一键生成之后，用户仍然可以继续细调：
-
-- 修改每个分镜的字幕文案。
-- 修改图片提示词并重新生成图片。
-- 上传本地图片替换某个分镜。
-- 重新生成某段配音。
-- 在历史素材中选择旧图替换当前画面。
-- 进入导出中心重新生成 MP4 或剪映草稿。
-
-这让 InsightCut 不是“一次性生成器”，而是可反复打磨的视频工作台。
-
-### 资产沉淀
-
-每次生成的视频都会留下结构化资产：图片、音频、字幕、分镜文本、提示词、导出文件和任务记录。资产库可以记录成功和失败的素材状态，方便后续继续修复、复用和追踪。
-
-这也是产品和普通一键成片工具的重要区别：生成过程不是一次性消耗，而是在不断积累可复用资产。
-
-### MP4 和剪映草稿双出口
-
-InsightCut 支持两种结果出口：
-
-- **直出 MP4**：适合快速预览、内部评审、直接发布或验证选题。
-- **导出剪映/CapCut 草稿**：适合进入专业剪辑流程，继续精修节奏、贴纸、转场、音乐和包装。
-
-所以它既能服务轻量创作，也能接入更完整的后期流程。
-
-## 设计理念
-
-每个人都有创作的权利。
-
-不是每个人都应该被迫学习复杂剪辑软件、调试一堆模型接口、管理分散素材，才能把自己的观点讲出来。InsightCut 的理念是：
-
-> 你只管想好故事，或者只管表达观点。剩下的交给我们。
-
-我们希望用户把精力放在内容本身：观点是否有价值、故事是否清楚、表达是否真诚。至于脚本结构、画面生成、配音、字幕、导出和资产管理，应该由工具尽可能承担。
-
-## 技术实验手段
-
-InsightCut 目前是一个本地优先的 AI 视频生成实验系统，核心实验方向包括：
-
-### 多模型编排
-
-系统把文本模型、生图模型和 TTS 串成一条流水线：
+很多创作者有观点、有文稿、有表达欲，但视频生产链路很长：
 
 ```text
-主题 / 文案
-  -> 脚本改写与总结
-  -> 短节奏分段
-  -> 分镜图片提示词
-  -> AI 图片生成
-  -> TTS 配音
-  -> 字幕与草稿构建
+选题 / 文稿
+  -> 脚本整理
+  -> 分镜拆解
+  -> 图片生成
+  -> 配音
+  -> 字幕
+  -> 预览检查
   -> MP4 / 剪映草稿导出
 ```
 
-文本生成负责把观点组织成解说脚本；生图负责生成高质量分镜画面；TTS 负责生成每段音频；后端再把所有素材对齐成可预览和可导出的项目。
+普通“一键成片”经常只给一个结果文件，失败后素材消失，想修改也只能重来。InsightCut 的设计原则是：
 
-### 结构化中间产物
+- Every intermediate asset is visible.
+- Every generated segment can be edited.
+- Failed tasks must preserve generated assets.
+- MP4 is not the only output; editable Jianying / CapCut drafts matter.
 
-系统不会只保存最终视频，而是保存每个阶段的中间产物。这样可以支持失败恢复、局部重生成、素材替换、资产下载和后续剪辑。
+也就是说，InsightCut 不是一次性生成器，而是一个可以继续判断、替换、重生成和导出的 AI 视频生产工作台。
 
-### 本地优先工作流
+## Product Screenshots
 
-默认数据、配置、日志和生成产物都在本地保存。这样便于快速实验、调试模型效果，也方便创作者掌握自己的素材。
+| Manuscript | Assets |
+| --- | --- |
+| ![Manuscript editor](design-qa-artifacts/current-home-manuscript.png) | ![Project assets](design-qa-artifacts/current-assets.png) |
 
-### 剪映草稿兼容
+| Production Setup | Preview Editor |
+| --- | --- |
+| ![Production setup](design-qa-artifacts/current-production.png) | ![Preview editor](design-qa-artifacts/current-preview.png) |
 
-除了生成 MP4，系统还会构建可导入剪映/CapCut 的草稿包。这个方向的意义是：AI 负责快速生成可用初稿，专业剪辑软件负责最后的创作表达和精修。
+| 9:16 Preview | 3:4 Preview |
+| --- | --- |
+| ![9:16 preview](design-qa-artifacts/qa-preview-9x16.png) | ![3:4 preview](design-qa-artifacts/qa-preview-3x4.png) |
 
-### 可配置模型接口
+## Core Workflow
 
-前端提供模型配置入口，可以配置生文、生图和 TTS 参数，以便替换不同供应商或不同模型能力。当前目标不是锁死某个模型，而是验证“AI 解说视频工作流”本身。
+1. **Write or import manuscript**
+   - Theme mode: enter a short topic and expand it during production.
+   - Input mode: paste or import a complete manuscript.
 
-## 输出产物
+2. **Configure production**
+   - Visual style, aspect ratio, writing style, and TTS voice.
+   - API readiness checks for LLM, image generation, and TTS.
 
-- **MP4 成片**：带字幕、配音、画面和基础动画，适合快速预览或直接发布。
-- **剪映/CapCut 草稿 ZIP**：适合导入剪映继续二次编辑。
-- **分镜图片**：每段解说对应的 AI 画面。
-- **分段配音**：每个分镜对应的 TTS 音频。
-- **字幕文件**：可用于预览、导出和后期处理。
-- **资产记录**：沉淀每次生成、上传、替换和失败的素材信息。
+3. **Generate video assets**
+   - Script processing.
+   - Storyboard segmentation.
+   - Image prompt generation.
+   - AI image generation.
+   - TTS voiceover.
+   - Subtitles and basic motion.
 
-## 当前能力
+4. **Preview and recover**
+   - Inspect every segment.
+   - Edit subtitle text and image prompts.
+   - Regenerate image or voiceover per segment.
+   - Upload replacement image.
+   - Recover usable assets even when a task partially fails.
 
-- 创建 AI 解说视频任务。
-- 支持主题输入和文案输入。
-- 支持不同文本风格、视觉风格、画面比例和配音音色。
-- 自动生成脚本、分镜、图片、配音和字幕。
-- 提供生成进度页和错误提示。
-- 提供预览与编辑工作台。
-- 支持单段图片重生成、上传替换和历史素材选择。
-- 支持单段文案修改和重配音。
-- 支持资产库查看和素材下载。
-- 支持 MP4 导出和剪映草稿导出。
+5. **Export**
+   - MP4 for quick review, publishing, or internal delivery.
+   - Jianying / CapCut draft ZIP for further editing.
 
-## 后续展示素材
+## Key Features
 
-后续 README 可以加入这些图片区域：
+### Manuscript-first homepage
+
+The homepage is the manuscript workspace, not a project library. The product starts where the creator starts: the idea, topic, or draft.
+
+### Editable storyboard assets
+
+Each generated segment keeps its own text, image prompt, image, audio, status, and history. This makes the generated video auditable and repairable.
+
+### Recoverable failures
+
+Generation failure is not treated as a dead end. Already generated scripts, images, audio, subtitles, and draft files are still shown in the asset and preview flows.
+
+### Real export center
+
+The export page is the single delivery center. It separates MP4 availability from Jianying / CapCut draft availability, so users do not see fake “ready” states.
+
+### Local-first storage
+
+Data, media, config, and logs are stored locally by default. This makes the system practical for experimentation, debugging, and private creator workflows.
+
+## Outputs
+
+- MP4 video with image, voiceover, subtitles, and basic motion.
+- Jianying / CapCut draft ZIP.
+- Storyboard segment table.
+- Generated images.
+- TTS audio files.
+- Subtitle SRT.
+- Project and asset records for recovery and reuse.
+
+## Tech Stack
+
+| Layer | Stack |
+| --- | --- |
+| Frontend | Vue 3, Vite, Element Plus |
+| Backend | FastAPI, Python |
+| Database | Local SQLite |
+| Text generation | LiteLLM-compatible LLM providers |
+| Image generation | Agnes Image 2.1 Flash / OpenAI-compatible image API |
+| TTS | Doubao TTS, Xiaomi MiMo TTS |
+| Video export | FFmpeg |
+| Editable draft export | pyJianYingDraft |
+| Storage | Local media directories |
+
+## Repository Structure
 
 ```text
-[产品首页截图]
-[生成流程截图]
-[预览与编辑工作台截图]
-[资产库截图]
-[MP4 导出效果截图]
-[剪映草稿导入效果截图]
+Auto-jianji/
+├── ai-kepu-video-server/          # FastAPI backend
+│   ├── api_server.py              # API entry
+│   ├── src/                       # pipeline, media, draft, export, API modules
+│   ├── data/                      # local SQLite and media, ignored by git
+│   └── output/                    # generated project output, ignored by git
+├── ai-kepu-video-web/frontend/    # Vue 3 + Vite frontend
+├── docs/                          # PRD and functional audit
+├── design-qa-artifacts/           # current product screenshots
+└── scripts/                       # QA capture scripts
 ```
 
-## 目录结构
+## Local Development
 
-```text
-ai-kepu-video-web/      # Vue 前端工作台
-ai-kepu-video-server/   # FastAPI 后端生成服务
-assets/style-previews/  # 画面风格预览素材
-design-preview/         # 设计预览与视觉实验素材
-```
+Default ports:
 
-当前目录名保留了早期项目结构，产品名称以 `InsightCut` 为准。
+- Frontend: `http://localhost:2001`
+- Backend: `http://localhost:2002`
+- API docs: `http://localhost:2002/docs`
 
-## 本地开发
-
-### 后端
+### Start Backend
 
 ```bash
 cd ai-kepu-video-server
-python -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-python api_server.py
+python -m uvicorn api_server:app --host 0.0.0.0 --port 2002 --reload
 ```
 
-默认服务地址：`http://localhost:2002`
-
-### 前端
+### Start Frontend
 
 ```bash
 cd ai-kepu-video-web/frontend
 npm install
-cp .env.example .env.development
-npm run dev -- --host 127.0.0.1 --port 2001
+npm run dev
 ```
 
-默认访问地址：`http://127.0.0.1:2001`
+### Build / Check
 
-## 配置说明
+```bash
+cd ai-kepu-video-server
+source venv/bin/activate
+python -m compileall src api_server.py
 
-仓库提供 `.env.example` 作为占位模板。本地运行时复制为 `.env`，再填写自己的模型、TTS 和对象存储配置。
+cd ../ai-kepu-video-web/frontend
+npm run build
+```
 
-前端也提供“模型配置”页，可填写：
+## Configuration
 
-- 生文模型：协议类型、Base URL、API Key、Model
-- 生图模型：API URL、API Key、Model、图片尺寸
-- TTS：App ID、Token、Cluster、Voice Type
+Runtime model configuration is managed locally. The frontend API settings page can configure:
 
-这些配置会保存在后端本地 `data/config.json`，该目录已被 `.gitignore` 忽略。
+- LLM protocol, base URL, API key, and model.
+- Image generation API URL, API key, and model.
+- TTS provider and voice settings.
 
-`data/`、`output/`、`logs/`、`.env`、生成素材和真实 API Key 都不会进入版本库。
+Local runtime files are intentionally ignored:
 
-## 开源仓库
+- `.env`
+- `data/`
+- `output/`
+- `logs/`
+- generated media and real API keys
 
-GitHub: https://github.com/SkyNotSilent/AI-kepu-video
+## Documentation
+
+- [Product Redesign PRD](docs/insightcut-redesign-prd.md)
+- [Functional Audit](docs/insightcut-functional-audit.md)
+- [Design QA Notes](design-qa.md)
+
+## Status
+
+InsightCut is an active local-first product prototype. The current version focuses on a complete single-user workflow:
+
+- manuscript preparation
+- project assets
+- API configuration
+- production setup
+- generation progress
+- preview editing
+- export center
+- failure recovery
+
+Not included in v1 scope: collaboration, cloud billing, multi-tenant user management, template marketplace, and hosted media storage.
+
+## License
+
+No license has been declared yet. Treat this repository as source-available unless a license is added.
