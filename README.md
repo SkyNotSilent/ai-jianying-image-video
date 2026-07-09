@@ -56,14 +56,18 @@ This project is not affiliated with Jianying, CapCut, or ByteDance.
 
 ## Generated Results / 生成效果展示
 
-These are compressed README showcase exports from real local generation results. The original full-resolution MP4 files remain in the local output directory; the versions below are kept small for GitHub browsing.
+These are compressed README showcase exports from real local generation results. The original full-resolution MP4 files remain in the local output directory; the online preview page uses native video players for direct playback.
 
-| Sample | Mode | Format | Duration | Preview / MP4 |
+[Open the video showcase / 在线预览全部生成效果](https://skynotsilent.github.io/ai-jianying-image-video/showcase/)
+
+| Sample | Mode | Format | Duration | Online Preview |
 | --- | --- | --- | --- | --- |
-| 书 | Input mode | 16:9 | 01:02 | [![Book generated video](docs/showcase/thumbs/book-16x9.jpg)](docs/showcase/videos/book-16x9.mp4) |
-| 0623 | Long-form generation | 16:9 | 01:03 | [![Long generated video 16x9](docs/showcase/thumbs/long-0623-16x9.jpg)](docs/showcase/videos/long-0623-16x9.mp4) |
-| 主题模式一分钟测试 | Theme mode | 9:16 | 00:55 | [![Theme mode vertical generated video](docs/showcase/thumbs/theme-vertical-9x16.jpg)](docs/showcase/videos/theme-vertical-9x16.mp4) |
-| 文稿模式 3:4 测试 | Input mode | 3:4 | 00:52 | [![Script mode portrait generated video](docs/showcase/thumbs/script-portrait-3x4.jpg)](docs/showcase/videos/script-portrait-3x4.mp4) |
+| 书 | Input mode | 16:9 | 01:02 | [![Book generated video](docs/showcase/thumbs/book-16x9.jpg)](https://skynotsilent.github.io/ai-jianying-image-video/showcase/#book-16x9) |
+| 0623 | Long-form generation | 16:9 | 01:03 | [![Long generated video 16x9](docs/showcase/thumbs/long-0623-16x9.jpg)](https://skynotsilent.github.io/ai-jianying-image-video/showcase/#long-0623-16x9) |
+| 主题模式一分钟测试 | Theme mode | 9:16 | 00:55 | [![Theme mode vertical generated video](docs/showcase/thumbs/theme-vertical-9x16.jpg)](https://skynotsilent.github.io/ai-jianying-image-video/showcase/#theme-vertical-9x16) |
+| 文稿模式 3:4 测试 | Input mode | 3:4 | 00:52 | [![Script mode portrait generated video](docs/showcase/thumbs/script-portrait-3x4.jpg)](https://skynotsilent.github.io/ai-jianying-image-video/showcase/#script-portrait-3x4) |
+
+Fallback MP4 files: [书](docs/showcase/videos/book-16x9.mp4) · [0623](docs/showcase/videos/long-0623-16x9.mp4) · [主题模式 9:16](docs/showcase/videos/theme-vertical-9x16.mp4) · [文稿模式 3:4](docs/showcase/videos/script-portrait-3x4.mp4)
 
 The point is not just that the tool can export a playable file. The generated results keep the storyboard, images, voiceover, subtitles, and Jianying / CapCut draft path available for later correction. This is the practical reason InsightCut can produce results that are far stronger than Jianying's default one-click video flow.
 
