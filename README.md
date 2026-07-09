@@ -1,18 +1,20 @@
-# InsightCut
+# InsightCut - AI Jianying Image Video Workbench
 
 > All in one, 但不是画布；生成效果远胜剪映的一键成片。
 
-InsightCut is a local-first AI video production workbench for explainer, knowledge, commentary, and short-form education videos. It turns a topic or manuscript into a structured video project: script, storyboard, AI images, TTS voiceover, subtitles, preview editing, MP4 export, and Jianying / CapCut draft export.
+InsightCut is a local-first AI image video and cognition-video production workbench for explainer, knowledge, commentary, and short-form education videos. It turns a topic or manuscript into a structured video project: script, storyboard, AI images, TTS voiceover, subtitles, preview editing, MP4 export, and Jianying / CapCut draft export.
 
-InsightCut 的核心价值不是“给你一个复杂画布再从零剪辑”，而是把知识视频里最重复、最耗时、最容易断链的生产流程收成一条可恢复、可修改、可导出的工作流。它追求的不是模板化的一键拼接，而是让默认生成出来的画面、分镜、配音、字幕和导出结果，整体效果远胜剪映的一键成片。
+InsightCut 的核心价值不是“给你一个复杂画布再从零剪辑”，而是把 AI 图片视频、AI 认知视频和知识解说视频里最重复、最耗时、最容易断链的生产流程收成一条可恢复、可修改、可导出的工作流。它追求的不是模板化的一键拼接，而是让默认生成出来的画面、分镜、配音、字幕和导出结果，整体效果远胜剪映的一键成片。
+
+This project is not affiliated with Jianying, CapCut, or ByteDance.
 
 ![InsightCut manuscript workspace](design-qa-artifacts/current-home-manuscript.png)
 
 ## Keywords
 
-`AI video generation` · `AI explainer video` · `local-first video workflow` · `storyboard editor` · `image generation` · `TTS voiceover` · `subtitle generation` · `MP4 export` · `Jianying draft` · `CapCut draft` · `FastAPI` · `Vue 3` · `Vite` · `FFmpeg`
+`AI video generation` · `AI image video` · `image-to-video` · `AI explainer video` · `AI cognition video` · `local-first video workflow` · `storyboard editor` · `image generation` · `TTS voiceover` · `subtitle generation` · `MP4 export` · `Jianying draft` · `CapCut draft` · `FastAPI` · `Vue 3` · `Vite` · `FFmpeg`
 
-中文关键词：`AI 视频生成`、`AI 解说视频`、`知识视频工作台`、`科普视频生成`、`文稿转视频`、`分镜编辑`、`剪映草稿导出`、`本地优先素材管理`。
+中文关键词：`AI 视频生成`、`AI 图片视频`、`AI 认知视频`、`AI 解说视频`、`知识视频工作台`、`科普视频生成`、`文稿转视频`、`分镜编辑`、`剪映草稿导出`、`本地优先素材管理`。
 
 ## Why
 
@@ -211,6 +213,9 @@ Local runtime files are intentionally ignored:
 - [Product Redesign PRD](docs/insightcut-redesign-prd.md)
 - [Functional Audit](docs/insightcut-functional-audit.md)
 - [Design QA Notes](design-qa.md)
+- [Engineering Workflow](docs/engineering-workflow.md)
+- [Repository Hygiene](docs/repo-hygiene.md)
+- [GitHub Settings](docs/github-settings.md)
 
 ## Status
 

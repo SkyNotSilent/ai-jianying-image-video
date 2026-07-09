@@ -1,0 +1,53 @@
+name: Bug report
+description: Report a reproducible product, generation, export, or local setup issue.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What failed, and what did you expect instead?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Manuscript
+        - Project assets
+        - API configuration
+        - Production setup
+        - Generation pipeline
+        - Preview editor
+        - MP4 export
+        - Jianying / CapCut draft export
+        - Documentation / GitHub
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start backend on 2002 and frontend on 2001
+        2. Open ...
+        3. Click ...
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Screenshots, video, task ID, browser URL, logs with secrets removed.
+    validations:
+      required: false
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: macOS version, browser, Python version, Node version, model/TTS provider if relevant.
+    validations:
+      required: false
