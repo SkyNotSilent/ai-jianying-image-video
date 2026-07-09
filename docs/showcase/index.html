@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>InsightCut Generated Results</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fb;
+      --surface: #ffffff;
+      --text: #111827;
+      --muted: #64748b;
+      --line: #dbe3ef;
+      --accent: #2563eb;
+      --accent-soft: #eef4ff;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 48px 0 64px;
+    }
+
+    header {
+      margin-bottom: 28px;
+    }
+
+    h1 {
+      margin: 0 0 10px;
+      font-size: clamp(32px, 5vw, 56px);
+      line-height: 1.02;
+      letter-spacing: 0;
+    }
+
+    .lead {
+      max-width: 760px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 18px;
+      line-height: 1.7;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .sample {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface);
+    }
+
+    .player {
+      display: grid;
+      min-height: 260px;
+      place-items: center;
+      background: #101622;
+    }
+
+    video {
+      display: block;
+      width: 100%;
+      max-height: 620px;
+      background: #101622;
+    }
+
+    .meta {
+      display: grid;
+      gap: 10px;
+      padding: 18px;
+    }
+
+    .meta h2 {
+      margin: 0;
+      font-size: 20px;
+      line-height: 1.25;
+    }
+
+    .tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .tag {
+      border: 1px solid #cfe0ff;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: #1d4ed8;
+      padding: 5px 10px;
+      font-size: 13px;
+      line-height: 1;
+    }
+
+    .meta p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    .links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 2px;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+      font-weight: 650;
+    }
+
+    a:hover {
+      text-decoration: underline;
+    }
+
+    footer {
+      margin-top: 28px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.7;
+    }
+
+    @media (max-width: 840px) {
+      main {
+        width: min(100% - 20px, 640px);
+        padding: 30px 0 44px;
+      }
+
+      .grid {
+        grid-template-columns: 1fr;
+      }
+
+      .player {
+        min-height: 180px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>InsightCut 生成效果展示</h1>
+      <p class="lead">这些视频来自真实本地生成结果，README 使用压缩展示版。页面保留播放器控件，方便直接在线预览不同画幅、不同输入方式的成片效果。</p>
+    </header>
+
+    <section class="grid" aria-label="Generated video samples">
+      <article class="sample" id="book-16x9">
+        <div class="player">
+          <video controls preload="metadata" poster="./thumbs/book-16x9.jpg" src="./videos/book-16x9.mp4"></video>
+        </div>
+        <div class="meta">
+          <h2>书</h2>
+          <div class="tags">
+            <span class="tag">输入模式</span>
+            <span class="tag">16:9</span>
+            <span class="tag">01:02</span>
+          </div>
+          <p>从完整文稿生成分镜、图片、配音、字幕和 MP4，用于展示横屏知识视频效果。</p>
+          <div class="links"><a href="./videos/book-16x9.mp4">打开原 MP4</a></div>
+        </div>
+      </article>
+
+      <article class="sample" id="long-0623-16x9">
+        <div class="player">
+          <video controls preload="metadata" poster="./thumbs/long-0623-16x9.jpg" src="./videos/long-0623-16x9.mp4"></video>
+        </div>
+        <div class="meta">
+          <h2>0623</h2>
+          <div class="tags">
+            <span class="tag">长内容生成</span>
+            <span class="tag">16:9</span>
+            <span class="tag">01:03</span>
+          </div>
+          <p>一分钟级别横屏样例，用于展示稳定分镜和连续配音后的完整成片观感。</p>
+          <div class="links"><a href="./videos/long-0623-16x9.mp4">打开原 MP4</a></div>
+        </div>
+      </article>
+
+      <article class="sample" id="theme-vertical-9x16">
+        <div class="player">
+          <video controls preload="metadata" poster="./thumbs/theme-vertical-9x16.jpg" src="./videos/theme-vertical-9x16.mp4"></video>
+        </div>
+        <div class="meta">
+          <h2>主题模式一分钟测试</h2>
+          <div class="tags">
+            <span class="tag">主题模式</span>
+            <span class="tag">9:16</span>
+            <span class="tag">00:55</span>
+          </div>
+          <p>短主题扩写后生成竖屏视频，适合移动端知识短视频和口播解释类内容。</p>
+          <div class="links"><a href="./videos/theme-vertical-9x16.mp4">打开原 MP4</a></div>
+        </div>
+      </article>
+
+      <article class="sample" id="script-portrait-3x4">
+        <div class="player">
+          <video controls preload="metadata" poster="./thumbs/script-portrait-3x4.jpg" src="./videos/script-portrait-3x4.mp4"></video>
+        </div>
+        <div class="meta">
+          <h2>文稿模式 3:4 测试</h2>
+          <div class="tags">
+            <span class="tag">输入模式</span>
+            <span class="tag">3:4</span>
+            <span class="tag">00:52</span>
+          </div>
+          <p>3:4 画幅样例，验证预览、字幕和导出链路在非标准横屏比例下仍能完整工作。</p>
+          <div class="links"><a href="./videos/script-portrait-3x4.mp4">打开原 MP4</a></div>
+        </div>
+      </article>
+    </section>
+
+    <footer>
+      <p>InsightCut is not affiliated with Jianying, CapCut, or ByteDance. The showcase videos are compressed README/demo exports; original full-resolution generation outputs remain local-only.</p>
+    </footer>
+  </main>
+</body>
+</html>

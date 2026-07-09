@@ -1,18 +1,20 @@
-# InsightCut
+# InsightCut - AI Jianying Image Video Workbench
 
 > All in one, 但不是画布；生成效果远胜剪映的一键成片。
 
-InsightCut is a local-first AI video production workbench for explainer, knowledge, commentary, and short-form education videos. It turns a topic or manuscript into a structured video project: script, storyboard, AI images, TTS voiceover, subtitles, preview editing, MP4 export, and Jianying / CapCut draft export.
+InsightCut is a local-first AI image video and cognition-video production workbench for explainer, knowledge, commentary, and short-form education videos. It turns a topic or manuscript into a structured video project: script, storyboard, AI images, TTS voiceover, subtitles, preview editing, MP4 export, and Jianying / CapCut draft export.
 
-InsightCut 的核心价值不是“给你一个复杂画布再从零剪辑”，而是把知识视频里最重复、最耗时、最容易断链的生产流程收成一条可恢复、可修改、可导出的工作流。它追求的不是模板化的一键拼接，而是让默认生成出来的画面、分镜、配音、字幕和导出结果，整体效果远胜剪映的一键成片。
+InsightCut 的核心价值不是“给你一个复杂画布再从零剪辑”，而是把 AI 图片视频、AI 认知视频和知识解说视频里最重复、最耗时、最容易断链的生产流程收成一条可恢复、可修改、可导出的工作流。它追求的不是模板化的一键拼接，而是让默认生成出来的画面、分镜、配音、字幕和导出结果，整体效果远胜剪映的一键成片。
+
+This project is not affiliated with Jianying, CapCut, or ByteDance.
 
 ![InsightCut manuscript workspace](design-qa-artifacts/current-home-manuscript.png)
 
 ## Keywords
 
-`AI video generation` · `AI explainer video` · `local-first video workflow` · `storyboard editor` · `image generation` · `TTS voiceover` · `subtitle generation` · `MP4 export` · `Jianying draft` · `CapCut draft` · `FastAPI` · `Vue 3` · `Vite` · `FFmpeg`
+`AI video generation` · `AI image video` · `image-to-video` · `batch image video` · `batch AI video generation` · `AI explainer video` · `AI cognition video` · `batch cognition video` · `local-first video workflow` · `storyboard editor` · `image generation` · `TTS voiceover` · `subtitle generation` · `MP4 export` · `Jianying draft` · `Jianying caogao` · `Jianying draft export` · `CapCut draft` · `FastAPI` · `Vue 3` · `Vite` · `FFmpeg`
 
-中文关键词：`AI 视频生成`、`AI 解说视频`、`知识视频工作台`、`科普视频生成`、`文稿转视频`、`分镜编辑`、`剪映草稿导出`、`本地优先素材管理`。
+中文关键词：`AI 视频生成`、`AI 图片视频`、`批量图片视频生成`、`AI 认知视频`、`批量认知视频生成`、`AI 解说视频`、`知识视频工作台`、`科普视频生成`、`文稿转视频`、`分镜编辑`、`剪映草稿`、`剪映草稿导出`、`CapCut 草稿导出`、`本地优先素材管理`。
 
 ## Why
 
@@ -54,14 +56,18 @@ InsightCut 的核心价值不是“给你一个复杂画布再从零剪辑”，
 
 ## Generated Results / 生成效果展示
 
-These are compressed README showcase exports from real local generation results. The original full-resolution MP4 files remain in the local output directory; the versions below are kept small for GitHub browsing.
+These are compressed README showcase exports from real local generation results. The original full-resolution MP4 files remain in the local output directory; the online preview page uses native video players for direct playback.
 
-| Sample | Mode | Format | Duration | Preview / MP4 |
+[Open the video showcase / 在线预览全部生成效果](https://skynotsilent.github.io/ai-jianying-image-video/showcase/)
+
+| Sample | Mode | Format | Duration | Online Preview |
 | --- | --- | --- | --- | --- |
-| 书 | Input mode | 16:9 | 01:02 | [![Book generated video](docs/showcase/thumbs/book-16x9.jpg)](docs/showcase/videos/book-16x9.mp4) |
-| 0623 | Long-form generation | 16:9 | 01:03 | [![Long generated video 16x9](docs/showcase/thumbs/long-0623-16x9.jpg)](docs/showcase/videos/long-0623-16x9.mp4) |
-| 主题模式一分钟测试 | Theme mode | 9:16 | 00:55 | [![Theme mode vertical generated video](docs/showcase/thumbs/theme-vertical-9x16.jpg)](docs/showcase/videos/theme-vertical-9x16.mp4) |
-| 文稿模式 3:4 测试 | Input mode | 3:4 | 00:52 | [![Script mode portrait generated video](docs/showcase/thumbs/script-portrait-3x4.jpg)](docs/showcase/videos/script-portrait-3x4.mp4) |
+| 书 | Input mode | 16:9 | 01:02 | [![Book generated video](docs/showcase/thumbs/book-16x9.jpg)](https://skynotsilent.github.io/ai-jianying-image-video/showcase/#book-16x9) |
+| 0623 | Long-form generation | 16:9 | 01:03 | [![Long generated video 16x9](docs/showcase/thumbs/long-0623-16x9.jpg)](https://skynotsilent.github.io/ai-jianying-image-video/showcase/#long-0623-16x9) |
+| 主题模式一分钟测试 | Theme mode | 9:16 | 00:55 | [![Theme mode vertical generated video](docs/showcase/thumbs/theme-vertical-9x16.jpg)](https://skynotsilent.github.io/ai-jianying-image-video/showcase/#theme-vertical-9x16) |
+| 文稿模式 3:4 测试 | Input mode | 3:4 | 00:52 | [![Script mode portrait generated video](docs/showcase/thumbs/script-portrait-3x4.jpg)](https://skynotsilent.github.io/ai-jianying-image-video/showcase/#script-portrait-3x4) |
+
+Fallback MP4 files: [书](docs/showcase/videos/book-16x9.mp4) · [0623](docs/showcase/videos/long-0623-16x9.mp4) · [主题模式 9:16](docs/showcase/videos/theme-vertical-9x16.mp4) · [文稿模式 3:4](docs/showcase/videos/script-portrait-3x4.mp4)
 
 The point is not just that the tool can export a playable file. The generated results keep the storyboard, images, voiceover, subtitles, and Jianying / CapCut draft path available for later correction. This is the practical reason InsightCut can produce results that are far stronger than Jianying's default one-click video flow.
 
@@ -211,6 +217,9 @@ Local runtime files are intentionally ignored:
 - [Product Redesign PRD](docs/insightcut-redesign-prd.md)
 - [Functional Audit](docs/insightcut-functional-audit.md)
 - [Design QA Notes](design-qa.md)
+- [Engineering Workflow](docs/engineering-workflow.md)
+- [Repository Hygiene](docs/repo-hygiene.md)
+- [GitHub Settings](docs/github-settings.md)
 
 ## Status
 

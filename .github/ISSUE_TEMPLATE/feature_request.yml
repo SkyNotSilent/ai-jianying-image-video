@@ -1,0 +1,42 @@
+name: Feature request
+description: Propose a product or engineering improvement.
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user workflow or engineering risk does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the intended behavior, not just the UI.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Manuscript
+        - Project assets
+        - API configuration
+        - Production setup
+        - Generation pipeline
+        - Preview editor
+        - Export center
+        - Repository / CI / workflow
+        - Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      placeholder: What must be true before this is considered done?
+    validations:
+      required: true
