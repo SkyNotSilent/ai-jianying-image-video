@@ -12,9 +12,9 @@ This project is not affiliated with Jianying, CapCut, or ByteDance.
 
 ## Keywords
 
-`AI video generation` · `AI image video` · `image-to-video` · `AI explainer video` · `AI cognition video` · `local-first video workflow` · `storyboard editor` · `image generation` · `TTS voiceover` · `subtitle generation` · `MP4 export` · `Jianying draft` · `CapCut draft` · `FastAPI` · `Vue 3` · `Vite` · `FFmpeg`
+`AI video generation` · `AI image video` · `image-to-video` · `batch image video` · `batch AI video generation` · `AI explainer video` · `AI cognition video` · `batch cognition video` · `local-first video workflow` · `storyboard editor` · `image generation` · `TTS voiceover` · `subtitle generation` · `MP4 export` · `Jianying draft` · `Jianying caogao` · `Jianying draft export` · `CapCut draft` · `FastAPI` · `Vue 3` · `Vite` · `FFmpeg`
 
-中文关键词：`AI 视频生成`、`AI 图片视频`、`AI 认知视频`、`AI 解说视频`、`知识视频工作台`、`科普视频生成`、`文稿转视频`、`分镜编辑`、`剪映草稿导出`、`本地优先素材管理`。
+中文关键词：`AI 视频生成`、`AI 图片视频`、`批量图片视频生成`、`AI 认知视频`、`批量认知视频生成`、`AI 解说视频`、`知识视频工作台`、`科普视频生成`、`文稿转视频`、`分镜编辑`、`剪映草稿`、`剪映草稿导出`、`CapCut 草稿导出`、`本地优先素材管理`。
 
 ## Why
 

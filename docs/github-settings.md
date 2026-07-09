@@ -17,7 +17,7 @@ InsightCut
 Recommended description:
 
 ```text
-AI 图片视频生成工作台：文稿/主题转视频，分镜可编辑，生成效果远胜剪映一键成片，支持 MP4 与剪映/CapCut 草稿导出。
+AI 图片视频生成工作台：文稿/主题转视频，批量生成认知视频，分镜可编辑，生成效果远胜剪映一键成片，支持 MP4 与剪映草稿/CapCut draft 导出。
 ```
 
 Recommended topics:
@@ -34,6 +34,13 @@ tts
 fastapi
 vue3
 local-first
+ai-video-generator
+image-generation
+ffmpeg
+jianying-draft
+jianying-caogao
+batch-video-generation
+batch-image-video
 ```
 
 Public disclaimer:
