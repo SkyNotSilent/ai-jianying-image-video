@@ -66,13 +66,13 @@ button:focus-visible, a:focus-visible { outline: 3px solid #8ac8ff; outline-offs
 .icon-button:hover { background: rgba(24, 33, 47, .07); }
 
 .modal-backdrop { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 20px; background: rgba(24, 33, 47, .42); }
-.modal { width: min(520px, 100%); border: 1px solid #dbe2ea; border-radius: 8px; background: #fff; box-shadow: 0 18px 48px rgba(16, 24, 40, .2); }
+.modal { width: min(520px, 100%); min-width: 0; border: 1px solid #dbe2ea; border-radius: 8px; background: #fff; box-shadow: 0 18px 48px rgba(16, 24, 40, .2); }
 .modal-header, .modal-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; }
 .modal-header { border-bottom: 1px solid #e5ebf1; }
 .modal-header h2 { margin: 0; font-size: 17px; }
 .modal-content { padding: 18px 16px; color: #475467; }
 .modal-content p { margin: 0; }
-.modal-footer { justify-content: flex-end; border-top: 1px solid #e5ebf1; }
+.modal-footer { flex-wrap: wrap; justify-content: flex-end; border-top: 1px solid #e5ebf1; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -82,4 +82,10 @@ button:focus-visible, a:focus-visible { outline: 3px solid #8ac8ff; outline-offs
   .workspace-shell { width: min(100% - 32px, 1120px); padding-top: 32px; }
   .workspace-heading { align-items: flex-start; flex-direction: column; }
   .workspace-heading .button { width: 100%; }
+}
+
+@media (max-width: 420px) {
+  .modal-backdrop { padding: 12px; }
+  .modal-footer { display: grid; grid-template-columns: 1fr; }
+  .modal-footer .button { width: 100%; }
 }

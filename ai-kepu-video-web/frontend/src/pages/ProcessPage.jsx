@@ -21,6 +21,9 @@ export function ProcessPage() {
 
   useEffect(() => {
     if (!taskId) { navigate('/', { replace: true }); return undefined }
+    setLoading(true)
+    setLoadingPercent(0)
+    setShowError(false)
     startPolling()
     loadingTimer.current = window.setInterval(() => setLoadingPercent(value => Math.min(92, value + Math.random() * 8 + 2)), 240)
     return () => { window.clearInterval(loadingTimer.current); window.clearTimeout(finishTimer.current) }
