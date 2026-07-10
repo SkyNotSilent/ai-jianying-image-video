@@ -9,7 +9,7 @@ Auto-jianji/
 │   ├── main.py               # 命令行工具入口
 │   └── src/                  # 源代码
 └── ai-kepu-video-web/        # 前端项目
-    └── frontend/             # Vue 3 前端应用
+    └── frontend/             # React 前端应用
 ```
 
 ## 启动服务
@@ -69,7 +69,7 @@ npm run dev
 
 ## 开发注意事项
 
-- 前端使用 Vue 3 + Vite
+- 前端使用 React 19 + React Router 7 + Vite 4
 - 后端使用 FastAPI + Python 3.9
 - 素材库按 `segment_index` 排序展示（播放顺序）
 - 本地维护巡检：在 `ai-kepu-video-server/` 下运行 `python scripts/maintenance_report.py --dry-run` 查看日志、数据库、媒体目录体量和未引用素材；只有显式使用 `--apply` 才会删除未被数据库引用的媒体文件。

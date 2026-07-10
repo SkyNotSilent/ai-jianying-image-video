@@ -18,8 +18,10 @@ function apiReadiness(config) {
   if (!config?.image?.api_url || !config?.image?.model || !config?.image?.api_key) missing.push('生图 API')
   const tts = config?.tts || {}
   if (tts.provider === 'mimo') {
-    if (!tts.mimo?.base_url || !tts.mimo?.model || !tts.mimo?.api_key) missing.push('小米 MiMo TTS')
-  } else if (!tts.api_url || !tts.appid || !tts.token || !tts.cluster) {
+    if (!tts.mimo?.base_url || !tts.mimo?.model || !tts.mimo?.api_key || !tts.mimo?.default_voice) missing.push('小米 MiMo TTS')
+  } else if (tts.auth_method === 'api_key') {
+    if (!tts.api_url || !tts.api_key || !tts.cluster || !tts.default_voice) missing.push('豆包 TTS')
+  } else if (!tts.api_url || !tts.appid || !tts.token || !tts.cluster || !tts.default_voice) {
     missing.push('豆包 TTS')
   }
   return missing
