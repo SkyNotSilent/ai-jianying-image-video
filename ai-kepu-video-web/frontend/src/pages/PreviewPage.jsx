@@ -36,7 +36,9 @@ import { normalizeMediaUrl } from '../utils/mediaUrl'
 import { deriveTaskState, ratioClassName, ratioLabel } from '../utils/taskState'
 import {
   appendPromptGuidance,
+  getSegmentDraftSnapshot,
   getSegmentAssetState,
+  isTaskLoadPending,
   normalizeSubtitleText,
   secondsToLabel,
   segmentDuration,
@@ -58,6 +60,7 @@ export function PreviewPage() {
   const navigate = useNavigate()
   const uploadRef = useRef(null)
   const playTimer = useRef(null)
+  const loadRequestRef = useRef(0)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
   const [task, setTask] = useState(null)
@@ -73,9 +76,15 @@ export function PreviewPage() {
   const [playing, setPlaying] = useState(false)
   const [busyAction, setBusyAction] = useState('')
   const [renderingPreview, setRenderingPreview] = useState(false)
+  const [loadedTaskId, setLoadedTaskId] = useState(null)
 
   const orderedSegments = useMemo(() => sortSegmentsByIndex(segments), [segments])
   const currentSegment = orderedSegments[selectedIndex] || null
+  const currentSegmentIdentity = `${taskId}:${currentSegment?.id ?? ''}:${currentSegment?.segment_index ?? ''}`
+  const currentDraft = useMemo(
+    () => getSegmentDraftSnapshot(taskId, currentSegment),
+    [currentSegment?.id, currentSegment?.image_prompt, currentSegment?.segment_index, currentSegment?.text, taskId],
+  )
   const state = useMemo(
     () => deriveTaskState({ task, segments: orderedSegments, exportState }),
     [exportState, orderedSegments, task],
@@ -106,8 +115,10 @@ export function PreviewPage() {
   }, [taskId])
 
   const loadPage = useCallback(async () => {
+    const requestId = ++loadRequestRef.current
     setLoading(true)
     setLoadError('')
+    setLoadedTaskId(null)
     try {
       const [taskData, segmentData, exportData, voiceData, assetData] = await Promise.all([
         getTaskStatus(taskId),
@@ -116,31 +127,49 @@ export function PreviewPage() {
         getVoices().catch(() => []),
         getTaskAssets(taskId).catch(() => []),
       ])
+      if (requestId !== loadRequestRef.current) return
       setTask(taskData || null)
       setSegments(sortSegmentsByIndex(segmentData))
       setExportState(exportData)
       setVoices(Array.isArray(voiceData) ? voiceData : [])
       setAssets(Array.isArray(assetData) ? assetData : [])
+      setLoadedTaskId(taskId)
     } catch (error) {
+      if (requestId !== loadRequestRef.current) return
       console.error('加载预览页失败', error)
       setLoadError('未能读取任务分镜。请确认后端服务在线后重试。')
       toast.error('加载预览页失败')
     } finally {
-      setLoading(false)
+      if (requestId === loadRequestRef.current) setLoading(false)
     }
   }, [taskId])
 
   useEffect(() => { loadPage() }, [loadPage])
 
   useEffect(() => {
+    window.clearTimeout(playTimer.current)
+    setSelectedIndex(0)
+    setPlaying(false)
+    setBusyAction('')
+    setRenderingPreview(false)
+    setTextDraft('')
+    setImagePromptDraft('')
+    setSelectedVoiceType('')
+    setImageSize(null)
+  }, [taskId])
+
+  useEffect(() => {
     if (selectedIndex >= orderedSegments.length) setSelectedIndex(Math.max(orderedSegments.length - 1, 0))
   }, [orderedSegments.length, selectedIndex])
 
   useEffect(() => {
-    setTextDraft(currentSegment?.text || '')
-    setImagePromptDraft(currentSegment?.image_prompt || '')
+    setTextDraft(currentDraft.text)
+    setImagePromptDraft(currentDraft.imagePrompt)
+  }, [currentDraft])
+
+  useEffect(() => {
     setSelectedVoiceType('')
-  }, [currentSegment?.segment_index])
+  }, [currentSegmentIdentity])
 
   useEffect(() => {
     setImageSize(null)
@@ -276,7 +305,7 @@ export function PreviewPage() {
     navigate(`/export/${taskId}`)
   }
 
-  if (loading) return <main className="preview-editor preview-editor-loading"><LoadingState label="正在加载分镜与已保存素材..." /></main>
+  if (isTaskLoadPending({ loading, loadError, loadedTaskId, taskId })) return <main className="preview-editor preview-editor-loading"><LoadingState label="正在加载分镜与已保存素材..." /></main>
   if (loadError) return <main className="preview-editor preview-editor-loading"><EmptyState title="预览编辑暂不可用" description={loadError} action={<button type="button" className="button button-primary" onClick={loadPage}>重新加载</button>} /></main>
 
   return (

@@ -13,6 +13,22 @@ export function getSegmentAssetState(segment = {}) {
   return { label: '已生成', tone: 'success' }
 }
 
+export function getSegmentDraftSnapshot(taskId, segment = {}) {
+  const text = segment?.text || ''
+  const imagePrompt = segment?.image_prompt || ''
+  const identity = segment?.id ?? ''
+  const index = segment?.segment_index ?? ''
+  return {
+    key: `${taskId || ''}:${identity}:${index}:${text}:${imagePrompt}`,
+    text,
+    imagePrompt,
+  }
+}
+
+export function isTaskLoadPending({ loading, loadError, loadedTaskId, taskId }) {
+  return Boolean(loading || (!loadError && loadedTaskId !== taskId))
+}
+
 export function appendPromptGuidance(value) {
   const prompt = String(value || '').trim()
   if (prompt.includes(promptGuidance)) return prompt
