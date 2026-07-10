@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { CheckCircle2, ClipboardPaste, FileUp, LoaderCircle, Sparkles } from 'lucide-react'
+import { CheckCircle2, ClipboardPaste, FileUp, Sparkles } from 'lucide-react'
 import { useNavigate, useParams } from 'react-router'
 import { extractDocumentText, getVoices } from '../api/task'
 import { toast } from '../lib/toast'
