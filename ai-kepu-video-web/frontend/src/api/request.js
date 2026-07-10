@@ -4,7 +4,7 @@
  */
 
 import axios from 'axios'
-import { ElMessage } from 'element-plus'
+import { toast } from '../lib/toast'
 
 // 从环境变量读取 API 地址
 const baseURL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:2002'
@@ -47,7 +47,7 @@ request.interceptors.response.use(
 
     // 网络错误
     if (!error.response) {
-      ElMessage.error('网络异常，请检查连接')
+      toast.error('网络异常，请检查连接')
       return Promise.reject(new Error('网络异常'))
     }
 
@@ -56,16 +56,16 @@ request.interceptors.response.use(
 
     switch (status) {
       case 404:
-        ElMessage.error(data?.detail || '资源不存在')
+        toast.error(data?.detail || '资源不存在')
         break
       case 429:
-        ElMessage.error('服务繁忙，请稍后重试')
+        toast.error('服务繁忙，请稍后重试')
         break
       case 500:
-        ElMessage.error('服务器错误')
+        toast.error('服务器错误')
         break
       default:
-        ElMessage.error(data?.detail || '请求失败')
+        toast.error(data?.detail || '请求失败')
     }
 
     return Promise.reject(error)
