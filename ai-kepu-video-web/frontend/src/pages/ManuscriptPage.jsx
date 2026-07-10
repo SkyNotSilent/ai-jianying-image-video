@@ -9,9 +9,9 @@ import './creation-flow.css'
 const exampleScript = `1  大脑如何影响我们的决策？\n\n你是否有过这样的经历：明明知道不应该买，却在情绪低落时下单了很多东西？或者明明想要好好休息，却因为一时愤怒做了后悔的决定？\n\n这并不是你不够理智，而是情绪正在悄悄影响着你的大脑。\n\n2  情绪与大脑的关系\n\n研究表明，情绪会影响我们大脑中负责决策的区域，改变我们对风险和收益的判断。\n\n例如，在压力状态下，我们的大脑更倾向于选择即时缓解的方案，而忽略了长期后果。\n\n3  如何做出更好的决策？\n\n觉察情绪，暂停片刻，理性评估，再从过去的决策中复盘学习。`
 
 const rotatorItems = [
-  { type: 'text', text: '文稿变成视频' },
-  { type: 'text', text: '导入剪映草稿' },
-  { type: 'text', text: '素材自由修改' },
+  { type: 'text', text: '文稿变成视频', visualClass: 'opening-text-bloom', motionClass: 'opening-anim-bloom' },
+  { type: 'text', text: '导入剪映草稿', visualClass: 'opening-text-push', motionClass: 'opening-anim-push' },
+  { type: 'text', text: '素材自由修改', visualClass: 'opening-text-breathe', motionClass: 'opening-anim-breathe' },
   { type: 'slots' },
   { type: 'finale' },
 ]
@@ -204,8 +204,12 @@ export function ManuscriptPage() {
           <div className={`paper-editor-shell ${isEmpty ? 'is-empty' : ''}`}>
             <textarea ref={editorRef} value={text || ''} maxLength={isTheme ? 100 : 5000} placeholder={paperFocused ? (isTheme ? '输入 100 字以内的视频主题，例如：为什么普通人越来越需要 AI 助手' : '直接输入或粘贴完整文稿') : ''} onFocus={() => setPaperFocused(true)} onBlur={() => setPaperFocused(false)} onChange={event => patchDraft(isTheme ? { theme: event.target.value.slice(0, 100) } : { manuscript: event.target.value.slice(0, 5000) })} />
             {isEmpty ? <button type="button" className="empty-prompt" onClick={() => { setPaperFocused(true); editorRef.current?.focus() }}>
-              <span>{isTheme ? '输入 100 字以内主题...' : '在这里输入或粘贴完整文稿...'}</span>
-              {rotating.type === 'slots' ? <strong className="slot-words">文稿 <i>分镜</i> 成片 <i>剪映</i></strong> : rotating.type === 'finale' ? <strong>All in one <i>但不</i>是画布</strong> : <strong>{rotating.text}</strong>}
+              <span className="empty-prompt-placeholder">{isTheme ? '输入 100 字以内主题...' : '在这里输入或粘贴完整文稿...'}</span>
+              <span className="opening-rotator-stage">
+                {rotating.type === 'slots' ? <span key={`slot-${rotatorIndex}`} className="opening-slot-group opening-anim-slot">{['文稿', '分镜', '成片', '剪映'].map((word, index) => <span key={word} className="opening-slot-item"><span className="opening-slot-word" style={{ animationDelay: `${index * 150}ms` }}>{word}</span></span>)}</span> : null}
+                {rotating.type === 'finale' ? <span key={`finale-${rotatorIndex}`} className="opening-rotator-text opening-text-finale opening-anim-finale">All in one <i>但不</i>是画布</span> : null}
+                {rotating.type === 'text' ? <span key={`text-${rotatorIndex}`} className={`opening-rotator-text ${rotating.visualClass} ${rotating.motionClass}`}>{rotating.text}</span> : null}
+              </span>
             </button> : null}
             <footer><span>{isTheme ? '主题字数' : '字数'}：{contentLength}</span><span>自动保存到本地草稿</span></footer>
           </div>
