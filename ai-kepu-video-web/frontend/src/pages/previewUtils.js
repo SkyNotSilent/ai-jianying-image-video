@@ -29,6 +29,26 @@ export function isTaskLoadPending({ loading, loadError, loadedTaskId, taskId }) 
   return Boolean(loading || (!loadError && loadedTaskId !== taskId))
 }
 
+export function createTaskRequestGuard(initialTaskId) {
+  let activeTaskId = initialTaskId
+  let generation = 0
+
+  return {
+    begin(taskId = activeTaskId) {
+      return { taskId, generation }
+    },
+    changeTask(taskId) {
+      if (taskId !== activeTaskId) {
+        activeTaskId = taskId
+        generation += 1
+      }
+    },
+    accepts(token) {
+      return token?.taskId === activeTaskId && token?.generation === generation
+    },
+  }
+}
+
 export function appendPromptGuidance(value) {
   const prompt = String(value || '').trim()
   if (prompt.includes(promptGuidance)) return prompt

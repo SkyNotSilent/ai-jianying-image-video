@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   appendPromptGuidance,
+  createTaskRequestGuard,
   getSegmentDraftSnapshot,
   getSegmentAssetState,
   isTaskLoadPending,
@@ -68,4 +69,17 @@ test('stops holding the editor in a loading state after the current task fails t
     loadedTaskId: null,
     taskId: 'task-b',
   }), false)
+})
+
+test('rejects a deferred task A completion after the route transitions to task B', async () => {
+  let resolveRequest
+  const request = new Promise(resolve => { resolveRequest = resolve })
+  const guard = createTaskRequestGuard('task-a')
+  const requestToken = guard.begin('task-a')
+  const completion = request.then(result => (guard.accepts(requestToken) ? result : null))
+
+  guard.changeTask('task-b')
+  resolveRequest({ image_url: '/media/task-a.png' })
+
+  assert.equal(await completion, null)
 })

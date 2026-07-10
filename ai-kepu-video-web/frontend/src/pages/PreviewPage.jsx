@@ -36,6 +36,7 @@ import { normalizeMediaUrl } from '../utils/mediaUrl'
 import { deriveTaskState, ratioClassName, ratioLabel } from '../utils/taskState'
 import {
   appendPromptGuidance,
+  createTaskRequestGuard,
   getSegmentDraftSnapshot,
   getSegmentAssetState,
   isTaskLoadPending,
@@ -61,6 +62,8 @@ export function PreviewPage() {
   const uploadRef = useRef(null)
   const playTimer = useRef(null)
   const loadRequestRef = useRef(0)
+  const taskRequestGuardRef = useRef(createTaskRequestGuard(taskId))
+  taskRequestGuardRef.current.changeTask(taskId)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
   const [task, setTask] = useState(null)
@@ -105,12 +108,20 @@ export function PreviewPage() {
     [assets, currentSegment?.segment_index],
   )
 
-  const reloadAssets = useCallback(async () => {
+  const beginTaskRequest = () => taskRequestGuardRef.current.begin(taskId)
+  const acceptsTaskRequest = requestToken => taskRequestGuardRef.current.accepts(requestToken)
+
+  const reloadAssets = useCallback(async requestToken => {
+    const token = requestToken || taskRequestGuardRef.current.begin(taskId)
     try {
       const nextAssets = await getTaskAssets(taskId)
+      if (!taskRequestGuardRef.current.accepts(token)) return false
       setAssets(Array.isArray(nextAssets) ? nextAssets : [])
+      return true
     } catch {
+      if (!taskRequestGuardRef.current.accepts(token)) return false
       setAssets([])
+      return true
     }
   }, [taskId])
 
@@ -206,97 +217,114 @@ export function PreviewPage() {
     )))
   }
 
-  const saveCurrentSegment = async ({ quiet = false } = {}) => {
+  const saveCurrentSegment = async ({ quiet = false, requestToken = beginTaskRequest() } = {}) => {
     if (!currentSegment) return false
     await updateSegment(taskId, segmentIndex(currentSegment, selectedIndex), {
       text: textDraft,
       image_prompt: imagePromptDraft,
     })
+    if (!acceptsTaskRequest(requestToken)) return false
     patchCurrentSegment({ text: textDraft, image_prompt: imagePromptDraft })
     if (!quiet) toast.success('片段已保存')
     return true
   }
 
   const saveSegment = async () => {
+    const requestToken = beginTaskRequest()
     try {
-      await saveCurrentSegment()
+      await saveCurrentSegment({ requestToken })
     } catch (error) {
-      toast.error(error?.response?.data?.detail || '保存片段失败')
+      if (acceptsTaskRequest(requestToken)) toast.error(error?.response?.data?.detail || '保存片段失败')
     }
   }
 
   const regenerateCurrentImage = async () => {
     if (!currentSegment) return
+    const requestToken = beginTaskRequest()
     setBusyAction('image')
     try {
-      await saveCurrentSegment({ quiet: true })
+      if (!await saveCurrentSegment({ quiet: true, requestToken })) return
       const result = await regenerateImage(taskId, segmentIndex(currentSegment, selectedIndex))
+      if (!acceptsTaskRequest(requestToken)) return
       patchCurrentSegment({ image_url: result?.image_url || currentSegment.image_url, image_status: 'completed' })
-      await reloadAssets()
+      await reloadAssets(requestToken)
+      if (!acceptsTaskRequest(requestToken)) return
       toast.success('图片已重新生成')
     } catch (error) {
-      toast.error(error?.response?.data?.detail || '重生图片失败')
+      if (acceptsTaskRequest(requestToken)) toast.error(error?.response?.data?.detail || '重生图片失败')
     } finally {
-      setBusyAction('')
+      if (acceptsTaskRequest(requestToken)) setBusyAction('')
     }
   }
 
   const regenerateCurrentAudio = async () => {
     if (!currentSegment) return
+    const requestToken = beginTaskRequest()
     setBusyAction('audio')
     try {
-      await saveCurrentSegment({ quiet: true })
+      if (!await saveCurrentSegment({ quiet: true, requestToken })) return
       const result = await regenerateAudio(taskId, segmentIndex(currentSegment, selectedIndex), selectedVoiceType || null)
+      if (!acceptsTaskRequest(requestToken)) return
       patchCurrentSegment({ audio_url: result?.audio_url || currentSegment.audio_url, audio_status: 'completed' })
-      await reloadAssets()
+      await reloadAssets(requestToken)
+      if (!acceptsTaskRequest(requestToken)) return
       toast.success('配音已重新生成')
     } catch (error) {
-      toast.error(error?.response?.data?.detail || '重配音失败')
+      if (acceptsTaskRequest(requestToken)) toast.error(error?.response?.data?.detail || '重配音失败')
     } finally {
-      setBusyAction('')
+      if (acceptsTaskRequest(requestToken)) setBusyAction('')
     }
   }
 
   const uploadReplacement = async event => {
     const file = event.target.files?.[0]
     if (!file || !currentSegment) return
+    const requestToken = beginTaskRequest()
     setBusyAction('upload')
     try {
       const result = await uploadImage(taskId, segmentIndex(currentSegment, selectedIndex), file)
+      if (!acceptsTaskRequest(requestToken)) return
       patchCurrentSegment({ image_url: result?.image_url || currentSegment.image_url, image_status: 'completed' })
-      await reloadAssets()
+      await reloadAssets(requestToken)
+      if (!acceptsTaskRequest(requestToken)) return
       toast.success('图片已替换')
     } catch (error) {
-      toast.error(error?.response?.data?.detail || '上传替换失败')
+      if (acceptsTaskRequest(requestToken)) toast.error(error?.response?.data?.detail || '上传替换失败')
     } finally {
       event.target.value = ''
-      setBusyAction('')
+      if (acceptsTaskRequest(requestToken)) setBusyAction('')
     }
   }
 
   const applyHistoricalImage = async asset => {
     if (!currentSegment || !asset?.has_file) return
+    const requestToken = beginTaskRequest()
     try {
       await selectSegmentImage(taskId, segmentIndex(currentSegment, selectedIndex), asset.asset_id)
+      if (!acceptsTaskRequest(requestToken)) return
       patchCurrentSegment({ image_url: asset.url || asset.file_url || currentSegment.image_url, image_status: 'completed' })
-      await reloadAssets()
+      await reloadAssets(requestToken)
+      if (!acceptsTaskRequest(requestToken)) return
       toast.success('已应用历史图片')
     } catch (error) {
-      toast.error(error?.response?.data?.detail || '应用历史图片失败')
+      if (acceptsTaskRequest(requestToken)) toast.error(error?.response?.data?.detail || '应用历史图片失败')
     }
   }
 
   const createFinalPreview = async () => {
+    const requestToken = beginTaskRequest()
     setRenderingPreview(true)
     try {
       await renderPreview(taskId)
+      if (!acceptsTaskRequest(requestToken)) return
       const nextExportState = await getExportState(taskId).catch(() => null)
+      if (!acceptsTaskRequest(requestToken)) return
       setExportState(nextExportState)
       toast.success('最终预览已生成')
     } catch (error) {
-      toast.error(error?.response?.data?.detail || '生成最终预览失败')
+      if (acceptsTaskRequest(requestToken)) toast.error(error?.response?.data?.detail || '生成最终预览失败')
     } finally {
-      setRenderingPreview(false)
+      if (acceptsTaskRequest(requestToken)) setRenderingPreview(false)
     }
   }
 
@@ -372,7 +400,7 @@ export function PreviewPage() {
             <section className="preview-subtitle-settings"><div><span>启用字幕</span><strong>开启</strong></div><div><span>字幕位置</span><strong>底部安全区</strong></div></section>
             <div className="preview-action-grid"><button type="button" className="button button-secondary" onClick={saveSegment}><Save size={16} />保存文案</button><button type="button" className="button button-secondary" onClick={() => uploadRef.current?.click()} disabled={busyAction === 'upload'}><Upload size={16} />上传替换</button><button type="button" className="button button-secondary" onClick={regenerateCurrentImage} disabled={busyAction === 'image'}><RefreshCw size={16} />{busyAction === 'image' ? '生成中...' : '重生图片'}</button><button type="button" className="button button-secondary" onClick={regenerateCurrentAudio} disabled={busyAction === 'audio'}><Volume2 size={16} />{busyAction === 'audio' ? '生成中...' : '重配音'}</button></div>
             <input ref={uploadRef} type="file" accept="image/*" hidden onChange={uploadReplacement} />
-            <section className="preview-history"><header><strong>历史图片</strong><button type="button" className="icon-button" onClick={reloadAssets} aria-label="刷新历史图片" title="刷新历史图片"><RefreshCw size={16} /></button></header><div>{imageAssets.length ? imageAssets.map(asset => <button type="button" key={asset.asset_id} disabled={!asset.has_file} onClick={() => applyHistoricalImage(asset)} title={asset.label || '应用历史图片'}>{asset.url || asset.file_url ? <img src={normalizeMediaUrl(asset.url || asset.file_url)} alt={asset.label || '历史图片'} /> : <FileImage size={17} />}</button>) : <p>暂无历史图片</p>}</div></section>
+            <section className="preview-history"><header><strong>历史图片</strong><button type="button" className="icon-button" onClick={() => reloadAssets()} aria-label="刷新历史图片" title="刷新历史图片"><RefreshCw size={16} /></button></header><div>{imageAssets.length ? imageAssets.map(asset => <button type="button" key={asset.asset_id} disabled={!asset.has_file} onClick={() => applyHistoricalImage(asset)} title={asset.label || '应用历史图片'}>{asset.url || asset.file_url ? <img src={normalizeMediaUrl(asset.url || asset.file_url)} alt={asset.label || '历史图片'} /> : <FileImage size={17} />}</button>) : <p>暂无历史图片</p>}</div></section>
             <section className="preview-asset-warning"><CircleAlert size={17} /><p>即使任务失败，已生成的图片、配音和文案仍会在这里保留。</p></section>
             <button type="button" className={state.canExport ? 'button button-primary preview-export-button' : 'button button-secondary preview-export-button'} onClick={openExport}>{state.canExport ? '导出视频' : '查看导出状态'}</button>
           </> : <EmptyState title="等待分镜" description="分镜写入后将在此处显示编辑控件。" />}
