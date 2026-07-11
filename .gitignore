@@ -29,6 +29,7 @@ logs/
 
 # Local tooling and OS files
 .worktrees/
+.superpowers/
 .playwright-mcp/
 .claude/
 .vscode/
