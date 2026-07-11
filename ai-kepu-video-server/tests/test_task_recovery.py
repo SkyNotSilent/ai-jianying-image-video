@@ -76,6 +76,65 @@ def test_checkpoint_migration_preserves_existing_task(tmp_path, monkeypatch):
     assert row["input_mode"] == "script"
 
 
+def test_checkpoint_migration_recovers_from_partial_column_application(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / "partial-migration.db"
+    connection = sqlite3.connect(db_path)
+    connection.executescript(
+        """
+        CREATE TABLE tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL UNIQUE,
+            name TEXT,
+            theme TEXT NOT NULL,
+            style TEXT NOT NULL DEFAULT '温暖感人',
+            length INTEGER NOT NULL DEFAULT 300,
+            ratio TEXT NOT NULL DEFAULT '16:9',
+            voice_type TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            current_step TEXT DEFAULT 'pending',
+            error TEXT,
+            extract_path TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            completed_at TEXT,
+            script_text TEXT
+        );
+        CREATE TABLE schema_migrations (
+            version TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+        );
+        INSERT INTO tasks (task_id, theme, style, length, script_text)
+        VALUES (
+            'partial-task', '部分迁移任务', '知识科普|电影质感', 100, '已保存脚本'
+        );
+        """
+    )
+    connection.commit()
+    connection.close()
+    monkeypatch.setattr(sqlite_client_module, "DB_PATH", db_path)
+
+    client = SQLiteClient()
+    row = client.get_task("partial-task")
+
+    assert row is not None
+    assert row["theme"] == "部分迁移任务"
+    assert row["script_text"] == "已保存脚本"
+    assert row["summary"] is None
+    assert row["input_mode"] == "script"
+    with client.get_connection() as connection:
+        columns = {
+            column["name"] for column in connection.execute("PRAGMA table_info(tasks)")
+        }
+        marker = connection.execute(
+            "SELECT version FROM schema_migrations WHERE version=?",
+            ("20260711_task_recovery_checkpoints",),
+        ).fetchone()
+    assert {"script_text", "summary", "input_mode"}.issubset(columns)
+    assert marker["version"] == "20260711_task_recovery_checkpoints"
+
+
 def test_segment_checkpoint_updates_only_allowed_fields(temp_db):
     temp_db.create_task("task-1", "主题", "知识科普|电影质感", 100)
     temp_db.save_segments(

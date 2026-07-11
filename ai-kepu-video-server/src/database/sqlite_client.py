@@ -205,14 +205,15 @@ class SQLiteClient:
                     ON task_assets(task_id, asset_type, segment_index);
                 """,
             )
-            self._apply_migration(
+            self._apply_column_migration(
                 cursor,
                 "20260711_task_recovery_checkpoints",
-                """
-                ALTER TABLE tasks ADD COLUMN script_text TEXT;
-                ALTER TABLE tasks ADD COLUMN summary TEXT;
-                ALTER TABLE tasks ADD COLUMN input_mode TEXT NOT NULL DEFAULT 'script';
-                """,
+                "tasks",
+                {
+                    "script_text": "TEXT",
+                    "summary": "TEXT",
+                    "input_mode": "TEXT NOT NULL DEFAULT 'script'",
+                },
             )
 
             conn.commit()
@@ -228,6 +229,24 @@ class SQLiteClient:
         if cursor.fetchone():
             return
         cursor.executescript(sql)
+        cursor.execute("INSERT INTO schema_migrations (version) VALUES (?)", (version,))
+        logger.info(f"SQLite 迁移已应用: {version}")
+
+    def _apply_column_migration(self, cursor, version: str, table: str,
+                                columns: Dict[str, str]) -> None:
+        cursor.execute("SELECT 1 FROM schema_migrations WHERE version=?", (version,))
+        if cursor.fetchone():
+            return
+
+        cursor.execute(f"PRAGMA table_info({table})")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+        for column_name, column_definition in columns.items():
+            if column_name in existing_columns:
+                continue
+            cursor.execute(
+                f"ALTER TABLE {table} ADD COLUMN {column_name} {column_definition}"
+            )
+
         cursor.execute("INSERT INTO schema_migrations (version) VALUES (?)", (version,))
         logger.info(f"SQLite 迁移已应用: {version}")
 
