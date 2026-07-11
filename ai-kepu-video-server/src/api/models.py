@@ -12,8 +12,10 @@ class TaskStatus(str, Enum):
     """任务状态枚举"""
     PENDING = "pending"
     PROCESSING = "processing"
+    INTERRUPTED = "interrupted"
     COMPLETED = "completed"
     FAILED = "failed"
+    DELETING = "deleting"
 
 
 class StepStatus(str, Enum):

@@ -181,7 +181,11 @@ class Task:
             task_id=self.task_id,
             status=self.status,
             voice_type=self.voice_type,
-            progress=progress if self.status in [TaskStatus.PENDING, TaskStatus.PROCESSING] else None,
+            progress=progress if self.status in [
+                TaskStatus.PENDING,
+                TaskStatus.PROCESSING,
+                TaskStatus.INTERRUPTED,
+            ] else None,
             result=self.result,
             extract_path=self.extract_path,
             error=self.error
@@ -399,9 +403,34 @@ class TaskManager:
         return True
 
     def mark_stale_tasks_failed(self, limit: int = 200) -> int:
-        rows = db_client.list_tasks(status="pending", limit=limit, offset=0)
-        rows.extend(db_client.list_tasks(status="processing", limit=limit, offset=0))
-        return sum(1 for row in rows if self.fail_stale_task_data(row))
+        """兼容旧启动调用，遗留任务现在标记为可恢复的中断状态。"""
+        return self.mark_orphaned_tasks_interrupted(limit=limit)
+
+    def mark_orphaned_tasks_interrupted(self, limit: int = 200) -> int:
+        """将上一个进程遗留的运行任务标记为可恢复的中断状态。"""
+        pending_rows = db_client.list_tasks(status="pending", limit=limit, offset=0)
+        remaining = max(0, limit - len(pending_rows))
+        processing_rows = db_client.list_tasks(
+            status="processing", limit=remaining, offset=0
+        ) if remaining else []
+        interrupted_count = 0
+        error = "服务重启导致任务中断，可继续生成"
+
+        for row in pending_rows + processing_rows:
+            task_id = row["task_id"]
+            if not db_client.update_task_status(
+                task_id,
+                TaskStatus.INTERRUPTED.value,
+                row.get("current_step"),
+                error,
+            ):
+                continue
+            with self.lock:
+                self.tasks.pop(task_id, None)
+            redis_client.delete_task(task_id)
+            interrupted_count += 1
+
+        return interrupted_count
 
     def update_task_status(self, task_id: str, status: TaskStatus):
         """更新任务状态"""

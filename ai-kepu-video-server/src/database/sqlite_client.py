@@ -20,6 +20,13 @@ DB_PATH = Path(__file__).parent.parent.parent / "data" / "local.db"
 class SQLiteClient:
     """SQLite 数据库客户端"""
 
+    TASK_CHECKPOINT_COLUMNS = frozenset({"script_text", "summary", "input_mode"})
+    SEGMENT_CHECKPOINT_COLUMNS = frozenset({
+        "text", "image_prompt", "image_path", "image_url", "image_status",
+        "image_error", "audio_path", "audio_url", "audio_status", "audio_error",
+        "duration",
+    })
+
     def __init__(self):
         self._initialized = False
 
@@ -198,6 +205,15 @@ class SQLiteClient:
                     ON task_assets(task_id, asset_type, segment_index);
                 """,
             )
+            self._apply_migration(
+                cursor,
+                "20260711_task_recovery_checkpoints",
+                """
+                ALTER TABLE tasks ADD COLUMN script_text TEXT;
+                ALTER TABLE tasks ADD COLUMN summary TEXT;
+                ALTER TABLE tasks ADD COLUMN input_mode TEXT NOT NULL DEFAULT 'script';
+                """,
+            )
 
             conn.commit()
             conn.close()
@@ -330,6 +346,47 @@ class SQLiteClient:
         except Exception as e:
             logger.error(f"更新任务状态失败: {e}")
             return False
+
+    def _update_task_fields(self, task_id: str, updates: Dict) -> bool:
+        fields = {
+            key: value for key, value in updates.items()
+            if key in self.TASK_CHECKPOINT_COLUMNS
+        }
+        if not fields:
+            return False
+
+        if not self._initialized:
+            self._init_db()
+        if not self._initialized:
+            return False
+        try:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            set_parts = [f"{key}=?" for key in fields]
+            values = list(fields.values())
+            values.append(task_id)
+            cur.execute(
+                f"UPDATE tasks SET {', '.join(set_parts)}, "
+                "updated_at=datetime('now','localtime') WHERE task_id=?",
+                values,
+            )
+            updated = cur.rowcount > 0
+            conn.commit()
+            conn.close()
+            return updated
+        except Exception as e:
+            logger.error(f"更新任务检查点失败: {e}")
+            return False
+
+    def save_task_checkpoint(self, task_id: str, script_text: str = None,
+                             summary: str = None, input_mode: str = None) -> bool:
+        values = {
+            "script_text": script_text,
+            "summary": summary,
+            "input_mode": input_mode,
+        }
+        updates = {key: value for key, value in values.items() if value is not None}
+        return self._update_task_fields(task_id, updates)
 
     def save_task_result(self, task_id: str, draft_path: str, segments_count: int,
                          draft_url: str = None, video_url: str = None, total_duration: float = None) -> bool:
@@ -587,6 +644,12 @@ class SQLiteClient:
             return []
 
     def update_segment(self, task_id: str, segment_index: int, updates: Dict) -> bool:
+        return self._update_segment_fields(task_id, segment_index, updates)
+
+    def update_segment_checkpoint(self, task_id: str, segment_index: int, **updates) -> bool:
+        return self._update_segment_fields(task_id, segment_index, updates)
+
+    def _update_segment_fields(self, task_id: str, segment_index: int, updates: Dict) -> bool:
         if not self._initialized:
             self._init_db()
         if not self._initialized:
@@ -599,7 +662,7 @@ class SQLiteClient:
             for key, value in updates.items():
                 if value is None:
                     continue
-                if key in ['text', 'image_prompt', 'image_path', 'image_url', 'image_status', 'image_error', 'audio_path', 'audio_url', 'audio_status', 'audio_error', 'duration']:
+                if key in self.SEGMENT_CHECKPOINT_COLUMNS:
                     set_parts.append(f"{key}=?")
                     values.append(value)
             if not set_parts:
@@ -607,12 +670,14 @@ class SQLiteClient:
                 return False
             values.extend([task_id, segment_index])
             cur.execute(
-                f"UPDATE task_segments SET {', '.join(set_parts)} WHERE task_id=? AND segment_index=?",
+                f"UPDATE task_segments SET {', '.join(set_parts)}, "
+                "updated_at=datetime('now','localtime') WHERE task_id=? AND segment_index=?",
                 values
             )
+            updated = cur.rowcount > 0
             conn.commit()
             conn.close()
-            return True
+            return updated
         except Exception as e:
             logger.error(f"更新段落失败: {e}")
             return False
