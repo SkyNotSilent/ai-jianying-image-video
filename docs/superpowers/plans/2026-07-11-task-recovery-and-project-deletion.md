@@ -29,7 +29,7 @@
 - Create `ai-kepu-video-server/tests/test_task_cleanup.py`: safe-path deletion and record cleanup tests.
 - Create `ai-kepu-video-web/frontend/src/pages/projectActions.js`: pure project action and confirmation-copy helpers.
 - Create `ai-kepu-video-web/frontend/tests/projectActions.test.mjs`: interrupted action and deletion-copy tests.
-- Modify `ai-kepu-video-server/src/api/models.py`: add `interrupted` task status and expose progress for recoverable tasks.
+- Modify `ai-kepu-video-server/src/api/models.py`: add `interrupted` and internal `deleting` task statuses and expose progress for recoverable tasks.
 - Modify `ai-kepu-video-server/src/database/sqlite_client.py`: add checkpoint columns and checkpoint update methods.
 - Modify `ai-kepu-video-server/src/api/task_manager.py`: preserve interrupted state and convert stale running tasks to interrupted.
 - Modify `ai-kepu-video-server/src/api/task_executor.py`: persist checkpoints, skip completed work, resume, cancel, and use task-owned output directories.
@@ -53,7 +53,7 @@
 - Test: `ai-kepu-video-server/tests/test_task_recovery.py`
 
 **Interfaces:**
-- Produces: `TaskStatus.INTERRUPTED`, `SQLiteClient.save_task_checkpoint(task_id, script_text=None, summary=None, input_mode=None) -> bool`, `SQLiteClient.update_segment_checkpoint(task_id, segment_index, **updates) -> bool`, and `TaskManager.mark_orphaned_tasks_interrupted(limit=200) -> int`.
+- Produces: `TaskStatus.INTERRUPTED`, `TaskStatus.DELETING`, `SQLiteClient.save_task_checkpoint(task_id, script_text=None, summary=None, input_mode=None) -> bool`, `SQLiteClient.update_segment_checkpoint(task_id, segment_index, **updates) -> bool`, and `TaskManager.mark_orphaned_tasks_interrupted(limit=200) -> int`.
 - Consumes: existing `tasks`, `task_steps`, and `task_segments` tables.
 
 - [ ] **Step 1: Write failing status and checkpoint tests**
@@ -93,7 +93,7 @@ def save_task_checkpoint(self, task_id, script_text=None, summary=None, input_mo
     return self._update_task_fields(task_id, updates)
 ```
 
-Add `INTERRUPTED = "interrupted"` and include interrupted progress in `Task.to_response()`.
+Add `INTERRUPTED = "interrupted"`, `DELETING = "deleting"`, and include interrupted progress in `Task.to_response()`. The deleting status is internal and must be excluded from the user-facing project list.
 
 - [ ] **Step 4: Replace stale failure conversion with orphan interruption**
 
@@ -269,12 +269,11 @@ def test_delete_task_files_removes_only_allowed_owned_paths(tmp_path):
     assert outside.exists()
     assert str(outside) in report.skipped_paths
 
-def test_delete_refuses_to_remove_database_row_while_task_is_running(monkeypatch):
+def test_delete_running_task_is_accepted_once_and_finishes_after_stop(monkeypatch):
     monkeypatch.setattr(routes.task_manager, "get_task", lambda task_id: object())
-    monkeypatch.setattr(routes.task_executor, "cancel_task", lambda task_id, timeout=30: False)
-    with pytest.raises(HTTPException) as error:
-        asyncio.run(routes.delete_task("task-1", delete_files=True))
-    assert error.value.status_code == 409
+    monkeypatch.setattr(routes.task_executor, "request_delete", lambda task_id: "deleting")
+    result = asyncio.run(routes.delete_task("task-1", delete_files=True))
+    assert result["outcome"] == "deleting"
 ```
 
 - [ ] **Step 2: Run cleanup tests and verify they fail**
@@ -300,9 +299,9 @@ class DeletionReport:
 
 Map executor outcomes to HTTP behavior: `started` -> 202, `already_running` -> 200, `already_completed` -> 200, `not_recoverable` -> 409, missing task -> 404. Return `{task_id, status, outcome}`.
 
-- [ ] **Step 5: Enhance delete route**
+- [ ] **Step 5: Enhance delete route and deferred cleanup**
 
-Set an executor deletion claim, request cancellation, and wait up to 30 seconds. If still running, return 409 without deleting. Otherwise snapshot task rows and paths, delete database records, then delete files. Return the `DeletionReport`; repeat deletion returns 404.
+Snapshot the task rows and owned paths, set status to `deleting`, claim deletion in the runtime registry, and request cancellation. If the task is idle, delete records and files synchronously and return `outcome=deleted`. If it is running, start one cleanup thread that waits for the execution token to finish, then deletes records and files; return `outcome=deleting` with HTTP 202. A repeated delete for the same `deleting` task is idempotent and returns HTTP 202 without starting a second cleanup thread. At startup, finish cleanup for persisted `deleting` tasks before converting orphaned processing tasks to interrupted.
 
 - [ ] **Step 6: Change startup recovery**
 
@@ -366,7 +365,7 @@ Expected: FAIL because interrupted state and `projectActions.js` are missing.
 
 - [ ] **Step 4: Add project-card menu and async confirmation**
 
-Show the icon menu for every project. Selecting delete opens `ConfirmDialog`; generated-project confirmation explicitly names permanent artifacts. While deleting, set `confirmDisabled` and label the button `正在删除...`. On success remove the task from `remoteTasks`, `taskSegments`, and cover maps without waiting for a full reload. On partial file failures, show a warning toast with the count.
+Show the icon menu for every project. Selecting delete opens `ConfirmDialog`; generated-project confirmation explicitly names permanent artifacts. While submitting deletion, set `confirmDisabled` and label the button `正在删除...`. On `deleted` or `deleting`, remove the task from `remoteTasks`, `taskSegments`, and cover maps without waiting for a full reload. Filter internal `deleting` rows from any subsequent project-list response. On synchronous partial file failures, show a warning toast with the count; deferred cleanup failures are logged by the backend maintenance report.
 
 - [ ] **Step 5: Add resume actions**
 
