@@ -28,6 +28,7 @@ logs/
 *.tmp
 
 # Local tooling and OS files
+.worktrees/
 .playwright-mcp/
 .claude/
 .vscode/
