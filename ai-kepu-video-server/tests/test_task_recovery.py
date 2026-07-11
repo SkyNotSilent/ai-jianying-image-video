@@ -123,3 +123,15 @@ def test_interrupted_status_keeps_progress_in_task_response():
 
     assert TaskStatus.DELETING.value == "deleting"
     assert task.to_response().progress is not None
+
+
+def test_deleting_tasks_are_hidden_from_default_and_explicit_lists(
+    task_manager, temp_db
+):
+    temp_db.create_task("visible-task", "可见任务", "知识科普|电影质感", 100)
+    temp_db.update_task_status("visible-task", "completed", "video_synthesis")
+    temp_db.create_task("deleting-task", "删除中任务", "知识科普|电影质感", 100)
+    temp_db.update_task_status("deleting-task", "deleting", "image_generation")
+
+    assert [row["task_id"] for row in task_manager.list_tasks()] == ["visible-task"]
+    assert task_manager.list_tasks(status="deleting") == []

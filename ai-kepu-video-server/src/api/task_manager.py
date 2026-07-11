@@ -375,7 +375,10 @@ class TaskManager:
             changed = self.fail_stale_task_data(row) or changed
         if changed:
             rows = db_client.list_tasks(status=status, limit=limit, offset=offset)
-        return rows
+        return [
+            row for row in rows
+            if row.get("status") != TaskStatus.DELETING.value
+        ]
 
     def fail_stale_task_data(self, data: dict) -> bool:
         """将长时间无更新的 pending/processing 任务标记为失败"""
