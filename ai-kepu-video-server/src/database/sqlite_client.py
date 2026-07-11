@@ -366,6 +366,32 @@ class SQLiteClient:
             logger.error(f"更新任务状态失败: {e}")
             return False
 
+    def mark_task_interrupted(
+        self, task_id: str, current_step: str = None, error: str = None
+    ) -> bool:
+        """Mark a task interrupted unless deletion has already claimed it."""
+        if not self._initialized:
+            self._init_db()
+        if not self._initialized:
+            return False
+        try:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            cur.execute(
+                """UPDATE tasks
+                   SET status='interrupted', current_step=?, error=?,
+                       updated_at=datetime('now','localtime')
+                   WHERE task_id=? AND status != 'deleting'""",
+                (current_step, error, task_id),
+            )
+            updated = cur.rowcount > 0
+            conn.commit()
+            conn.close()
+            return updated
+        except Exception as exc:
+            logger.error(f"标记任务中断失败: {exc}")
+            return False
+
     def _update_task_fields(self, task_id: str, updates: Dict) -> bool:
         fields = {
             key: value for key, value in updates.items()

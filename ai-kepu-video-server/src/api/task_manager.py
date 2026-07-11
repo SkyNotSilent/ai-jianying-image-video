@@ -448,6 +448,18 @@ class TaskManager:
             # 更新到内存缓存
             redis_client.cache_task(task_id, self._task_to_dict(task))
 
+    def mark_task_interrupted(self, task_id: str, error: str) -> bool:
+        """Preserve checkpoints and expose the task as resumable."""
+        task = self.get_task(task_id)
+        current_step = task.current_step if task else None
+        if not db_client.mark_task_interrupted(task_id, current_step, error):
+            return False
+        if task:
+            task.status = TaskStatus.INTERRUPTED
+            task.error = error
+            redis_client.cache_task(task_id, self._task_to_dict(task))
+        return True
+
     def set_task_result(self, task_id: str, draft_path: str, segments_count: int, draft_url: str = None, video_url: str = None):
         """设置任务结果"""
         task = self.get_task(task_id)
