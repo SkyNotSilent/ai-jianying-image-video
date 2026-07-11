@@ -135,3 +135,26 @@ def test_deleting_tasks_are_hidden_from_default_and_explicit_lists(
 
     assert [row["task_id"] for row in task_manager.list_tasks()] == ["visible-task"]
     assert task_manager.list_tasks(status="deleting") == []
+    assert [
+        row["task_id"] for row in temp_db.list_tasks(status="deleting")
+    ] == ["deleting-task"]
+
+
+def test_deleting_tasks_do_not_consume_default_pagination(task_manager, temp_db):
+    tasks = [
+        ("visible-task", "completed", "2026-07-11 12:00:00"),
+        ("deleting-task-1", "deleting", "2026-07-11 12:02:00"),
+        ("deleting-task-2", "deleting", "2026-07-11 12:01:00"),
+    ]
+    for task_id, status, created_at in tasks:
+        temp_db.create_task(task_id, task_id, "知识科普|电影质感", 100)
+        temp_db.update_task_status(task_id, status, "image_generation")
+        with temp_db.get_connection() as connection:
+            connection.execute(
+                "UPDATE tasks SET created_at=? WHERE task_id=?",
+                (created_at, task_id),
+            )
+
+    rows = task_manager.list_tasks(limit=1, offset=0)
+
+    assert [row["task_id"] for row in rows] == ["visible-task"]

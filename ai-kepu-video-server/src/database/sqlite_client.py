@@ -577,8 +577,9 @@ class SQLiteClient:
                                 LIMIT 1
                               ) AS cover_image_path
                        FROM tasks t LEFT JOIN task_results r ON t.task_id = r.task_id
+                       WHERE t.status != ?
                        ORDER BY t.created_at DESC LIMIT ? OFFSET ?""",
-                    (limit, offset)
+                    ("deleting", limit, offset)
                 )
             rows = [dict(r) for r in cur.fetchall()]
             conn.close()
