@@ -13,6 +13,7 @@ from threading import Thread
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 from .task_manager import task_manager, TaskStatus
+from .task_runtime import TaskCancellation, TaskCancelled, task_runtime
 from src.core.pipeline import VideoEditorPipeline
 from src.utils.local_uploader import LocalUploader
 from src.export.ffmpeg_exporter import FFmpegExporter
@@ -42,14 +43,66 @@ class TaskExecutor:
     def __init__(self):
         pass
 
-    def execute_task(self, task_id: str, theme: str, style: str, length: int, voice_type: Optional[str] = None, ratio: str = "16:9", input_mode: str = "script"):
+    def execute_task(self, task_id: str, theme: str, style: str, length: int, voice_type: Optional[str] = None, ratio: str = "16:9", input_mode: str = "script") -> bool:
         """在后台线程中执行任务"""
-        thread = Thread(target=self._run_task, args=(task_id, theme, style, length, voice_type, ratio, input_mode))
-        thread.daemon = True
-        thread.start()
-        logger.info(f"[{task_id}] 启动后台任务线程")
+        cancellation = task_runtime.begin(task_id)
+        if cancellation is None:
+            logger.info(f"[{task_id}] 任务已在执行，跳过重复启动")
+            return False
 
-    def _run_task(self, task_id: str, theme: str, style: str, length: int, voice_type: Optional[str] = None, ratio: str = "16:9", input_mode: str = "script"):
+        thread = Thread(
+            target=self._run_registered_task,
+            args=(
+                cancellation,
+                task_id,
+                theme,
+                style,
+                length,
+                voice_type,
+                ratio,
+                input_mode,
+            ),
+        )
+        thread.daemon = True
+        try:
+            thread.start()
+        except Exception:
+            task_runtime.finish(task_id, cancellation)
+            raise
+        logger.info(f"[{task_id}] 启动后台任务线程")
+        return True
+
+    def _run_registered_task(
+        self,
+        cancellation: TaskCancellation,
+        task_id: str,
+        theme: str,
+        style: str,
+        length: int,
+        voice_type: Optional[str],
+        ratio: str,
+        input_mode: str,
+    ) -> None:
+        try:
+            self._run_task(
+                task_id,
+                theme,
+                style,
+                length,
+                voice_type,
+                ratio,
+                input_mode,
+                cancellation=cancellation,
+            )
+        finally:
+            task_runtime.finish(task_id, cancellation)
+
+    def cancel_task(self, task_id: str, timeout: float = 30) -> bool:
+        if not task_runtime.request_cancel(task_id):
+            return True
+        return task_runtime.wait_until_stopped(task_id, timeout)
+
+    def _run_task(self, task_id: str, theme: str, style: str, length: int, voice_type: Optional[str] = None, ratio: str = "16:9", input_mode: str = "script", cancellation: Optional[TaskCancellation] = None):
         """执行任务的实际逻辑"""
         import time
         from src.database import db_client
@@ -68,6 +121,9 @@ class TaskExecutor:
         voice_failures = []
 
         try:
+            if cancellation:
+                cancellation.raise_if_cancelled()
+
             # 更新任务状态为处理中
             task_manager.update_task_status(task_id, TaskStatus.PROCESSING)
             logger.info(f"[{task_id}] ========== 开始执行任务 ==========")
@@ -118,6 +174,8 @@ class TaskExecutor:
             logger.info(f"[{task_id}] [1/7] 脚本生成完成，共 {len(pipeline.article)} 字")
             logger.info(f"[{task_id}] 内容总结: {pipeline.summary}")
             task.complete_step("text_generation")
+            if cancellation:
+                cancellation.raise_if_cancelled()
 
             # 步骤 2: 短节奏分段，约 20 字一段，对应更密的画面切换
             logger.info(f"[{task_id}] [2/7] 开始短节奏分段...")
@@ -134,6 +192,8 @@ class TaskExecutor:
             logger.info(
                 f"[{task_id}] 生成并发配置: 配音={tts_concurrency}, 生图={image_concurrency}"
             )
+            if cancellation:
+                cancellation.raise_if_cancelled()
 
             # 步骤 3: 逐段生成图像 prompts
             logger.info(f"[{task_id}] [3/7] 开始逐段生成图像描述...")
@@ -164,6 +224,8 @@ class TaskExecutor:
             logger.info(f"[{task_id}] 已提前保存分镜和图片提示词，共 {len(initial_segments_data)} 段")
             logger.info(f"[{task_id}] [3/7] 图像描述生成完成")
             task.complete_step("image_prompt_generation")
+            if cancellation:
+                cancellation.raise_if_cancelled()
 
             # 步骤 4-5: 配音和生图互不依赖，并行执行；内部并发由模型配置页控制。
             logger.info(f"[{task_id}] [4-5/7] 开始并行生成配音和图像（共 {segments_count} 段）...")
@@ -312,6 +374,8 @@ class TaskExecutor:
                 logger.warning(f"[{task_id}] 资源生成部分失败，共 {len(all_failures)} 项: {all_failures}")
 
             logger.info(f"[{task_id}] [4-5/7] 配音和图像生成完成")
+            if cancellation:
+                cancellation.raise_if_cancelled()
 
             # 步骤 6: 草稿构建
             logger.info(f"[{task_id}] [6/7] 开始构建剪映草稿...")
@@ -325,6 +389,8 @@ class TaskExecutor:
             )
             logger.info(f"[{task_id}] [6/7] 草稿构建完成")
             task.complete_step("draft_building")
+            if cancellation:
+                cancellation.raise_if_cancelled()
 
             # 检查草稿目录内容
             logger.debug(f"[{task_id}] 检查草稿目录内容: {draft_dir}")
@@ -384,6 +450,9 @@ class TaskExecutor:
                 logger.warning(f"[{task_id}] 打包失败（不影响草稿）: {e}")
                 logger.exception(f"[{task_id}] 打包错误详情:")
 
+            if cancellation:
+                cancellation.raise_if_cancelled()
+
             # 步骤 7: 视频合成并保存到本地媒体目录
             logger.info(f"[{task_id}] [7/7] 开始视频合成...")
             task.start_step("video_synthesis")
@@ -418,6 +487,9 @@ class TaskExecutor:
                 logger.warning(f"[{task_id}] 视频合成失败（不影响草稿）: {e}")
                 logger.exception(f"[{task_id}] 视频合成错误详情:")
                 task.fail_step("video_synthesis", str(e))
+
+            if cancellation:
+                cancellation.raise_if_cancelled()
 
             # 保存段落数据到数据库
             logger.info(f"[{task_id}] 保存段落数据到数据库...")
@@ -518,6 +590,8 @@ class TaskExecutor:
                 f"音频={audio_ok}成功/{audio_failed}失败, 草稿={draft_path}, 视频={video_path}, 耗时={elapsed:.1f}s"
             )
 
+        except TaskCancelled:
+            logger.info(f"[{task_id}] 任务已在阶段检查点取消")
         except Exception as e:
             elapsed = time.time() - started_at
             image_ok = audio_ok = image_failed = audio_failed = 0
