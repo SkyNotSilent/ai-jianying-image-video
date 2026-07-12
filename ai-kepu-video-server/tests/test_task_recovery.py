@@ -112,6 +112,11 @@ class FakeUploader:
         return f"/media/{storage_path or Path(path).name}"
 
 
+class FailingUploader:
+    def upload(self, path, storage_path=None):
+        raise OSError("copy failed")
+
+
 class FakeFFmpegExporter:
     def __init__(self, **kwargs):
         pass
@@ -897,14 +902,15 @@ def test_stage_cancellation_drains_and_persists_all_submitted_assets(
     )
     cancellation = TaskCancellation()
     pipeline = FakePipeline(output_dir=str(tmp_path / "generated"))
-    image_calls_started = threading.Barrier(2)
+    provider_calls_started = threading.Barrier(4)
 
-    def cancel_after_both_image_calls_started(index):
-        image_calls_started.wait(timeout=1)
+    def cancel_after_all_provider_calls_started(index):
+        provider_calls_started.wait(timeout=1)
         if index == 0:
             cancellation.cancel()
 
-    pipeline.image_generator.on_generate = cancel_after_both_image_calls_started
+    pipeline.image_generator.on_generate = cancel_after_all_provider_calls_started
+    pipeline.voiceover_generator.on_generate = cancel_after_all_provider_calls_started
     monkeypatch.setattr(task_executor_module, "LocalUploader", FakeUploader)
     monkeypatch.setattr(
         task_executor_module.Config,
@@ -1296,17 +1302,32 @@ def test_task_cancelled_future_does_not_drop_other_successful_result(
             "audio_status": "completed",
         })
     executor_db.save_segments("task-1", segments)
+    cancellation = TaskCancellation()
     pipeline = FakePipeline(output_dir=str(tmp_path / "generated"))
-    pipeline.image_generator.cancel_indexes = {0}
+    provider_calls_started = threading.Barrier(2)
+
+    def generate_started_images(value, **kwargs):
+        index = kwargs["index"]
+        pipeline.image_generator.calls.append(index)
+        provider_calls_started.wait(timeout=1)
+        if index == 0:
+            cancellation.cancel()
+            raise TaskCancelled("cancelled item 0")
+        path = tmp_path / "generated" / "images" / "seg_001.png"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"png")
+        return str(path)
+
+    pipeline.image_generator.generate = generate_started_images
     monkeypatch.setattr(task_executor_module, "LocalUploader", FakeUploader)
     monkeypatch.setattr(
         task_executor_module.Config,
         "generation_config",
-        lambda: {"tts_concurrency": 1, "image_concurrency": 1},
+        lambda: {"tts_concurrency": 1, "image_concurrency": 2},
     )
 
     TaskExecutor(pipeline_factory=lambda **kwargs: pipeline).run_inline(
-        "task-1", cancellation=TaskCancellation()
+        "task-1", cancellation=cancellation
     )
 
     rows = executor_db.get_segments("task-1")
@@ -1317,3 +1338,131 @@ def test_task_cancelled_future_does_not_drop_other_successful_result(
     assert [asset["segment_index"] for asset in image_assets] == [1]
     assert executor_db.get_task("task-1")["status"] == "interrupted"
     assert pipeline.draft_builder.calls == 0
+
+
+@pytest.mark.parametrize(
+    ("asset_type", "completed_path_field", "completed_status_field"),
+    [
+        ("image", "audio_path", "audio_status"),
+        ("audio", "image_path", "image_status"),
+    ],
+)
+def test_cancelled_worker_skips_paid_provider_calls_still_queued(
+    executor_db,
+    tmp_path,
+    monkeypatch,
+    asset_type,
+    completed_path_field,
+    completed_status_field,
+):
+    create_task(executor_db, status="interrupted")
+    executor_db.save_task_checkpoint(
+        "task-1", script_text="脚本", summary="摘要", input_mode="script"
+    )
+    segments = []
+    completed_suffix = "wav" if asset_type == "image" else "png"
+    for index in range(2):
+        completed_path = tmp_path / "legacy" / f"seg_{index}.{completed_suffix}"
+        completed_path.parent.mkdir(parents=True, exist_ok=True)
+        completed_path.write_bytes(completed_suffix.encode())
+        segments.append({
+            "segment_index": index,
+            "text": f"第{index}段",
+            "image_prompt": f"提示{index}",
+            "image_status": "pending" if asset_type == "image" else "completed",
+            "audio_status": "pending" if asset_type == "audio" else "completed",
+            completed_path_field: str(completed_path),
+            completed_status_field: "completed",
+        })
+    executor_db.save_segments("task-1", segments)
+    cancellation = TaskCancellation()
+    pipeline = FakePipeline(output_dir=str(tmp_path / "generated"))
+    generator = (
+        pipeline.image_generator
+        if asset_type == "image"
+        else pipeline.voiceover_generator
+    )
+
+    def cancel_after_first_provider_call(index):
+        if index == 0:
+            cancellation.cancel()
+
+    generator.on_generate = cancel_after_first_provider_call
+    monkeypatch.setattr(task_executor_module, "LocalUploader", FakeUploader)
+    monkeypatch.setattr(
+        task_executor_module.Config,
+        "generation_config",
+        lambda: {"tts_concurrency": 1, "image_concurrency": 1},
+    )
+
+    TaskExecutor(pipeline_factory=lambda **kwargs: pipeline).run_inline(
+        "task-1", cancellation=cancellation
+    )
+
+    rows = executor_db.get_segments("task-1")
+    status_field = f"{asset_type}_status"
+    assert generator.calls == [0]
+    assert rows[0][status_field] == "completed"
+    assert rows[1][status_field] == "pending"
+    assert executor_db.get_task("task-1")["status"] == "interrupted"
+    assert pipeline.draft_builder.calls == 0
+
+
+@pytest.mark.parametrize("asset_type", ["image", "audio"])
+def test_upload_copy_failure_keeps_local_asset_reusable_on_resume(
+    executor_db, tmp_path, monkeypatch, asset_type
+):
+    create_task(executor_db, status="interrupted")
+    executor_db.save_task_checkpoint(
+        "task-1", script_text="脚本", summary="摘要", input_mode="script"
+    )
+    completed_type = "audio" if asset_type == "image" else "image"
+    completed_suffix = "wav" if completed_type == "audio" else "png"
+    completed_path = tmp_path / "legacy" / f"completed.{completed_suffix}"
+    completed_path.parent.mkdir(parents=True)
+    completed_path.write_bytes(completed_suffix.encode())
+    executor_db.save_segments(
+        "task-1",
+        [{
+            "segment_index": 0,
+            "text": "第一段",
+            "image_prompt": "提示词",
+            f"{asset_type}_status": "pending",
+            f"{completed_type}_path": str(completed_path),
+            f"{completed_type}_status": "completed",
+        }],
+    )
+    first_pipeline = FakePipeline(output_dir=str(tmp_path / "generated"))
+    first_pipeline.draft_builder = FakeDraftBuilder(RuntimeError("stop after assets"))
+    monkeypatch.setattr(task_executor_module, "LocalUploader", FailingUploader)
+
+    TaskExecutor(pipeline_factory=lambda **kwargs: first_pipeline).run_inline(
+        "task-1", cancellation=TaskCancellation()
+    )
+
+    path_field = f"{asset_type}_path"
+    status_field = f"{asset_type}_status"
+    error_field = f"{asset_type}_error"
+    row = executor_db.get_segments("task-1")[0]
+    asset = executor_db.list_task_assets("task-1", asset_type=asset_type)[0]
+    assert Path(row[path_field]).is_file()
+    assert row[status_field] == "completed"
+    assert row[error_field] == "Upload failed: copy failed"
+    assert asset["status"] == "completed"
+    assert asset["error_message"] == "Upload failed: copy failed"
+
+    resumed_pipeline = FakePipeline(output_dir=str(tmp_path / "resumed"))
+    resumed_pipeline.draft_builder = FakeDraftBuilder(RuntimeError("stop after assets"))
+    TaskExecutor(pipeline_factory=lambda **kwargs: resumed_pipeline).run_inline(
+        "task-1", cancellation=TaskCancellation()
+    )
+
+    resumed_generator = (
+        resumed_pipeline.image_generator
+        if asset_type == "image"
+        else resumed_pipeline.voiceover_generator
+    )
+    resumed_row = executor_db.get_segments("task-1")[0]
+    assert resumed_generator.calls == []
+    assert resumed_row[status_field] == "completed"
+    assert resumed_row[error_field] == "Upload failed: copy failed"

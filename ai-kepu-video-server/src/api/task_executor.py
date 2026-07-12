@@ -34,6 +34,16 @@ def _require_checkpoint(saved: bool, description: str) -> None:
         raise RecoverableTaskError(f"{description}保存失败")
 
 
+def _upload_warning(error: Exception) -> str:
+    return f"Upload failed: {error}"
+
+
+def _preserved_upload_warning(error: Optional[str]) -> Optional[str]:
+    if error and error.startswith("Upload failed: "):
+        return error
+    return None
+
+
 @dataclass
 class ResumeWork:
     prompt_indexes: List[int]
@@ -446,13 +456,16 @@ class TaskExecutor:
                 ):
                     if i in missing_indexes:
                         continue
+                    preserved_error = _preserved_upload_warning(
+                        segment.get(f"{asset_type}_error")
+                    )
                     _require_checkpoint(
                         db_client.update_segment(
                             task_id,
                             segment_index,
                             {
                                 f"{asset_type}_status": "completed",
-                                f"{asset_type}_error": None,
+                                f"{asset_type}_error": preserved_error,
                             },
                         ),
                         f"分镜 {segment_index} 已有{asset_type}检查点",
@@ -478,7 +491,7 @@ class TaskExecutor:
                             text=segment.get("text"),
                             voice_type=voice_type if asset_type == "audio" else None,
                             status="completed",
-                            error_message=None,
+                            error_message=preserved_error,
                         )
                     except Exception as error:
                         raise RecoverableTaskError(
@@ -504,6 +517,8 @@ class TaskExecutor:
                 try:
                     if tts_concurrency == 1 and i > 0:
                         time.sleep(0.5)
+                    if cancellation:
+                        cancellation.raise_if_cancelled()
                     path = pipeline.voiceover_generator.generate(
                         seg, filename=f"seg_{i:03d}", voice_type=voice_type
                     )
@@ -517,6 +532,8 @@ class TaskExecutor:
             def generate_image_item(i: int, prompt: str):
                 logger.debug(f"[{task_id}] 图像进度: {i+1}/{segments_count}")
                 try:
+                    if cancellation:
+                        cancellation.raise_if_cancelled()
                     path = pipeline.image_generator.generate(
                         prompt,
                         index=i,
@@ -544,7 +561,7 @@ class TaskExecutor:
                         storage_path = f"{task_id}/images/seg_{i:03d}_{upload_ts}{image_ext}"
                         url = local_uploader.upload(path, storage_path)
                     except Exception as e:
-                        upload_error = str(e)
+                        upload_error = _upload_warning(e)
                         logger.warning(f"[{task_id}] 段落 {i} 图片保存失败: {e}")
                 elif asset_type == "audio" and path and Path(path).exists():
                     try:
@@ -552,11 +569,11 @@ class TaskExecutor:
                         storage_path = f"{task_id}/audio/seg_{i:03d}_{upload_ts}{audio_ext}"
                         url = local_uploader.upload(path, storage_path)
                     except Exception as e:
-                        upload_error = str(e)
+                        upload_error = _upload_warning(e)
                         logger.warning(f"[{task_id}] 段落 {i} 音频保存失败: {e}")
 
                 final_error = error or upload_error
-                status = "failed" if final_error else ("completed" if path else "pending")
+                status = "failed" if error else ("completed" if path else "pending")
                 updates = {}
                 if asset_type == "image":
                     updates = {"image_path": path, "image_url": url, "image_status": status, "image_error": final_error}
