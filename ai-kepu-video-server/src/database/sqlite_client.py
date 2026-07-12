@@ -20,7 +20,9 @@ DB_PATH = Path(__file__).parent.parent.parent / "data" / "local.db"
 class SQLiteClient:
     """SQLite 数据库客户端"""
 
-    TASK_CHECKPOINT_COLUMNS = frozenset({"script_text", "summary", "input_mode"})
+    TASK_CHECKPOINT_COLUMNS = frozenset({
+        "script_text", "summary", "input_mode", "delete_files_on_delete"
+    })
     SEGMENT_CHECKPOINT_COLUMNS = frozenset({
         "text", "image_prompt", "image_path", "image_url", "image_status",
         "image_error", "audio_path", "audio_url", "audio_status", "audio_error",
@@ -58,7 +60,8 @@ class SQLiteClient:
                     extract_path TEXT,
                     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
                     updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-                    completed_at TEXT
+                    completed_at TEXT,
+                    delete_files_on_delete INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS task_results (
@@ -215,6 +218,12 @@ class SQLiteClient:
                     "summary": "TEXT",
                     "input_mode": "TEXT NOT NULL DEFAULT 'script'",
                 },
+            )
+            self._apply_column_migration(
+                cursor,
+                "20260712_task_deletion_intent",
+                "tasks",
+                {"delete_files_on_delete": "INTEGER NOT NULL DEFAULT 0"},
             )
 
             conn.commit()
@@ -433,6 +442,12 @@ class SQLiteClient:
         }
         updates = {key: value for key, value in values.items() if value is not None}
         return self._update_task_fields(task_id, updates)
+
+    def set_task_deletion_intent(self, task_id: str, delete_files: bool) -> bool:
+        """Persist file cleanup intent so startup can finish deletion safely."""
+        return self._update_task_fields(
+            task_id, {"delete_files_on_delete": int(bool(delete_files))}
+        )
 
     def save_task_result(self, task_id: str, draft_path: str, segments_count: int,
                          draft_url: str = None, video_url: str = None, total_duration: float = None) -> bool:

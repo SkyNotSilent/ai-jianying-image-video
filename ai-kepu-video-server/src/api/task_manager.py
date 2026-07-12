@@ -388,8 +388,12 @@ class TaskManager:
         ]
 
     def fail_stale_task_data(self, data: dict) -> bool:
-        """将长时间无更新的 pending/processing 任务标记为失败"""
+        """Mark an orphaned stale task interrupted without touching live work."""
         if not data or data.get("status") not in {"pending", "processing"}:
+            return False
+
+        task_id = data["task_id"]
+        if task_runtime.is_running(task_id):
             return False
 
         step_name = data.get("current_step") or "pending"
@@ -402,13 +406,20 @@ class TaskManager:
         if elapsed_seconds < timeout_seconds:
             return False
 
-        error = f"任务在 {step_name} 阶段超过 {timeout_seconds // 60} 分钟无进度更新，已自动判定失败"
-        task_id = data["task_id"]
+        error = (
+            f"任务在 {step_name} 阶段超过 {timeout_seconds // 60} 分钟无进度更新，"
+            "已保存现有内容，可继续生成"
+        )
         logger.warning("[%s] %s", task_id, error)
-        db_client.update_task_status(task_id, "failed", step_name, error)
-        db_client.update_step(task_id, step_name, "failed")
+        if not db_client.mark_task_interrupted(task_id, step_name, error):
+            return False
+        with self.lock:
+            task = self.tasks.get(task_id)
+            if task:
+                task.status = TaskStatus.INTERRUPTED
+                task.error = error
         redis_client.delete_task(task_id)
-        data["status"] = "failed"
+        data["status"] = TaskStatus.INTERRUPTED.value
         data["error"] = error
         return True
 
@@ -608,6 +619,8 @@ class TaskManager:
             self.deletion_claims.add(task_id)
 
         try:
+            if not db_client.set_task_deletion_intent(task_id, delete_files):
+                raise RuntimeError(f"[{task_id}] 保存文件删除意图失败")
             if not db_client.update_task_status(
                 task_id,
                 TaskStatus.DELETING.value,
@@ -654,7 +667,8 @@ class TaskManager:
             offset=0,
         )
         for row in rows:
-            if self.request_delete(row["task_id"], delete_files=True) == "deleted":
+            delete_files = bool(row.get("delete_files_on_delete"))
+            if self.request_delete(row["task_id"], delete_files=delete_files) == "deleted":
                 completed += 1
         return completed
 

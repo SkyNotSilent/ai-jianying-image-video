@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -272,6 +273,60 @@ def test_delete_running_task_is_accepted_once_and_finishes_after_stop(
     assert not (tmp_path / "output" / task_id).exists()
 
 
+@pytest.mark.parametrize("delete_files", [False, True])
+def test_startup_preserves_persisted_file_deletion_intent(
+    tmp_path, temp_db, isolated_manager, monkeypatch, delete_files
+):
+    manager, _ = isolated_manager
+    task_id = "intent-task"
+    create_task(temp_db, task_id, status="deleting")
+    owned = tmp_path / "output" / task_id / "project" / "video.mp4"
+    owned.parent.mkdir(parents=True)
+    owned.write_bytes(b"video")
+    temp_db.save_task_result(task_id, str(owned.parent), 1)
+    assert temp_db.set_task_deletion_intent(task_id, delete_files)
+
+    assert manager.complete_deleting_tasks() == 1
+
+    assert temp_db.get_task(task_id) is None
+    assert owned.exists() is (not delete_files)
+
+
+def test_stale_check_does_not_interrupt_a_registered_runtime(
+    temp_db, isolated_manager
+):
+    manager, registry = isolated_manager
+    task_id = "active-task"
+    create_task(temp_db, task_id, status="processing")
+    token = registry.begin(task_id)
+    stale = temp_db.get_task(task_id)
+    stale["updated_at"] = (datetime.now() - timedelta(hours=2)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+    assert manager.fail_stale_task_data(stale) is False
+    assert temp_db.get_task(task_id)["status"] == "processing"
+
+    registry.finish(task_id, token)
+
+
+def test_stale_orphan_becomes_recoverable_interruption(
+    temp_db, isolated_manager
+):
+    manager, _ = isolated_manager
+    task_id = "orphan-task"
+    create_task(temp_db, task_id, status="processing")
+    stale = temp_db.get_task(task_id)
+    stale["updated_at"] = (datetime.now() - timedelta(hours=2)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+    assert manager.fail_stale_task_data(stale) is True
+    saved = temp_db.get_task(task_id)
+    assert saved["status"] == "interrupted"
+    assert "可继续生成" in saved["error"]
+
+
 def test_file_cleanup_failure_does_not_restore_deleted_rows(
     temp_db, isolated_manager, monkeypatch, caplog
 ):
@@ -403,6 +458,7 @@ def test_delete_route_maps_manager_outcomes(
         "task_id": "task-1",
         "status": expected_status,
         "outcome": outcome,
+        "message": "任务已删除" if outcome == "deleted" else "任务正在停止并删除",
     }
 
 

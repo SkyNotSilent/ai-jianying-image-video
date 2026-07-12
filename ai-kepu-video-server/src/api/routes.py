@@ -1481,7 +1481,12 @@ async def delete_task(
     if outcome == "missing":
         raise HTTPException(status_code=404, detail="任务不存在")
     response.status_code = 202 if outcome == "deleting" else 200
-    result = {"task_id": task_id, "status": outcome, "outcome": outcome}
+    result = {
+        "task_id": task_id,
+        "status": outcome,
+        "outcome": outcome,
+        "message": "任务已删除" if outcome == "deleted" else "任务正在停止并删除",
+    }
     report = task_manager.get_deletion_report(task_id)
     if report is not None:
         result["deletion_report"] = asdict(report)
