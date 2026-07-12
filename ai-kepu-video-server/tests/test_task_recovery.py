@@ -1125,7 +1125,7 @@ def test_final_segments_save_false_prevents_result_and_completion(
 
 
 def test_reused_valid_assets_clear_stale_segment_and_asset_errors(
-    executor_db, tmp_path
+    executor_db, tmp_path, monkeypatch
 ):
     create_task(executor_db, status="interrupted")
     executor_db.save_task_checkpoint(
@@ -1159,6 +1159,14 @@ def test_reused_valid_assets_clear_stale_segment_and_asset_errors(
         "task-1", "audio", "generated", path=str(audio), segment_index=7,
         status="completed", error_message="旧音频错误",
     )
+    upsert_calls = []
+    original_save_task_asset = executor_db.save_task_asset
+
+    def record_upsert(*args, **kwargs):
+        upsert_calls.append(kwargs.get("asset_type") or args[1])
+        return original_save_task_asset(*args, **kwargs)
+
+    monkeypatch.setattr(executor_db, "save_task_asset", record_upsert)
     pipeline = FakePipeline(output_dir=str(tmp_path / "legacy"))
     pipeline.draft_builder = FakeDraftBuilder(RuntimeError("stop after reuse"))
 
@@ -1175,6 +1183,96 @@ def test_reused_valid_assets_clear_stale_segment_and_asset_errors(
     assert len(assets) == 2
     assert all(asset["status"] == "completed" for asset in assets)
     assert all(asset["error_message"] is None for asset in assets)
+    assert sorted(upsert_calls) == ["audio", "image"]
+
+
+def test_reused_valid_assets_insert_missing_task_asset_rows(
+    executor_db, tmp_path
+):
+    create_task(executor_db, status="interrupted")
+    executor_db.save_task_checkpoint(
+        "task-1", script_text="脚本", summary="摘要", input_mode="script"
+    )
+    image = tmp_path / "legacy" / "images" / "seg.png"
+    audio = tmp_path / "legacy" / "voiceovers" / "seg.wav"
+    image.parent.mkdir(parents=True)
+    audio.parent.mkdir(parents=True)
+    image.write_bytes(b"png")
+    audio.write_bytes(b"wav")
+    executor_db.save_segments(
+        "task-1",
+        [{
+            "segment_index": 7,
+            "text": "已有分镜",
+            "image_prompt": "已有提示词",
+            "image_path": str(image),
+            "image_status": "completed",
+            "image_error": "旧图片错误",
+            "audio_path": str(audio),
+            "audio_status": "completed",
+            "audio_error": "旧音频错误",
+        }],
+    )
+    pipeline = FakePipeline(output_dir=str(tmp_path / "legacy"))
+    pipeline.draft_builder = FakeDraftBuilder(RuntimeError("stop after reuse"))
+
+    TaskExecutor(pipeline_factory=lambda **kwargs: pipeline).run_inline(
+        "task-1", cancellation=TaskCancellation()
+    )
+
+    assets = executor_db.list_task_assets("task-1")
+    assert pipeline.image_generator.calls == []
+    assert pipeline.voiceover_generator.calls == []
+    assert len(assets) == 2
+    assert {asset["asset_type"] for asset in assets} == {"image", "audio"}
+    assert all(asset["status"] == "completed" for asset in assets)
+    assert all(asset["error_message"] is None for asset in assets)
+
+
+@pytest.mark.parametrize("upsert_failure", ["falsey", "raises"])
+def test_reused_asset_upsert_failure_interrupts_before_draft(
+    executor_db, tmp_path, monkeypatch, upsert_failure
+):
+    create_task(executor_db, status="interrupted")
+    executor_db.save_task_checkpoint(
+        "task-1", script_text="脚本", summary="摘要", input_mode="script"
+    )
+    image = tmp_path / "legacy" / "images" / "seg.png"
+    audio = tmp_path / "legacy" / "voiceovers" / "seg.wav"
+    image.parent.mkdir(parents=True)
+    audio.parent.mkdir(parents=True)
+    image.write_bytes(b"png")
+    audio.write_bytes(b"wav")
+    executor_db.save_segments(
+        "task-1",
+        [{
+            "segment_index": 7,
+            "text": "已有分镜",
+            "image_prompt": "已有提示词",
+            "image_path": str(image),
+            "image_status": "completed",
+            "audio_path": str(audio),
+            "audio_status": "completed",
+        }],
+    )
+    pipeline = FakePipeline(output_dir=str(tmp_path / "legacy"))
+    pipeline.draft_builder = FakeDraftBuilder(RuntimeError("draft reached"))
+
+    def fail_upsert(*args, **kwargs):
+        if upsert_failure == "raises":
+            raise RuntimeError("asset upsert failed")
+        return {}
+
+    monkeypatch.setattr(executor_db, "save_task_asset", fail_upsert)
+
+    TaskExecutor(pipeline_factory=lambda **kwargs: pipeline).run_inline(
+        "task-1", cancellation=TaskCancellation()
+    )
+
+    assert executor_db.get_task("task-1")["status"] == "interrupted"
+    assert pipeline.image_generator.calls == []
+    assert pipeline.voiceover_generator.calls == []
+    assert pipeline.draft_builder.calls == 0
 
 
 def test_task_cancelled_future_does_not_drop_other_successful_result(

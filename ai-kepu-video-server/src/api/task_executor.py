@@ -455,13 +455,37 @@ class TaskExecutor:
                         ),
                         f"分镜 {segment_index} 已有{asset_type}检查点",
                     )
-                    db_client.normalize_generated_task_asset(
-                        task_id,
-                        segment_index,
-                        asset_type,
-                        path=segment.get(f"{asset_type}_path"),
-                        url=segment.get(f"{asset_type}_url"),
-                    )
+                    try:
+                        asset_record = db_client.save_task_asset(
+                            task_id=task_id,
+                            asset_type=asset_type,
+                            source="generated",
+                            path=segment.get(f"{asset_type}_path"),
+                            url=segment.get(f"{asset_type}_url"),
+                            segment_index=segment_index,
+                            label=(
+                                f"AI 生成 · 分镜 {i + 1}"
+                                if asset_type == "image"
+                                else f"配音 · 分镜 {i + 1}"
+                            ),
+                            prompt=(
+                                segment.get("image_prompt")
+                                if asset_type == "image"
+                                else None
+                            ),
+                            text=segment.get("text"),
+                            voice_type=voice_type if asset_type == "audio" else None,
+                            status="completed",
+                            error_message=None,
+                        )
+                    except Exception as error:
+                        raise RecoverableTaskError(
+                            f"分镜 {segment_index} 已有{asset_type}资产检查点保存失败: {error}"
+                        ) from error
+                    if not asset_record:
+                        raise RecoverableTaskError(
+                            f"分镜 {segment_index} 已有{asset_type}资产检查点保存失败"
+                        )
             logger.info(f"[{task_id}] 已保存分镜和图片提示词，共 {len(persisted_segments)} 段")
             logger.info(f"[{task_id}] [3/7] 图像描述生成完成")
             task.complete_step("image_prompt_generation")
