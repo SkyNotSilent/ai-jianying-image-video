@@ -40,6 +40,16 @@ test('failed task with only a saved script still exposes continue generation', (
   assert.equal(state.actionLabel, '继续生成')
 })
 
+test('failed task detail can expose resume without returning checkpoint content', () => {
+  const state = deriveTaskState({
+    task: { status: 'failed', can_resume: true },
+    segments: [],
+  })
+
+  assert.equal(state.key, 'interrupted')
+  assert.equal(state.actionLabel, '继续生成')
+})
+
 test('failed task without checkpoint evidence retains recovery-only action', () => {
   const state = deriveTaskState({
     task: { status: 'failed', error: 'failed before checkpoint' },

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -325,6 +326,40 @@ def test_stale_orphan_becomes_recoverable_interruption(
     saved = temp_db.get_task(task_id)
     assert saved["status"] == "interrupted"
     assert "可继续生成" in saved["error"]
+
+
+def test_stale_in_memory_task_lookup_does_not_deadlock(
+    temp_db, isolated_manager
+):
+    manager, _ = isolated_manager
+    task_id = manager.create_task("主题", "知识科普|电影质感", 100)
+    temp_db.update_task_status(task_id, "processing", "image_generation")
+    with temp_db.get_connection() as connection:
+        connection.execute(
+            "UPDATE tasks SET updated_at=? WHERE task_id=?",
+            (
+                (datetime.now() - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S"),
+                task_id,
+            ),
+        )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        task = executor.submit(manager.get_task, task_id).result(timeout=1)
+
+    assert task.status == TaskStatus.INTERRUPTED
+
+
+def test_task_detail_reports_script_only_resume_capability(
+    temp_db, isolated_manager
+):
+    manager, _ = isolated_manager
+    task_id = "script-checkpoint"
+    create_task(temp_db, task_id, status="failed")
+    temp_db.save_task_checkpoint(task_id, script_text="已保存脚本")
+
+    response = manager.get_task(task_id).to_response()
+
+    assert response.can_resume is True
 
 
 def test_file_cleanup_failure_does_not_restore_deleted_rows(

@@ -2,7 +2,7 @@ export function deriveTaskState({ task = {}, segments = [], exportState = null }
   const rawStatus = task?.status || exportState?.status || 'completed'
   const segmentList = Array.isArray(segments) ? segments : []
   const hasSegmentEvidence = segmentList.length > 0
-  const hasCheckpointEvidence = hasSegmentEvidence || Boolean(task?.script_text?.trim?.())
+  const hasCheckpointEvidence = Boolean(task?.can_resume) || hasSegmentEvidence || Boolean(task?.script_text?.trim?.())
   const hasError = Boolean(task?.error)
   const hasFailedSegment = segmentList.some((segment) => segment.image_status === 'failed' || segment.audio_status === 'failed')
   const hasMissingAsset = segmentList.some((segment) => !segment.image_url || !segment.audio_url)

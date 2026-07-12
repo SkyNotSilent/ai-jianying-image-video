@@ -80,6 +80,7 @@ class TaskResponse(BaseModel):
     result: Optional[TaskResult] = Field(None, description="任务结果")
     extract_path: Optional[str] = Field(None, description="用户上次使用的解压路径")
     error: Optional[str] = Field(None, description="错误信息")
+    can_resume: bool = Field(False, description="是否存在可继续生成的检查点")
 
 
 class CreateTaskResponse(BaseModel):

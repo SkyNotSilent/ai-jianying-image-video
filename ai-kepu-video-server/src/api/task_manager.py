@@ -73,6 +73,7 @@ class Task:
         self.status = TaskStatus.PENDING
         self.created_at = datetime.now().isoformat()
         self.error: Optional[str] = None
+        self.can_resume = False
         self.result: Optional[TaskResult] = None
         self.extract_path: Optional[str] = None
 
@@ -191,7 +192,8 @@ class Task:
             ] else None,
             result=self.result,
             extract_path=self.extract_path,
-            error=self.error
+            error=self.error,
+            can_resume=self.can_resume,
         )
 
 
@@ -236,17 +238,27 @@ class TaskManager:
         """获取任务（优先从运行时内存，然后缓存，最后本地数据库）"""
         # 1. 从内存获取
         with self.lock:
-            if task_id in self.tasks:
-                db_data = db_client.get_task(task_id)
-                if db_data and self.fail_stale_task_data(db_data):
-                    self.tasks.pop(task_id, None)
-                    return self._rebuild_task_from_db(db_data)
-                return self.tasks[task_id]
+            memory_task = self.tasks.get(task_id)
+        if memory_task:
+            db_data = db_client.get_task(task_id)
+            if db_data and self.fail_stale_task_data(db_data):
+                rebuilt = self._rebuild_task_from_db(db_data)
+                with self.lock:
+                    if rebuilt:
+                        self.tasks[task_id] = rebuilt
+                    else:
+                        self.tasks.pop(task_id, None)
+                return rebuilt
+            if db_data:
+                memory_task.can_resume = self._has_recovery_checkpoint(db_data)
+            return memory_task
 
         # 2. 从缓存获取
         cached_data = redis_client.get_task(task_id)
         if cached_data:
-            if cached_data.get("status") in {"pending", "processing"}:
+            if cached_data.get("status") in {
+                "pending", "processing", "failed", "interrupted"
+            }:
                 db_data = db_client.get_task(task_id)
                 if db_data:
                     self.fail_stale_task_data(db_data)
@@ -277,6 +289,16 @@ class TaskManager:
 
         return None
 
+    def _has_recovery_checkpoint(self, data: dict) -> bool:
+        if not data or data.get("status") not in {
+            TaskStatus.FAILED.value,
+            TaskStatus.INTERRUPTED.value,
+        }:
+            return False
+        return bool(
+            data.get("script_text") or db_client.get_segments(data["task_id"])
+        )
+
     def _rebuild_task_from_cache(self, data: dict) -> Optional[Task]:
         """从缓存数据重建 Task 对象"""
         try:
@@ -294,6 +316,7 @@ class TaskManager:
                 task.error = data["error"]
             if "extract_path" in data:
                 task.extract_path = data["extract_path"]
+            task.can_resume = bool(data.get("can_resume"))
             if "result" in data and data["result"]:
                 task.result = TaskResult(**data["result"])
 
@@ -329,6 +352,7 @@ class TaskManager:
             task.current_step = data.get("current_step", "pending")
             task.error = data.get("error")
             task.extract_path = data.get("extract_path")
+            task.can_resume = self._has_recovery_checkpoint(data)
 
             # 重建结果
             if data.get("result"):
@@ -370,6 +394,7 @@ class TaskManager:
             "status": task.status,
             "created_at": task.created_at,
             "error": task.error,
+            "can_resume": task.can_resume,
             "extract_path": task.extract_path,
             "result": task.result.dict() if task.result else None,
         }
