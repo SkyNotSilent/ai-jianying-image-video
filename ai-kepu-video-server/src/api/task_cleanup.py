@@ -33,6 +33,13 @@ def _path_from_value(value) -> Optional[Path]:
 
     parsed = urlparse(raw_value)
     if parsed.scheme or parsed.netloc:
+        if parsed.scheme not in {"http", "https"} or parsed.hostname not in {
+            "localhost",
+            "127.0.0.1",
+            "0.0.0.0",
+            "::1",
+        }:
+            return None
         media_path = unquote(parsed.path)
         if media_path == "/media":
             relative_path = ""

@@ -7,8 +7,10 @@ from fastapi import HTTPException, Response
 
 from src.api import routes
 from src.api import task_manager as task_manager_module
+from src.api import task_executor as task_executor_module
 from src.api.models import TaskStatus
-from src.api.task_cleanup import collect_task_paths, delete_task_files
+from src.api.task_cleanup import DeletionReport, collect_task_paths, delete_task_files
+from src.api.task_executor import TaskExecutor
 from src.api.task_manager import TaskManager
 from src.api.task_runtime import TaskRuntimeRegistry
 from src.database import sqlite_client as sqlite_client_module
@@ -188,6 +190,28 @@ def test_collect_task_paths_maps_local_media_urls_and_ignores_remote_urls(
     assert not any("cdn.example.com" in str(path) for path in paths)
 
 
+def test_collect_task_paths_does_not_map_remote_media_url_to_local_file(
+    tmp_path, monkeypatch
+):
+    from src.api import task_cleanup
+
+    monkeypatch.setattr(task_cleanup.Config, "BASE_DIR", tmp_path)
+    local_candidate = tmp_path / "data" / "media" / "task-1" / "video.mp4"
+
+    paths = collect_task_paths(
+        {
+            "task_id": "legacy-task",
+            "result": {
+                "video_url": "https://cdn.example.com/media/task-1/video.mp4",
+            },
+        },
+        [],
+        [],
+    )
+
+    assert local_candidate.resolve() not in paths
+
+
 def test_idle_task_deletes_rows_and_files_immediately(
     tmp_path, temp_db, isolated_manager
 ):
@@ -327,6 +351,34 @@ def test_resume_route_returns_404_for_missing_task(monkeypatch):
     assert exc_info.value.status_code == 404
 
 
+def test_resume_during_delete_claim_is_not_reported_as_already_running(monkeypatch):
+    registry = TaskRuntimeRegistry()
+    registry.claim_delete("task-1")
+
+    class CheckpointDB:
+        @staticmethod
+        def get_task(task_id):
+            return {
+                "task_id": task_id,
+                "status": "interrupted",
+                "script_text": "已保存脚本",
+                "theme": "主题",
+                "style": "知识科普|电影质感",
+                "length": 100,
+                "ratio": "16:9",
+                "input_mode": "script",
+            }
+
+        @staticmethod
+        def get_segments(task_id):
+            return []
+
+    monkeypatch.setattr(task_executor_module, "task_runtime", registry)
+    monkeypatch.setattr(task_executor_module, "db_client", CheckpointDB())
+
+    assert TaskExecutor().resume_task("task-1") == "not_recoverable"
+
+
 @pytest.mark.parametrize(
     ("outcome", "expected_code", "expected_status"),
     [("deleted", 200, "deleted"), ("deleting", 202, "deleting")],
@@ -351,6 +403,35 @@ def test_delete_route_maps_manager_outcomes(
         "task_id": "task-1",
         "status": expected_status,
         "outcome": outcome,
+    }
+
+
+def test_synchronous_delete_route_returns_file_cleanup_report(monkeypatch):
+    report = DeletionReport(
+        deleted_files=3,
+        deleted_directories=2,
+        skipped_paths=["/outside/keep.mp4"],
+        failed_paths=["/output/task/locked.mp4"],
+    )
+    monkeypatch.setattr(
+        routes.task_manager,
+        "request_delete",
+        lambda task_id, delete_files: "deleted",
+    )
+    monkeypatch.setattr(
+        routes.task_manager,
+        "get_deletion_report",
+        lambda task_id: report,
+        raising=False,
+    )
+
+    result = asyncio.run(routes.delete_task("task-1", Response(), delete_files=True))
+
+    assert result["deletion_report"] == {
+        "deleted_files": 3,
+        "deleted_directories": 2,
+        "skipped_paths": ["/outside/keep.mp4"],
+        "failed_paths": ["/output/task/locked.mp4"],
     }
 
 

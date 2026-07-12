@@ -17,7 +17,7 @@ from .models import (
 )
 from src.database import db_client, redis_client
 from src.config import Config
-from .task_cleanup import collect_task_paths, delete_task_files
+from .task_cleanup import DeletionReport, collect_task_paths, delete_task_files
 from .task_runtime import task_runtime
 
 logger = logging.getLogger(__name__)
@@ -204,6 +204,7 @@ class TaskManager:
         self.deletion_lock = Lock()
         self.deletion_claims = set()
         self.deleted_task_ids = set()
+        self.deletion_reports: Dict[str, DeletionReport] = {}
 
     def create_task(self, theme: str, style: str, length: int, voice_type: Optional[str] = None, name: Optional[str] = None, ratio: str = "16:9") -> str:
         """创建新任务"""
@@ -543,11 +544,13 @@ class TaskManager:
         if task_row and not self.delete_task(task_id):
             raise RuntimeError(f"[{task_id}] 删除任务数据库记录失败")
 
+        report = DeletionReport(0, 0, [], [])
         if delete_files:
             try:
                 report = delete_task_files(paths, self._allowed_storage_roots())
-            except Exception:
+            except Exception as exc:
                 logger.exception("[%s] 任务记录已删除，但文件清理异常", task_id)
+                report = DeletionReport(0, 0, [], [str(exc)])
             else:
                 if report.skipped_paths:
                     logger.warning(
@@ -570,7 +573,12 @@ class TaskManager:
 
         with self.deletion_lock:
             self.deleted_task_ids.add(task_id)
+            self.deletion_reports[task_id] = report
         return True
+
+    def get_deletion_report(self, task_id: str):
+        with self.deletion_lock:
+            return self.deletion_reports.get(task_id)
 
     def _run_deferred_delete(self, task_id: str, delete_files: bool, initial_paths):
         try:

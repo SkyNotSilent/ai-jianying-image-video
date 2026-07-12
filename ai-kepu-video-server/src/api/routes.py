@@ -17,6 +17,7 @@ import time
 import uuid
 import zipfile
 import xml.etree.ElementTree as ET
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
@@ -1480,7 +1481,11 @@ async def delete_task(
     if outcome == "missing":
         raise HTTPException(status_code=404, detail="任务不存在")
     response.status_code = 202 if outcome == "deleting" else 200
-    return {"task_id": task_id, "status": outcome, "outcome": outcome}
+    result = {"task_id": task_id, "status": outcome, "outcome": outcome}
+    report = task_manager.get_deletion_report(task_id)
+    if report is not None:
+        result["deletion_report"] = asdict(report)
+    return result
 
 
 @router.get("/tasks/{task_id}/download")

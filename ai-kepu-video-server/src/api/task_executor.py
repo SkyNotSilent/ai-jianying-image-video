@@ -209,7 +209,9 @@ class TaskExecutor:
 
         cancellation = task_runtime.begin(task_id)
         if cancellation is None:
-            return "already_running"
+            if task_runtime.is_running(task_id):
+                return "already_running"
+            return "not_recoverable"
         thread = Thread(
             target=self._run_registered_task,
             args=(
