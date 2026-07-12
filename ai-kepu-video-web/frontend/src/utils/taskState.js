@@ -2,6 +2,7 @@ export function deriveTaskState({ task = {}, segments = [], exportState = null }
   const rawStatus = task?.status || exportState?.status || 'completed'
   const segmentList = Array.isArray(segments) ? segments : []
   const hasSegmentEvidence = segmentList.length > 0
+  const hasCheckpointEvidence = hasSegmentEvidence || Boolean(task?.script_text?.trim?.())
   const hasError = Boolean(task?.error)
   const hasFailedSegment = segmentList.some((segment) => segment.image_status === 'failed' || segment.audio_status === 'failed')
   const hasMissingAsset = segmentList.some((segment) => !segment.image_url || !segment.audio_url)
@@ -22,7 +23,7 @@ export function deriveTaskState({ task = {}, segments = [], exportState = null }
     }
   }
 
-  if (rawStatus === 'interrupted' || (rawStatus === 'failed' && hasSegmentEvidence)) {
+  if (rawStatus === 'interrupted' || (rawStatus === 'failed' && hasCheckpointEvidence)) {
     return {
       key: 'interrupted',
       label: rawStatus === 'failed' ? '失败可继续' : '生成已中断',

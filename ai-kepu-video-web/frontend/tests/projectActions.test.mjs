@@ -30,6 +30,16 @@ test('failed task with a saved segment exposes continue generation', () => {
   assert.equal(getProjectPrimaryAction({ type: 'task', status: state.key }), 'resume')
 })
 
+test('failed task with only a saved script still exposes continue generation', () => {
+  const state = deriveTaskState({
+    task: { status: 'failed', script_text: '已保存完整脚本' },
+    segments: [],
+  })
+
+  assert.equal(state.key, 'interrupted')
+  assert.equal(state.actionLabel, '继续生成')
+})
+
 test('failed task without checkpoint evidence retains recovery-only action', () => {
   const state = deriveTaskState({
     task: { status: 'failed', error: 'failed before checkpoint' },
