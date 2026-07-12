@@ -436,6 +436,32 @@ class TaskExecutor:
             pipeline.image_prompts = image_prompts
             persisted_segments = db_client.get_segments(task_id)
             resume_work = build_resume_work(persisted_segments)
+            for i, segment in enumerate(persisted_segments):
+                segment_index = segment_db_indexes[i]
+                for asset_type, missing_indexes in (
+                    ("image", resume_work.image_indexes),
+                    ("audio", resume_work.audio_indexes),
+                ):
+                    if i in missing_indexes:
+                        continue
+                    _require_checkpoint(
+                        db_client.update_segment(
+                            task_id,
+                            segment_index,
+                            {
+                                f"{asset_type}_status": "completed",
+                                f"{asset_type}_error": None,
+                            },
+                        ),
+                        f"分镜 {segment_index} 已有{asset_type}检查点",
+                    )
+                    db_client.normalize_generated_task_asset(
+                        task_id,
+                        segment_index,
+                        asset_type,
+                        path=segment.get(f"{asset_type}_path"),
+                        url=segment.get(f"{asset_type}_url"),
+                    )
             logger.info(f"[{task_id}] 已保存分镜和图片提示词，共 {len(persisted_segments)} 段")
             logger.info(f"[{task_id}] [3/7] 图像描述生成完成")
             task.complete_step("image_prompt_generation")
@@ -517,8 +543,11 @@ class TaskExecutor:
                     prompt = None
                     voice = voice_type
 
-                db_client.update_segment(task_id, segment_index, updates)
-                db_client.save_task_asset(
+                _require_checkpoint(
+                    db_client.update_segment(task_id, segment_index, updates),
+                    f"分镜 {segment_index} {asset_type}检查点",
+                )
+                asset_record = db_client.save_task_asset(
                     task_id=task_id,
                     asset_type=asset_type,
                     source="generated",
@@ -532,19 +561,33 @@ class TaskExecutor:
                     status=status,
                     error_message=final_error,
                 )
+                if not asset_record:
+                    raise RecoverableTaskError(
+                        f"分镜 {segment_index} {asset_type}资产检查点保存失败"
+                    )
 
             def generate_voiceovers():
                 task.start_step("voiceover_generation")
                 completed = segments_count - len(resume_work.audio_indexes)
                 failed_items = []
+                cancellation_pending = False
                 with ThreadPoolExecutor(max_workers=tts_concurrency) as voice_executor:
-                    futures = [
-                        voice_executor.submit(generate_voiceover_item, i, seg)
+                    futures = {
+                        voice_executor.submit(generate_voiceover_item, i, seg): i
                         for i, seg in enumerate(pipeline.segments)
                         if i in resume_work.audio_indexes
-                    ]
+                    }
                     for future in as_completed(futures):
-                        i, result = future.result()
+                        i = futures[future]
+                        try:
+                            _, result = future.result()
+                        except TaskCancelled:
+                            cancellation_pending = True
+                            completed += 1
+                            task.update_step_progress(
+                                "voiceover_generation", completed, segments_count
+                            )
+                            continue
                         if result["status"] == "success":
                             pipeline.voiceover_files[i] = result["path"]
                             persist_segment_asset(i, "audio", path=result["path"])
@@ -556,21 +599,32 @@ class TaskExecutor:
                         task.update_step_progress("voiceover_generation", completed, segments_count)
                 if failed_items:
                     logger.warning(f"[{task_id}] 部分音频生成失败: {failed_items}")
-                task.complete_step("voiceover_generation")
-                return failed_items
+                if not cancellation_pending:
+                    task.complete_step("voiceover_generation")
+                return failed_items, cancellation_pending
 
             def generate_images():
                 task.start_step("image_generation")
                 completed = segments_count - len(resume_work.image_indexes)
                 failed_items = []
+                cancellation_pending = False
                 with ThreadPoolExecutor(max_workers=image_concurrency) as image_executor:
-                    futures = [
-                        image_executor.submit(generate_image_item, i, prompt)
+                    futures = {
+                        image_executor.submit(generate_image_item, i, prompt): i
                         for i, prompt in enumerate(image_prompts)
                         if i in resume_work.image_indexes
-                    ]
+                    }
                     for future in as_completed(futures):
-                        i, result = future.result()
+                        i = futures[future]
+                        try:
+                            _, result = future.result()
+                        except TaskCancelled:
+                            cancellation_pending = True
+                            completed += 1
+                            task.update_step_progress(
+                                "image_generation", completed, segments_count
+                            )
+                            continue
                         if result["status"] == "success":
                             pipeline.media_paths[i] = result["path"]
                             persist_segment_asset(i, "image", path=result["path"])
@@ -582,17 +636,20 @@ class TaskExecutor:
                         task.update_step_progress("image_generation", completed, segments_count)
                 if failed_items:
                     logger.warning(f"[{task_id}] 部分图片生成失败: {failed_items}")
-                task.complete_step("image_generation")
-                return failed_items
+                if not cancellation_pending:
+                    task.complete_step("image_generation")
+                return failed_items, cancellation_pending
 
             with ThreadPoolExecutor(max_workers=2) as executor:
                 voice_future = executor.submit(generate_voiceovers)
                 image_future = executor.submit(generate_images)
-                voice_failures = voice_future.result()
-                image_failures = image_future.result()
+                voice_failures, voice_cancelled = voice_future.result()
+                image_failures, image_cancelled = image_future.result()
 
             if cancellation:
                 cancellation.raise_if_cancelled()
+            if voice_cancelled or image_cancelled:
+                raise TaskCancelled("Task execution was cancelled during asset generation")
 
             all_failures = voice_failures + image_failures
             if all_failures:
@@ -798,13 +855,11 @@ class TaskExecutor:
                 except Exception as e:
                     logger.warning(f"[{task_id}] 保存音频资源失败 (段落 {i}): {e}")
 
-            # 确保段落数据总是被保存，即使资源保存失败
-            try:
-                db_client.save_segments(task_id, segments_data)
-                logger.info(f"[{task_id}] 段落数据保存成功，共 {len(segments_data)} 段")
-            except Exception as e:
-                logger.error(f"[{task_id}] 保存段落数据失败: {e}")
-                # 段落数据保存失败是严重错误，但不应中断后续流程
+            _require_checkpoint(
+                db_client.save_segments(task_id, segments_data),
+                "最终分镜检查点",
+            )
+            logger.info(f"[{task_id}] 段落数据保存成功，共 {len(segments_data)} 段")
 
             # 设置任务结果
             task_manager.set_task_result(task_id, draft_path, segments_count, draft_url, video_url)

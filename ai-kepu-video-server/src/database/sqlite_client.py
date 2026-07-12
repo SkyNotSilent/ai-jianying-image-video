@@ -793,6 +793,35 @@ class SQLiteClient:
             logger.error(f"保存任务资产失败: {e}")
             return {}
 
+    def normalize_generated_task_asset(
+        self, task_id: str, segment_index: int, asset_type: str,
+        path: str = None, url: str = None,
+    ) -> bool:
+        """Clear stale errors on an existing generated checkpoint without inserting."""
+        if not self._initialized:
+            self._init_db()
+        if not self._initialized:
+            return False
+        try:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            cur.execute(
+                """UPDATE task_assets
+                   SET path=COALESCE(?, path), url=COALESCE(?, url),
+                       status='completed', error_message=NULL,
+                       updated_at=datetime('now','localtime')
+                   WHERE task_id=? AND segment_index=? AND asset_type=?
+                     AND source='generated'""",
+                (path, url, task_id, segment_index, asset_type),
+            )
+            updated = cur.rowcount > 0
+            conn.commit()
+            conn.close()
+            return updated
+        except Exception as e:
+            logger.error(f"规范化任务资产检查点失败: {e}")
+            return False
+
     def list_task_assets(self, task_id: str, asset_type: str = None, segment_index: int = None) -> List[Dict]:
         if not self._initialized:
             self._init_db()
