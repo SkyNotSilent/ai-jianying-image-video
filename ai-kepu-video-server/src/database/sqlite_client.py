@@ -26,6 +26,7 @@ class SQLiteClient:
         "image_error", "audio_path", "audio_url", "audio_status", "audio_error",
         "duration",
     })
+    CLEARABLE_SEGMENT_ERROR_COLUMNS = frozenset({"image_error", "audio_error"})
 
     def __init__(self):
         self._initialized = False
@@ -706,7 +707,7 @@ class SQLiteClient:
             set_parts = []
             values = []
             for key, value in updates.items():
-                if value is None:
+                if value is None and key not in self.CLEARABLE_SEGMENT_ERROR_COLUMNS:
                     continue
                 if key in self.SEGMENT_CHECKPOINT_COLUMNS:
                     set_parts.append(f"{key}=?")
@@ -739,7 +740,14 @@ class SQLiteClient:
         try:
             conn = self._get_conn()
             cur = conn.cursor()
-            if path:
+            if source == "generated" and segment_index is not None:
+                cur.execute(
+                    """SELECT * FROM task_assets
+                       WHERE task_id=? AND asset_type=? AND source=? AND segment_index=?
+                       ORDER BY id DESC LIMIT 1""",
+                    (task_id, asset_type, source, segment_index)
+                )
+            elif path:
                 cur.execute(
                     """SELECT * FROM task_assets
                        WHERE task_id=? AND asset_type=? AND source=? AND path=?
@@ -756,11 +764,12 @@ class SQLiteClient:
             existing = cur.fetchone()
             if existing:
                 cur.execute(
-                    """UPDATE task_assets SET segment_index=?, source=?, url=COALESCE(?, url), label=?,
+                    """UPDATE task_assets SET segment_index=?, source=?, path=COALESCE(?, path),
+                       url=COALESCE(?, url), label=?,
                        prompt=?, text=?, voice_type=?, metadata_json=?, status=?, error_message=?,
                        updated_at=datetime('now','localtime')
                        WHERE asset_id=?""",
-                    (segment_index, source, url, label, prompt, text, voice_type, metadata_json, status, error_message, existing["asset_id"])
+                    (segment_index, source, path, url, label, prompt, text, voice_type, metadata_json, status, error_message, existing["asset_id"])
                 )
                 conn.commit()
                 cur.execute("SELECT * FROM task_assets WHERE asset_id=?", (existing["asset_id"],))

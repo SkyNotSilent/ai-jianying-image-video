@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -74,6 +75,7 @@ class FakeAssetGenerator:
         self.suffix = suffix
         self.fail = fail
         self.calls = []
+        self.on_generate = None
 
     def generate(self, value, **kwargs):
         index = kwargs.get("index")
@@ -85,16 +87,26 @@ class FakeAssetGenerator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         path = self.output_dir / f"seg_{index:03d}.{self.suffix}"
         path.write_bytes(self.suffix.encode())
+        if self.on_generate:
+            self.on_generate(index)
         return str(path)
 
 
 class FakeDraftBuilder:
-    def __init__(self):
+    def __init__(self, error=None):
         self.calls = 0
+        self.error = error
 
     def build(self, **kwargs):
         self.calls += 1
+        if self.error:
+            raise self.error
         return str(Path(kwargs["output_dir"]) / "draft")
+
+
+class FakeUploader:
+    def upload(self, path, storage_path=None):
+        return f"/media/{storage_path or Path(path).name}"
 
 
 class FakePipeline:
@@ -678,3 +690,323 @@ def test_resume_task_reports_lifecycle_outcomes(
     assert executor.resume_task("recoverable") == "already_running"
     assert len(threads) == 1
     assert threads[0].daemon
+
+
+def test_segments_only_legacy_resume_reconstructs_script_without_rewrite(
+    executor_db
+):
+    create_task(executor_db, status="interrupted")
+    executor_db.save_task_checkpoint("task-1", summary="已有摘要", input_mode="script")
+    executor_db.save_segments(
+        "task-1",
+        [
+            {
+                "segment_index": 4,
+                "text": "第一段",
+                "image_prompt": "提示一",
+                "image_status": "pending",
+                "audio_status": "pending",
+            },
+            {
+                "segment_index": 8,
+                "text": "第二段",
+                "image_prompt": "提示二",
+                "image_status": "pending",
+                "audio_status": "pending",
+            },
+        ],
+    )
+    pipeline = FakePipeline(output_dir="unused", fail_assets=True)
+
+    TaskExecutor(pipeline_factory=lambda **kwargs: pipeline).run_inline(
+        "task-1", cancellation=TaskCancellation()
+    )
+
+    task = executor_db.get_task("task-1")
+    assert pipeline.script_rewriter.calls == 0
+    assert pipeline.text_segmenter.calls == 0
+    assert pipeline.article == "第一段\n第二段"
+    assert pipeline.summary == "已有摘要"
+    assert task["script_text"] == "第一段\n第二段"
+    assert task["summary"] == "已有摘要"
+
+
+def test_dot_dot_project_name_stays_inside_task_output(
+    executor_db, tmp_path, monkeypatch
+):
+    create_task(executor_db)
+    with executor_db.get_connection() as connection:
+        connection.execute(
+            "UPDATE tasks SET name='..' WHERE task_id='task-1'"
+        )
+    created = []
+
+    def pipeline_factory(**kwargs):
+        created.append(kwargs)
+        return FakePipeline(kwargs["output_dir"], prompt_failure_call=1)
+
+    monkeypatch.chdir(tmp_path)
+    TaskExecutor(pipeline_factory=pipeline_factory).run_inline(
+        "task-1", cancellation=TaskCancellation()
+    )
+
+    task_root = (tmp_path / "output" / "task-1").resolve()
+    output_dir = Path(created[0]["output_dir"]).resolve()
+    assert output_dir == task_root / "task"
+    assert output_dir.is_relative_to(task_root)
+
+
+def test_script_checkpoint_false_stops_before_segmentation(
+    executor_db, monkeypatch
+):
+    create_task(executor_db)
+    pipeline = FakePipeline(output_dir="unused", fail_assets=True)
+    monkeypatch.setattr(executor_db, "save_task_checkpoint", lambda *a, **k: False)
+
+    TaskExecutor(pipeline_factory=lambda **kwargs: pipeline).run_inline(
+        "task-1", cancellation=TaskCancellation()
+    )
+
+    assert executor_db.get_task("task-1")["status"] == "interrupted"
+    assert pipeline.script_rewriter.calls == 1
+    assert pipeline.text_segmenter.calls == 0
+    assert pipeline.image_prompt_agent.calls == 0
+    assert pipeline.image_generator.calls == []
+    assert pipeline.voiceover_generator.calls == []
+
+
+def test_initial_segments_checkpoint_false_stops_before_prompt_provider(
+    executor_db, monkeypatch
+):
+    create_task(executor_db)
+    pipeline = FakePipeline(output_dir="unused")
+    pipeline.draft_builder = FakeDraftBuilder(RuntimeError("draft should not run"))
+    monkeypatch.setattr(executor_db, "save_segments", lambda *a, **k: False)
+
+    TaskExecutor(pipeline_factory=lambda **kwargs: pipeline).run_inline(
+        "task-1", cancellation=TaskCancellation()
+    )
+
+    assert executor_db.get_task("task-1")["status"] == "interrupted"
+    assert pipeline.text_segmenter.calls == 1
+    assert pipeline.image_prompt_agent.calls == 0
+    assert pipeline.image_generator.calls == []
+    assert pipeline.voiceover_generator.calls == []
+    assert pipeline.draft_builder.calls == 0
+
+
+def test_prompt_checkpoint_false_stops_before_next_prompt_and_assets(
+    executor_db, monkeypatch
+):
+    create_task(executor_db)
+    pipeline = FakePipeline(output_dir="unused", fail_assets=True)
+    original_update = executor_db.update_segment
+
+    def fail_prompt_checkpoint(task_id, segment_index, updates):
+        if "image_prompt" in updates:
+            return False
+        return original_update(task_id, segment_index, updates)
+
+    monkeypatch.setattr(executor_db, "update_segment", fail_prompt_checkpoint)
+
+    TaskExecutor(pipeline_factory=lambda **kwargs: pipeline).run_inline(
+        "task-1", cancellation=TaskCancellation()
+    )
+
+    assert executor_db.get_task("task-1")["status"] == "interrupted"
+    assert pipeline.image_prompt_agent.calls == 1
+    assert pipeline.image_generator.calls == []
+    assert pipeline.voiceover_generator.calls == []
+    assert pipeline.draft_builder.calls == 0
+
+
+def test_sparse_legacy_segment_indexes_are_used_for_db_rows_and_assets(
+    executor_db
+):
+    create_task(executor_db, status="interrupted")
+    executor_db.save_task_checkpoint(
+        "task-1", script_text="脚本", summary="摘要", input_mode="script"
+    )
+    executor_db.save_segments(
+        "task-1",
+        [
+            {
+                "segment_index": 5,
+                "text": "第五段",
+                "image_prompt": "提示五",
+                "image_status": "pending",
+                "audio_status": "pending",
+            },
+            {
+                "segment_index": 9,
+                "text": "第九段",
+                "image_prompt": "提示九",
+                "image_status": "pending",
+                "audio_status": "pending",
+            },
+        ],
+    )
+    pipeline = FakePipeline(output_dir="unused", fail_assets=True)
+
+    TaskExecutor(pipeline_factory=lambda **kwargs: pipeline).run_inline(
+        "task-1", cancellation=TaskCancellation()
+    )
+
+    rows = executor_db.get_segments("task-1")
+    assets = executor_db.list_task_assets("task-1")
+    assert [row["segment_index"] for row in rows] == [5, 9]
+    assert all(row["image_status"] == "failed" for row in rows)
+    assert all(row["audio_status"] == "failed" for row in rows)
+    assert {asset["segment_index"] for asset in assets} == {5, 9}
+    assert pipeline.image_generator.calls == [0, 1]
+    assert pipeline.voiceover_generator.calls == [0, 1]
+
+
+def test_stage_cancellation_drains_and_persists_all_submitted_assets(
+    executor_db, tmp_path, monkeypatch
+):
+    create_task(executor_db, status="interrupted")
+    executor_db.save_task_checkpoint(
+        "task-1", script_text="脚本", summary="摘要", input_mode="script"
+    )
+    executor_db.save_segments(
+        "task-1",
+        [
+            {
+                "segment_index": index,
+                "text": f"第{index}段",
+                "image_prompt": f"提示{index}",
+                "image_status": "pending",
+                "audio_status": "pending",
+            }
+            for index in range(2)
+        ],
+    )
+    cancellation = TaskCancellation()
+    pipeline = FakePipeline(output_dir=str(tmp_path / "generated"))
+    image_calls_started = threading.Barrier(2)
+
+    def cancel_after_both_image_calls_started(index):
+        image_calls_started.wait(timeout=1)
+        if index == 0:
+            cancellation.cancel()
+
+    pipeline.image_generator.on_generate = cancel_after_both_image_calls_started
+    monkeypatch.setattr(task_executor_module, "LocalUploader", FakeUploader)
+    monkeypatch.setattr(
+        task_executor_module.Config,
+        "generation_config",
+        lambda: {"tts_concurrency": 2, "image_concurrency": 2},
+    )
+
+    TaskExecutor(pipeline_factory=lambda **kwargs: pipeline).run_inline(
+        "task-1", cancellation=cancellation
+    )
+
+    rows = executor_db.get_segments("task-1")
+    assets = executor_db.list_task_assets("task-1")
+    assert executor_db.get_task("task-1")["status"] == "interrupted"
+    assert pipeline.draft_builder.calls == 0
+    assert sorted(pipeline.image_generator.calls) == [0, 1]
+    assert sorted(pipeline.voiceover_generator.calls) == [0, 1]
+    assert all(row["image_status"] == "completed" for row in rows)
+    assert all(row["audio_status"] == "completed" for row in rows)
+    assert len(assets) == 4
+    assert all(asset["status"] == "completed" for asset in assets)
+
+
+def test_resume_processing_transition_clears_stale_task_error(
+    executor_db, task_manager
+):
+    create_task(executor_db, status="interrupted")
+    executor_db.update_task_status(
+        "task-1", "interrupted", "image_prompt_generation", "旧任务错误"
+    )
+
+    task_manager.update_task_status("task-1", TaskStatus.PROCESSING)
+
+    assert executor_db.get_task("task-1")["error"] is None
+
+
+def test_explicit_none_clears_only_segment_error_columns(temp_db):
+    create_task(temp_db)
+    temp_db.save_segments(
+        "task-1",
+        [
+            {
+                "segment_index": 0,
+                "text": "第一段",
+                "image_path": "keep.png",
+                "image_error": "旧图片错误",
+                "audio_error": "旧音频错误",
+            }
+        ],
+    )
+
+    assert temp_db.update_segment(
+        "task-1",
+        0,
+        {"image_path": None, "image_error": None, "audio_error": None},
+    )
+
+    row = temp_db.get_segments("task-1")[0]
+    assert row["image_path"] == "keep.png"
+    assert row["image_error"] is None
+    assert row["audio_error"] is None
+
+
+def test_successful_retry_clears_segment_and_task_asset_errors(
+    executor_db, tmp_path, monkeypatch
+):
+    create_task(executor_db, status="interrupted")
+    executor_db.save_task_checkpoint(
+        "task-1", script_text="脚本", summary="摘要", input_mode="script"
+    )
+    executor_db.save_segments(
+        "task-1",
+        [
+            {
+                "segment_index": 0,
+                "text": "第一段",
+                "image_prompt": "提示词",
+                "image_status": "failed",
+                "image_error": "旧图片错误",
+                "audio_status": "failed",
+                "audio_error": "旧音频错误",
+            }
+        ],
+    )
+    executor_db.save_task_asset(
+        "task-1",
+        "image",
+        "generated",
+        segment_index=0,
+        status="failed",
+        error_message="旧图片错误",
+    )
+    executor_db.save_task_asset(
+        "task-1",
+        "audio",
+        "generated",
+        segment_index=0,
+        status="failed",
+        error_message="旧音频错误",
+    )
+    pipeline = FakePipeline(output_dir=str(tmp_path / "generated"))
+    pipeline.draft_builder = FakeDraftBuilder(RuntimeError("stop after assets"))
+    monkeypatch.setattr(task_executor_module, "LocalUploader", FakeUploader)
+
+    TaskExecutor(pipeline_factory=lambda **kwargs: pipeline).run_inline(
+        "task-1", cancellation=TaskCancellation()
+    )
+
+    row = executor_db.get_segments("task-1")[0]
+    assets = executor_db.list_task_assets("task-1")
+    assert row["image_status"] == "completed"
+    assert row["audio_status"] == "completed"
+    assert row["image_error"] is None
+    assert row["audio_error"] is None
+    assert len(assets) == 2
+    assert all(asset["status"] == "completed" for asset in assets)
+    assert all(asset["error_message"] is None for asset in assets)
+    assert all(asset["path"] for asset in assets)

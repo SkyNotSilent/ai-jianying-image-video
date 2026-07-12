@@ -440,6 +440,8 @@ class TaskManager:
         task = self.get_task(task_id)
         if task:
             task.status = status
+            if status == TaskStatus.PROCESSING:
+                task.error = None
             logger.info(f"[{task_id}] 状态更新: {status}")
 
             # 更新到本地数据库

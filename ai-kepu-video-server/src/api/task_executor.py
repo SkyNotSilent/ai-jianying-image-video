@@ -29,6 +29,11 @@ class RecoverableTaskError(RuntimeError):
     """Raised when saved checkpoints can be used to resume the task."""
 
 
+def _require_checkpoint(saved: bool, description: str) -> None:
+    if not saved:
+        raise RecoverableTaskError(f"{description}保存失败")
+
+
 @dataclass
 class ResumeWork:
     prompt_indexes: List[int]
@@ -78,13 +83,15 @@ def build_resume_work(segments: List[dict]) -> ResumeWork:
 
 
 def _safe_project_name(name: str) -> str:
-    return (
-        (name or "task")
+    safe_name = (
+        (name or "")
+        .strip()
         .replace(" ", "_")
         .replace("\n", "_")
         .replace("/", "_")
         .replace("\\", "_")
     )[:20]
+    return "task" if safe_name in {"", ".", ".."} else safe_name
 
 
 def _task_output_dir(task_id: str, draft_name: str, segments: List[dict]) -> Path:
@@ -96,7 +103,13 @@ def _task_output_dir(task_id: str, draft_name: str, segments: List[dict]) -> Pat
             path = Path(raw_path)
             if path.parent.name in {"images", "voiceovers", "audio"}:
                 return path.parent.parent
-    return Path("output") / task_id / draft_name
+    task_root = Path("output") / task_id
+    candidate = task_root / _safe_project_name(draft_name)
+    try:
+        candidate.resolve().relative_to(task_root.resolve())
+    except ValueError:
+        return task_root / "task"
+    return candidate
 
 
 def _bounded_concurrency(value, total: int) -> int:
@@ -249,6 +262,7 @@ class TaskExecutor:
         video_path = None
         image_failures = []
         voice_failures = []
+        segment_db_indexes = []
 
         try:
             if cancellation:
@@ -292,6 +306,20 @@ class TaskExecutor:
             if task_row.get("script_text"):
                 pipeline.article = task_row["script_text"]
                 pipeline.summary = task_row.get("summary") or ""
+            elif persisted_segments:
+                pipeline.article = "\n".join(
+                    row["text"] for row in persisted_segments
+                )
+                pipeline.summary = task_row.get("summary") or theme
+                _require_checkpoint(
+                    db_client.save_task_checkpoint(
+                        task_id,
+                        script_text=pipeline.article,
+                        summary=pipeline.summary,
+                        input_mode=input_mode,
+                    ),
+                    "旧任务脚本检查点",
+                )
             else:
                 rewrite_result = pipeline.script_rewriter.rewrite(
                     theme,
@@ -301,11 +329,14 @@ class TaskExecutor:
                 )
                 pipeline.article = rewrite_result["script"]
                 pipeline.summary = rewrite_result["summary"]
-                db_client.save_task_checkpoint(
-                    task_id,
-                    script_text=pipeline.article,
-                    summary=pipeline.summary,
-                    input_mode=input_mode,
+                _require_checkpoint(
+                    db_client.save_task_checkpoint(
+                        task_id,
+                        script_text=pipeline.article,
+                        summary=pipeline.summary,
+                        input_mode=input_mode,
+                    ),
+                    "脚本检查点",
                 )
             logger.info(f"[{task_id}] [1/7] 脚本生成完成，共 {len(pipeline.article)} 字")
             logger.info(f"[{task_id}] 内容总结: {pipeline.summary}")
@@ -319,20 +350,24 @@ class TaskExecutor:
                 pipeline.segments = [row["text"] for row in persisted_segments]
             else:
                 pipeline.segments = pipeline.text_segmenter.split(pipeline.article)
-                db_client.save_segments(
-                    task_id,
-                    [
-                        {
-                            "segment_index": i,
-                            "text": segment,
-                            "image_prompt": "",
-                            "image_status": "pending",
-                            "audio_status": "pending",
-                        }
-                        for i, segment in enumerate(pipeline.segments)
-                    ],
+                initial_segments = [
+                    {
+                        "segment_index": i,
+                        "text": segment,
+                        "image_prompt": "",
+                        "image_status": "pending",
+                        "audio_status": "pending",
+                    }
+                    for i, segment in enumerate(pipeline.segments)
+                ]
+                _require_checkpoint(
+                    db_client.save_segments(task_id, initial_segments),
+                    "初始分镜检查点",
                 )
                 persisted_segments = db_client.get_segments(task_id)
+            segment_db_indexes = [
+                row["segment_index"] for row in persisted_segments
+            ]
             segments_count = len(pipeline.segments)
             logger.info(f"[{task_id}] [2/7] 分段完成，共 {segments_count} 段")
             generation_config = Config.generation_config()
@@ -371,10 +406,13 @@ class TaskExecutor:
                     prompt_error_updates = {"image_error": str(error)}
                     if _completed_local_path(persisted_segments[i], "image") is None:
                         prompt_error_updates["image_status"] = "failed"
-                    db_client.update_segment(
-                        task_id,
-                        i,
-                        prompt_error_updates,
+                    _require_checkpoint(
+                        db_client.update_segment(
+                            task_id,
+                            segment_db_indexes[i],
+                            prompt_error_updates,
+                        ),
+                        f"分镜 {segment_db_indexes[i]} 提示词错误检查点",
                     )
                     raise RecoverableTaskError(
                         f"图片提示词生成失败 [片段 {i + 1}]: {error}"
@@ -382,14 +420,17 @@ class TaskExecutor:
                 image_prompts[i] = prompt
                 prompt_updates = {
                     "image_prompt": prompt,
-                    "image_error": "",
+                    "image_error": None,
                 }
                 if _completed_local_path(persisted_segments[i], "image") is None:
                     prompt_updates["image_status"] = "pending"
-                db_client.update_segment(
-                    task_id,
-                    i,
-                    prompt_updates,
+                _require_checkpoint(
+                    db_client.update_segment(
+                        task_id,
+                        segment_db_indexes[i],
+                        prompt_updates,
+                    ),
+                    f"分镜 {segment_db_indexes[i]} 提示词检查点",
                 )
                 task.update_step_progress("image_prompt_generation", i + 1, segments_count)
             pipeline.image_prompts = image_prompts
@@ -409,8 +450,6 @@ class TaskExecutor:
             def generate_voiceover_item(i: int, seg: str):
                 logger.debug(f"[{task_id}] 配音进度: {i+1}/{segments_count}")
                 try:
-                    if cancellation:
-                        cancellation.raise_if_cancelled()
                     if tts_concurrency == 1 and i > 0:
                         time.sleep(0.5)
                     path = pipeline.voiceover_generator.generate(
@@ -426,8 +465,6 @@ class TaskExecutor:
             def generate_image_item(i: int, prompt: str):
                 logger.debug(f"[{task_id}] 图像进度: {i+1}/{segments_count}")
                 try:
-                    if cancellation:
-                        cancellation.raise_if_cancelled()
                     path = pipeline.image_generator.generate(
                         prompt,
                         index=i,
@@ -447,6 +484,7 @@ class TaskExecutor:
             upload_ts = int(time.time())
 
             def persist_segment_asset(i: int, asset_type: str, path: str = None, url: str = None, error: str = None):
+                segment_index = segment_db_indexes[i]
                 upload_error = None
                 if asset_type == "image" and path and Path(path).exists():
                     try:
@@ -479,14 +517,14 @@ class TaskExecutor:
                     prompt = None
                     voice = voice_type
 
-                db_client.update_segment(task_id, i, updates)
+                db_client.update_segment(task_id, segment_index, updates)
                 db_client.save_task_asset(
                     task_id=task_id,
                     asset_type=asset_type,
                     source="generated",
                     path=path,
                     url=url,
-                    segment_index=i,
+                    segment_index=segment_index,
                     label=label,
                     prompt=prompt,
                     text=pipeline.segments[i] if i < len(pipeline.segments) else None,
@@ -516,8 +554,6 @@ class TaskExecutor:
                             persist_segment_asset(i, "audio", error=result["error"])
                         completed += 1
                         task.update_step_progress("voiceover_generation", completed, segments_count)
-                        if cancellation:
-                            cancellation.raise_if_cancelled()
                 if failed_items:
                     logger.warning(f"[{task_id}] 部分音频生成失败: {failed_items}")
                 task.complete_step("voiceover_generation")
@@ -544,8 +580,6 @@ class TaskExecutor:
                             persist_segment_asset(i, "image", error=result["error"])
                         completed += 1
                         task.update_step_progress("image_generation", completed, segments_count)
-                        if cancellation:
-                            cancellation.raise_if_cancelled()
                 if failed_items:
                     logger.warning(f"[{task_id}] 部分图片生成失败: {failed_items}")
                 task.complete_step("image_generation")
@@ -556,6 +590,9 @@ class TaskExecutor:
                 image_future = executor.submit(generate_images)
                 voice_failures = voice_future.result()
                 image_failures = image_future.result()
+
+            if cancellation:
+                cancellation.raise_if_cancelled()
 
             all_failures = voice_failures + image_failures
             if all_failures:
@@ -697,6 +734,7 @@ class TaskExecutor:
             segments_data = []
 
             for i, seg_text in enumerate(pipeline.segments):
+                segment_index = segment_db_indexes[i]
                 image_path = pipeline.media_paths[i] if i < len(pipeline.media_paths) else None
                 audio_path = pipeline.voiceover_files[i] if i < len(pipeline.voiceover_files) else None
 
@@ -710,7 +748,7 @@ class TaskExecutor:
                 audio_url = None
 
                 seg_data = {
-                    'segment_index': i,
+                    'segment_index': segment_index,
                     'text': seg_text,
                     'image_prompt': image_prompts[i] if i < len(image_prompts) else "",
                     'image_path': image_path,
@@ -732,7 +770,7 @@ class TaskExecutor:
                         source="generated",
                         path=image_path,
                         url=image_url,
-                        segment_index=i,
+                        segment_index=segment_index,
                         label=f"AI 生成 · 分镜 {i + 1}",
                         prompt=seg_data["image_prompt"],
                         text=seg_text,
@@ -750,7 +788,7 @@ class TaskExecutor:
                         source="generated",
                         path=audio_path,
                         url=audio_url,
-                        segment_index=i,
+                        segment_index=segment_index,
                         label=f"配音 · 分镜 {i + 1}",
                         text=seg_text,
                         voice_type=voice_type,
@@ -800,10 +838,15 @@ class TaskExecutor:
                         media_paths = getattr(pipeline, "media_paths", []) or []
                         voiceover_files = getattr(pipeline, "voiceover_files", []) or []
                         for i, seg_text in enumerate(pipeline.segments):
+                            segment_index = (
+                                segment_db_indexes[i]
+                                if i < len(segment_db_indexes)
+                                else i
+                            )
                             image_path = media_paths[i] if i < len(media_paths) else None
                             audio_path = voiceover_files[i] if i < len(voiceover_files) else None
                             partial_segments.append({
-                                "segment_index": i,
+                                "segment_index": segment_index,
                                 "text": seg_text,
                                 "image_prompt": image_prompts[i] if i < len(image_prompts) else "",
                                 "image_path": image_path,
