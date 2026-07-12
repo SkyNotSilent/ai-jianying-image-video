@@ -1,24 +1,26 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ArrowRight, FileText, ImageOff, MoreHorizontal, Plus, RotateCcw, Search } from 'lucide-react'
+import { ArrowRight, FileText, ImageOff, LoaderCircle, MoreHorizontal, Plus, RotateCcw, Search, Trash2 } from 'lucide-react'
 import { useNavigate } from 'react-router'
-import { getSegments, listTasks } from '../api/task'
+import { deleteTask, getSegments, listTasks, resumeTask } from '../api/task'
 import { ConfirmDialog } from '../components/Modal'
 import { EmptyState, LoadingState } from '../components/StatusStates'
 import { toast } from '../lib/toast'
 import { createDraft, deleteDraft, estimateDuration, formatLocalTime, listDrafts, visualStyles } from '../utils/projectDrafts'
 import { normalizeMediaUrl } from '../utils/mediaUrl'
 import { deriveTaskState } from '../utils/taskState'
+import { getDeleteConfirmation, getDeletionIssueCount, getProjectPrimaryAction } from './projectActions'
 import './delivery-pages.css'
 
 const STATUS_FILTERS = [
   { key: 'all', label: '全部项目', tone: 'info' },
   { key: 'draft', label: '草稿', tone: 'warning' },
   { key: 'processing', label: '生成中', tone: 'info' },
+  { key: 'interrupted', label: '可继续', tone: 'warning' },
   { key: 'completed', label: '已完成', tone: 'success' },
   { key: 'recoverable_assets', label: '失败可恢复', tone: 'danger' },
 ]
 const DURATION_FILTERS = ['全部时长', '1 分钟以内', '1-3 分钟', '3-5 分钟', '5 分钟以上']
-const DEFAULT_VISIBLE_STATUSES = new Set(['processing', 'completed', 'export_ready', 'recoverable_assets'])
+const DEFAULT_VISIBLE_STATUSES = new Set(['processing', 'interrupted', 'completed', 'export_ready', 'recoverable_assets'])
 
 function secondsToLabel(value) {
   const seconds = Math.round(Number(value) || 0)
@@ -59,14 +61,17 @@ export function ProjectAssetsPage() {
   const [localDrafts, setLocalDrafts] = useState([])
   const [brokenCovers, setBrokenCovers] = useState({})
   const [fallbackCovers, setFallbackCovers] = useState({})
-  const [draftToDelete, setDraftToDelete] = useState(null)
+  const [openMenuId, setOpenMenuId] = useState(null)
+  const [projectToDelete, setProjectToDelete] = useState(null)
+  const [deletingId, setDeletingId] = useState(null)
+  const [resumingId, setResumingId] = useState(null)
 
   const loadProjects = useCallback(async () => {
     setLoading(true)
     setLocalDrafts(listDrafts())
     try {
       const tasks = await listTasks(undefined, 80, 0)
-      const taskList = Array.isArray(tasks) ? tasks : []
+      const taskList = (Array.isArray(tasks) ? tasks : []).filter(task => task.status !== 'deleting')
       setRemoteTasks(taskList)
       const segmentEntries = await Promise.all(taskList.map(async task => {
         try {
@@ -179,19 +184,76 @@ export function ProjectAssetsPage() {
     navigate(`/manuscript/${draft.draft_id}`)
   }
 
-  const openProject = project => {
-    if (project.type === 'draft') navigate(`/manuscript/${project.id}`)
-    else if (project.status === 'processing') navigate(`/process/${project.id}`)
-    else navigate(`/preview/${project.id}`)
+  const openProject = async project => {
+    const action = getProjectPrimaryAction(project)
+    if (action === 'draft') { navigate(`/manuscript/${project.id}`); return }
+    if (action === 'progress') { navigate(`/process/${project.id}`); return }
+    if (action === 'preview') { navigate(`/preview/${project.id}`); return }
+
+    setResumingId(project.id)
+    try {
+      await resumeTask(project.id)
+      navigate(`/process/${project.id}`)
+    } catch (error) {
+      console.warn('继续生成失败', error)
+      toast.error('任务暂时无法继续，请稍后重试')
+    } finally {
+      setResumingId(null)
+    }
   }
 
-  const confirmDelete = () => {
-    if (!draftToDelete) return
-    deleteDraft(draftToDelete.id)
-    setLocalDrafts(listDrafts())
-    setDraftToDelete(null)
-    toast.success('草稿已删除')
+  const selectDelete = project => {
+    setOpenMenuId(null)
+    setProjectToDelete(project)
   }
+
+  const removeTaskFromView = taskId => {
+    setRemoteTasks(current => current.filter(task => task.task_id !== taskId))
+    setTaskSegments(current => {
+      const next = { ...current }
+      delete next[taskId]
+      return next
+    })
+    setFallbackCovers(current => {
+      const next = { ...current }
+      delete next[taskId]
+      return next
+    })
+    setBrokenCovers(current => {
+      const next = { ...current }
+      delete next[taskId]
+      return next
+    })
+  }
+
+  const confirmDelete = async () => {
+    if (!projectToDelete || deletingId) return
+    if (projectToDelete.type === 'draft') {
+      deleteDraft(projectToDelete.id)
+      setLocalDrafts(listDrafts())
+      setProjectToDelete(null)
+      toast.success('草稿已删除')
+      return
+    }
+
+    setDeletingId(projectToDelete.id)
+    try {
+      const result = await deleteTask(projectToDelete.id, { deleteFiles: true })
+      removeTaskFromView(projectToDelete.id)
+      setProjectToDelete(null)
+      const issueCount = getDeletionIssueCount(result)
+      if (issueCount) toast.warning(`项目已删除，仍有 ${issueCount} 个本地路径未清理`)
+      else if (result?.outcome === 'deleting') toast.info('项目正在停止生成，随后会自动完成删除')
+      else toast.success('项目及本地素材已删除')
+    } catch (error) {
+      console.warn('删除项目失败', error)
+      toast.error('删除项目失败，请重试')
+    } finally {
+      setDeletingId(null)
+    }
+  }
+
+  const deleteConfirmation = getDeleteConfirmation(projectToDelete || {})
 
   const sectionTitle = STATUS_FILTERS.find(item => item.key === statusFilter)?.label || '全部项目'
 
@@ -220,18 +282,21 @@ export function ProjectAssetsPage() {
               const usableCover = Boolean(project.cover && !brokenCovers[project.id])
               return (
                 <article className="asset-project-card" key={project.id}>
-                  <button className="asset-project-open" type="button" onClick={() => openProject(project)} aria-label={`打开 ${project.name}`}>
+                  <button className="asset-project-open" type="button" disabled={resumingId === project.id} onClick={() => openProject(project)} aria-label={`打开 ${project.name}`}>
                     <div className={`asset-project-thumb${usableCover ? '' : ' is-empty'}`}>
                       {usableCover ? <img src={project.cover} alt="" onError={() => setBrokenCovers(current => ({ ...current, [project.id]: true }))} /> : <div><ImageOff size={22} aria-hidden="true" /><strong>{project.name.slice(0, 2)}</strong><small>{project.type === 'draft' ? '文稿草稿' : '暂无画面'}</small></div>}
                       <span>{project.duration}</span>
                     </div>
                     <div className="asset-project-copy">
                       <h2>{project.name}</h2>
-                      <div className="asset-project-status"><span className={`status-pill is-${project.tone}`}>{project.statusLabel}</span><strong>{project.type === 'draft' ? '继续文稿' : project.actionLabel || '查看预览'} <ArrowRight size={13} aria-hidden="true" /></strong></div>
+                      <div className="asset-project-status"><span className={`status-pill is-${project.tone}`}>{project.statusLabel}</span><strong>{resumingId === project.id ? <><LoaderCircle className="spin" size={13} aria-hidden="true" />正在继续</> : <>{project.type === 'draft' ? '继续文稿' : project.actionLabel || '查看预览'} <ArrowRight size={13} aria-hidden="true" /></>}</strong></div>
                       <div className="asset-project-meta"><span>{project.provider}</span><time>{project.updatedAt}</time></div>
                     </div>
                   </button>
-                  {project.type === 'draft' && <button className="asset-project-menu icon-button" type="button" title="删除本地草稿" aria-label={`删除 ${project.name}`} onClick={() => setDraftToDelete(project)}><MoreHorizontal size={18} aria-hidden="true" /></button>}
+                  <div className="asset-project-actions">
+                    <button className="asset-project-menu icon-button" type="button" title="项目操作" aria-label={`${project.name} 的项目操作`} aria-expanded={openMenuId === project.id} onClick={() => setOpenMenuId(current => current === project.id ? null : project.id)}><MoreHorizontal size={18} aria-hidden="true" /></button>
+                    {openMenuId === project.id ? <div className="asset-project-popover" role="menu"><button type="button" role="menuitem" onClick={() => selectDelete(project)}><Trash2 size={15} aria-hidden="true" />{project.type === 'draft' ? '删除草稿' : '删除项目'}</button></div> : null}
+                  </div>
                 </article>
               )
             })}
@@ -240,7 +305,7 @@ export function ProjectAssetsPage() {
         {!loading && filteredProjects.length > 0 && <footer className="assets-result-count"><FileText size={15} aria-hidden="true" />共 {filteredProjects.length} 项</footer>}
       </section>
 
-      <ConfirmDialog open={Boolean(draftToDelete)} title="删除草稿" message="确认删除这个本地草稿？此操作不会删除任何后端任务。" confirmLabel="删除草稿" danger onConfirm={confirmDelete} onClose={() => setDraftToDelete(null)} />
+      <ConfirmDialog open={Boolean(projectToDelete)} title={deleteConfirmation.title} message={deleteConfirmation.message} confirmLabel={deletingId ? '正在删除...' : deleteConfirmation.confirmLabel} confirmDisabled={Boolean(deletingId)} danger onConfirm={confirmDelete} onClose={() => { if (!deletingId) setProjectToDelete(null) }} />
     </main>
   )
 }

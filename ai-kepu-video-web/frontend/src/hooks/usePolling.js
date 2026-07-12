@@ -33,7 +33,7 @@ export function usePolling(taskId, interval = 2000) {
       setState({ taskId: requestTaskId, data: result, error: null })
       retryCountRef.current = 0
 
-      if (result.status === 'completed' || result.status === 'failed') {
+      if (result.status === 'completed' || result.status === 'failed' || result.status === 'interrupted') {
         stopPolling()
       }
     } catch (pollError) {

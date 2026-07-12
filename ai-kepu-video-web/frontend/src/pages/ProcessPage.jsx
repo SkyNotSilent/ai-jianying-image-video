@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
-import { ArrowRight, CircleAlert, FolderKanban, X } from 'lucide-react'
+import { ArrowRight, CircleAlert, FolderKanban, LoaderCircle, X } from 'lucide-react'
 import { useNavigate, useParams } from 'react-router'
+import { resumeTask } from '../api/task'
 import { Modal } from '../components/Modal'
 import { TaskProgress, TaskStep } from '../components/TaskProgress'
 import { usePolling } from '../hooks/usePolling'
 import { listDrafts } from '../utils/projectDrafts'
+import { toast } from '../lib/toast'
 import './creation-flow.css'
 
 const loadingTasks = ['正在分析文案并生成分镜脚本...', '正在生成画面提示词...', '正在匹配配音参数...', '正在生成分镜图片...', '正在合成音频和字幕...', '正在整理预览素材...']
@@ -16,6 +18,7 @@ export function ProcessPage() {
   const [loading, setLoading] = useState(true)
   const [loadingPercent, setLoadingPercent] = useState(0)
   const [showError, setShowError] = useState(false)
+  const [resuming, setResuming] = useState(false)
   const loadingTimer = useRef(null)
   const finishTimer = useRef(null)
 
@@ -50,6 +53,21 @@ export function ProcessPage() {
     navigate(draft?.draft_id ? `/production/${draft.draft_id}` : '/assets')
   }
   const recover = () => navigate(`/preview/${taskId}`)
+  const resumeGeneration = async () => {
+    if (resuming) return
+    setResuming(true)
+    try {
+      await resumeTask(taskId)
+      setShowError(false)
+      startPolling()
+      toast.success('任务已继续生成')
+    } catch (resumeError) {
+      console.warn('继续生成失败', resumeError)
+      toast.error('任务暂时无法继续，请稍后重试')
+    } finally {
+      setResuming(false)
+    }
+  }
   const loadingTask = loadingTasks[Math.min(Math.floor(loadingPercent / 16), loadingTasks.length - 1)]
 
   return (
@@ -57,9 +75,10 @@ export function ProcessPage() {
       <button type="button" className="process-exit" onClick={() => navigate('/assets')}><X size={17} />退出</button>
       {loading ? <section className="process-loading" aria-live="polite"><div className="initial-progress-ring" style={{ '--progress': `${loadingPercent * 3.6}deg` }}><span>{Math.round(loadingPercent)}%</span></div><p>任务初始化</p><strong>{loadingTask}</strong><small>退出后任务会继续在后台生成</small></section> : null}
       {!loading && task ? <div className="process-workspace">
-        <section className="process-overview"><TaskProgress steps={task.progress?.steps || []} currentStep={task.progress?.current_step} />{task.status === 'pending' ? <p className="pending-notice">任务已提交，等待调度执行</p> : <p className="background-notice">可以退出此页面，任务会继续在后台生成</p>}</section>
+        <section className="process-overview"><TaskProgress steps={task.progress?.steps || []} currentStep={task.progress?.current_step} />{task.status === 'pending' ? <p className="pending-notice">任务已提交，等待调度执行</p> : task.status === 'interrupted' ? <p className="interrupted-notice">生成已中断，已完成的内容和素材都已保存</p> : <p className="background-notice">可以退出此页面，任务会继续在后台生成</p>}</section>
         <section className="process-steps"><header><h1>执行步骤</h1><span>{task.progress?.current_step || 'pending'}</span></header><div>{(task.progress?.steps || []).map((step, index, items) => <TaskStep key={step.name} step={step} isLast={index === items.length - 1} />)}</div></section>
         {task.status === 'failed' ? <section className="recovery-notice"><FolderKanban size={23} /><div><h2>已生成内容仍可查看</h2><p>任务失败只表示后续流程停止，已经保存的分镜、图片、配音和草稿素材会保留在预览编辑页。</p></div><button type="button" className="button button-secondary" onClick={recover}>查看已保存素材<ArrowRight size={16} /></button></section> : null}
+        {task.status === 'interrupted' ? <section className="recovery-notice recovery-notice-interrupted"><FolderKanban size={23} /><div><h2>可以从中断处继续</h2><p>继续后只会补齐缺失的提示词、图片和配音，已完成内容不会重复生成。</p></div><div className="recovery-actions"><button type="button" className="button button-secondary" onClick={recover}>查看已保存素材</button><button type="button" className="button button-primary" disabled={resuming} onClick={resumeGeneration}>{resuming ? <LoaderCircle className="spin" size={16} aria-hidden="true" /> : <ArrowRight size={16} aria-hidden="true" />}{resuming ? '正在继续...' : '继续生成'}</button></div></section> : null}
       </div> : null}
       <Modal open={showError} title="生成失败" onClose={() => setShowError(false)} footer={<><button type="button" className="button button-secondary" onClick={() => setShowError(false)}>关闭</button><button type="button" className="button button-secondary" onClick={recover}>查看已保存素材</button><button type="button" className="button button-primary" onClick={retry}>重新生成</button></>}><div className="process-error"><CircleAlert size={20} /><div><p>{task?.error ? '生成失败，请重试' : error || '查询任务状态失败，请重试'}</p>{task?.error ? <pre>{task.error}</pre> : null}</div></div></Modal>
     </main>

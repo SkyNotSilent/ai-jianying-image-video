@@ -22,6 +22,18 @@ export function deriveTaskState({ task = {}, segments = [], exportState = null }
     }
   }
 
+  if (rawStatus === 'interrupted') {
+    return {
+      key: 'interrupted',
+      label: '生成已中断',
+      tone: 'warning',
+      actionLabel: '继续生成',
+      canPreview: hasSegmentEvidence,
+      canExport: false,
+      canRecover: true,
+    }
+  }
+
   if (rawStatus === 'failed') {
     return {
       key: 'recoverable_assets',

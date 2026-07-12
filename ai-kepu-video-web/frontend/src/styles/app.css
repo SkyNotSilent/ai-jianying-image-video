@@ -45,6 +45,7 @@ button:focus-visible, a:focus-visible { outline: 3px solid #8ac8ff; outline-offs
 .button-secondary:hover { background: #f8fafc; }
 .button-danger { color: #fff; background: #c62f3e; border-color: #c62f3e; }
 .button-danger:hover { background: #a82533; }
+.button:disabled, .icon-button:disabled { opacity: .5; cursor: not-allowed; }
 
 .foundation-panel { margin-top: 28px; border: 1px solid #dbe2ea; border-radius: 8px; background: #fff; box-shadow: 0 1px 2px rgba(16, 24, 40, .04); }
 .panel-status { display: flex; align-items: center; gap: 8px; min-height: 42px; padding: 0 18px; color: #087b9f; border-bottom: 1px solid #e5ebf1; background: #f0fbfe; font-size: 13px; font-weight: 700; }

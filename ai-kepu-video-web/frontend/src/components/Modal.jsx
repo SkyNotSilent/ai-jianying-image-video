@@ -27,13 +27,13 @@ export function Modal({ open, title, children, onClose, footer }) {
   )
 }
 
-export function ConfirmDialog({ open, title = '确认操作', message, confirmLabel = '确认', cancelLabel = '取消', onConfirm, onClose, danger = false }) {
+export function ConfirmDialog({ open, title = '确认操作', message, confirmLabel = '确认', cancelLabel = '取消', onConfirm, onClose, danger = false, confirmDisabled = false }) {
   return (
     <Modal
       open={open}
       title={title}
       onClose={onClose}
-      footer={<><button type="button" className="button button-secondary" onClick={onClose}>{cancelLabel}</button><button type="button" className={`button ${danger ? 'button-danger' : 'button-primary'}`} onClick={onConfirm}>{confirmLabel}</button></>}
+      footer={<><button type="button" className="button button-secondary" onClick={onClose} disabled={confirmDisabled}>{cancelLabel}</button><button type="button" className={`button ${danger ? 'button-danger' : 'button-primary'}`} onClick={onConfirm} disabled={confirmDisabled}>{confirmLabel}</button></>}
     >
       <p>{message}</p>
     </Modal>

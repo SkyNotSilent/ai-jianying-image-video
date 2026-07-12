@@ -128,8 +128,9 @@
 .progress-copy { display: grid; gap: 4px; }
 .progress-copy span { color: #667085; font-size: 12px; font-weight: 750; }
 .progress-copy strong { font-size: 15px; }
-.pending-notice, .background-notice { margin: 0; color: #667085; font-size: 13px; }
+.pending-notice, .background-notice, .interrupted-notice { margin: 0; color: #667085; font-size: 13px; }
 .pending-notice { color: #0b5dbd; }
+.interrupted-notice { color: #985a04; }
 .process-steps { padding: 18px; }
 .process-steps > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
 .process-steps h1 { margin: 0; font-size: 17px; }
@@ -158,6 +159,8 @@
 .recovery-notice div { min-width: 0; flex: 1; }
 .recovery-notice h2 { margin: 0 0 4px; color: #18212f; font-size: 15px; }
 .recovery-notice p { margin: 0; color: #566577; font-size: 12px; line-height: 1.45; }
+.recovery-notice-interrupted { border-color: #f1d59a; background: #fff9eb; color: #985a04; }
+.recovery-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .process-error { display: flex; align-items: flex-start; gap: 10px; color: #ac2733; }
 .process-error div { min-width: 0; }
 .process-error p { color: #475467; }
@@ -184,6 +187,7 @@
   .production-stat-grid { grid-template-columns: 1fr; gap: 10px; }
   .production-stat-grid div { padding: 0; border-right: 0; }
   .recovery-notice { align-items: flex-start; flex-direction: column; }
+  .recovery-actions { width: 100%; display: grid; grid-template-columns: 1fr; }
   .recovery-notice .button { width: 100%; }
 }
 @media (max-width: 420px) {

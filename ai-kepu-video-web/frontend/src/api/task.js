@@ -116,15 +116,23 @@ export function getTaskStatus(taskId) {
   })
 }
 
+export function resumeTask(taskId) {
+  return request({
+    url: `/ai/native/video/kepu/tasks/${taskId}/resume`,
+    method: 'post'
+  })
+}
+
 /**
  * 删除任务
  * @param {string} taskId - 任务ID
  * @returns {Promise<{message: string}>}
  */
-export function deleteTask(taskId) {
+export function deleteTask(taskId, { deleteFiles = true } = {}) {
   return request({
     url: `/ai/native/video/kepu/tasks/${taskId}`,
-    method: 'delete'
+    method: 'delete',
+    params: { delete_files: deleteFiles }
   })
 }
 
