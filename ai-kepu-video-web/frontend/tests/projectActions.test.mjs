@@ -19,8 +19,34 @@ test('interrupted task exposes continue generation', () => {
   assert.equal(getProjectPrimaryAction({ type: 'task', status: state.key }), 'resume')
 })
 
-test('processing and local draft projects keep their existing primary actions', () => {
+test('failed task with a saved segment exposes continue generation', () => {
+  const state = deriveTaskState({
+    task: { status: 'failed', error: 'provider timeout' },
+    segments: [{ segment_index: 0, text: '已保存分镜' }],
+  })
+
+  assert.equal(state.key, 'interrupted')
+  assert.equal(state.actionLabel, '继续生成')
+  assert.equal(getProjectPrimaryAction({ type: 'task', status: state.key }), 'resume')
+})
+
+test('failed task without checkpoint evidence retains recovery-only action', () => {
+  const state = deriveTaskState({
+    task: { status: 'failed', error: 'failed before checkpoint' },
+    segments: [],
+  })
+
+  assert.equal(state.key, 'recoverable_assets')
+  assert.equal(state.actionLabel, '查看已保存素材')
+  assert.equal(getProjectPrimaryAction({ type: 'task', status: state.key }), 'preview')
+})
+
+test('processing, completed, and local draft projects keep their existing primary actions', () => {
+  assert.equal(deriveTaskState({ task: { status: 'pending' } }).key, 'processing')
+  assert.equal(deriveTaskState({ task: { status: 'processing' } }).key, 'processing')
+  assert.equal(deriveTaskState({ task: { status: 'completed' } }).key, 'completed')
   assert.equal(getProjectPrimaryAction({ type: 'task', status: 'processing' }), 'progress')
+  assert.equal(getProjectPrimaryAction({ type: 'task', status: 'completed' }), 'preview')
   assert.equal(getProjectPrimaryAction({ type: 'draft', status: 'draft' }), 'draft')
 })
 

@@ -22,10 +22,10 @@ export function deriveTaskState({ task = {}, segments = [], exportState = null }
     }
   }
 
-  if (rawStatus === 'interrupted') {
+  if (rawStatus === 'interrupted' || (rawStatus === 'failed' && hasSegmentEvidence)) {
     return {
       key: 'interrupted',
-      label: '生成已中断',
+      label: rawStatus === 'failed' ? '失败可继续' : '生成已中断',
       tone: 'warning',
       actionLabel: '继续生成',
       canPreview: hasSegmentEvidence,
