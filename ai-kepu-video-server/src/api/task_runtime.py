@@ -31,10 +31,11 @@ class TaskRuntimeRegistry:
     def __init__(self):
         self._condition = threading.Condition()
         self._tokens: Dict[str, TaskCancellation] = {}
+        self._deleting = set()
 
     def begin(self, task_id: str) -> Optional[TaskCancellation]:
         with self._condition:
-            if task_id in self._tokens:
+            if task_id in self._tokens or task_id in self._deleting:
                 return None
             token = TaskCancellation()
             self._tokens[task_id] = token
@@ -54,6 +55,23 @@ class TaskRuntimeRegistry:
                 return False
             token.cancel()
             return True
+
+    def claim_delete(self, task_id: str) -> bool:
+        """Block new executions while allowing an existing token to drain."""
+        with self._condition:
+            if task_id in self._deleting:
+                return False
+            self._deleting.add(task_id)
+            return True
+
+    def finish_delete(self, task_id: str) -> None:
+        with self._condition:
+            self._deleting.discard(task_id)
+            self._condition.notify_all()
+
+    def is_deleting(self, task_id: str) -> bool:
+        with self._condition:
+            return task_id in self._deleting
 
     def wait_until_stopped(self, task_id: str, timeout: float) -> bool:
         with self._condition:

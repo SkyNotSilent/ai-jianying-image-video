@@ -115,9 +115,12 @@ async def serve_media(file_path: str):
 @app.on_event("startup")
 async def startup_event():
     """应用启动事件"""
-    cleaned_count = task_manager.mark_stale_tasks_failed()
-    if cleaned_count:
-        logger.warning(f"启动时已自动标记 {cleaned_count} 个超时任务为失败")
+    deleted_count = task_manager.complete_deleting_tasks()
+    if deleted_count:
+        logger.warning(f"启动时已完成 {deleted_count} 个待删除任务的清理")
+    interrupted_count = task_manager.mark_orphaned_tasks_interrupted()
+    if interrupted_count:
+        logger.warning(f"启动时已将 {interrupted_count} 个遗留任务标记为中断，可继续生成")
     logger.info("=" * 60)
     logger.info("InsightCut API 启动")
     logger.info(f"API 文档: http://0.0.0.0:2002/docs")

@@ -16,6 +16,9 @@ from .models import (
     StepProgress, TaskResult, TaskResponse
 )
 from src.database import db_client, redis_client
+from src.config import Config
+from .task_cleanup import collect_task_paths, delete_task_files
+from .task_runtime import task_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +201,9 @@ class TaskManager:
     def __init__(self):
         self.tasks: Dict[str, Task] = {}
         self.lock = Lock()
+        self.deletion_lock = Lock()
+        self.deletion_claims = set()
+        self.deleted_task_ids = set()
 
     def create_task(self, theme: str, style: str, length: int, voice_type: Optional[str] = None, name: Optional[str] = None, ratio: str = "16:9") -> str:
         """创建新任务"""
@@ -511,12 +517,138 @@ class TaskManager:
 
     def delete_task(self, task_id: str) -> bool:
         """删除任务及其所有关联数据"""
+        deleted = db_client.delete_task(task_id)
+        if not deleted:
+            return False
         with self.lock:
             self.tasks.pop(task_id, None)
         redis_client.delete_task(task_id)
-        db_client.delete_task(task_id)
         logger.info(f"任务已删除: {task_id}")
         return True
+
+    def _allowed_storage_roots(self):
+        return [Config.BASE_DIR / "output", Config.BASE_DIR / "data" / "media"]
+
+    def _snapshot_task_paths(self, task_id: str):
+        task_row = db_client.get_task(task_id)
+        if not task_row:
+            return None, set()
+        segments = db_client.get_segments(task_id)
+        assets = db_client.list_task_assets(task_id)
+        return task_row, collect_task_paths(task_row, segments, assets)
+
+    def _finish_delete(self, task_id: str, delete_files: bool, initial_paths) -> bool:
+        task_row, latest_paths = self._snapshot_task_paths(task_id)
+        paths = set(initial_paths) | latest_paths
+        if task_row and not self.delete_task(task_id):
+            raise RuntimeError(f"[{task_id}] 删除任务数据库记录失败")
+
+        if delete_files:
+            try:
+                report = delete_task_files(paths, self._allowed_storage_roots())
+            except Exception:
+                logger.exception("[%s] 任务记录已删除，但文件清理异常", task_id)
+            else:
+                if report.skipped_paths:
+                    logger.warning(
+                        "[%s] 跳过存储根目录外的任务路径: %s",
+                        task_id,
+                        report.skipped_paths,
+                    )
+                if report.failed_paths:
+                    logger.error(
+                        "[%s] 任务记录已删除，但文件清理失败: %s",
+                        task_id,
+                        report.failed_paths,
+                    )
+                logger.info(
+                    "[%s] 文件清理完成: files=%s directories=%s",
+                    task_id,
+                    report.deleted_files,
+                    report.deleted_directories,
+                )
+
+        with self.deletion_lock:
+            self.deleted_task_ids.add(task_id)
+        return True
+
+    def _run_deferred_delete(self, task_id: str, delete_files: bool, initial_paths):
+        try:
+            while not task_runtime.wait_until_stopped(task_id, timeout=30):
+                logger.info("[%s] 等待运行任务停止后继续删除", task_id)
+            self._finish_delete(task_id, delete_files, initial_paths)
+        except Exception:
+            logger.exception("[%s] 延迟删除任务失败", task_id)
+        finally:
+            with self.deletion_lock:
+                self.deletion_claims.discard(task_id)
+            task_runtime.finish_delete(task_id)
+
+    def request_delete(self, task_id: str, delete_files: bool = False) -> str:
+        """Claim one full deletion and defer it while execution is active."""
+        with self.deletion_lock:
+            if task_id in self.deleted_task_ids:
+                return "deleted"
+            if task_id in self.deletion_claims:
+                return "deleting"
+            if not task_runtime.claim_delete(task_id):
+                return "deleting"
+            task_row, initial_paths = self._snapshot_task_paths(task_id)
+            if not task_row:
+                task_runtime.finish_delete(task_id)
+                return "missing"
+            self.deletion_claims.add(task_id)
+
+        try:
+            if not db_client.update_task_status(
+                task_id,
+                TaskStatus.DELETING.value,
+                task_row.get("current_step"),
+                task_row.get("error"),
+            ):
+                raise RuntimeError(f"[{task_id}] 标记任务删除中失败")
+            with self.lock:
+                task = self.tasks.get(task_id)
+                if task:
+                    task.status = TaskStatus.DELETING
+            redis_client.delete_task(task_id)
+
+            if task_runtime.is_running(task_id):
+                task_runtime.request_cancel(task_id)
+                thread = Thread(
+                    target=self._run_deferred_delete,
+                    args=(task_id, delete_files, initial_paths),
+                )
+                thread.daemon = True
+                thread.start()
+                return "deleting"
+
+            self._finish_delete(task_id, delete_files, initial_paths)
+            return "deleted"
+        except Exception:
+            with self.deletion_lock:
+                self.deletion_claims.discard(task_id)
+            task_runtime.finish_delete(task_id)
+            raise
+        finally:
+            if not task_runtime.is_running(task_id):
+                with self.deletion_lock:
+                    if task_id in self.deleted_task_ids:
+                        self.deletion_claims.discard(task_id)
+                        task_runtime.finish_delete(task_id)
+
+    def complete_deleting_tasks(self, limit: int = 200) -> int:
+        """Finish deletions persisted by a previous server process."""
+        completed = 0
+        rows = db_client.list_tasks(
+            status=TaskStatus.DELETING.value,
+            limit=limit,
+            offset=0,
+        )
+        for row in rows:
+            if self.request_delete(row["task_id"], delete_files=True) == "deleted":
+                completed += 1
+        return completed
 
 
 # 全局任务管理器实例

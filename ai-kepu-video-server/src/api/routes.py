@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Optional, List
 from threading import Thread, Lock
 from urllib.parse import quote, urlparse, urlunparse
-from fastapi import APIRouter, HTTPException, Query, Body, UploadFile, File, Form, Request
+from fastapi import APIRouter, HTTPException, Query, Body, UploadFile, File, Form, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
 from .models import CreateTaskRequest, CreateTaskResponse, TaskResponse
 from .task_manager import task_manager, TaskStatus
@@ -1446,14 +1446,41 @@ async def get_task(task_id: str):
     return task.to_response()
 
 
-@router.delete("/tasks/{task_id}")
-async def delete_task(task_id: str):
-    """删除任务及其关联数据"""
+@router.post("/tasks/{task_id}/resume")
+async def resume_task(task_id: str, response: Response):
+    """恢复存在可用检查点的中断任务。"""
     task = task_manager.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
-    task_manager.delete_task(task_id)
-    return {"message": "任务已删除"}
+
+    outcome = task_executor.resume_task(task_id)
+    if outcome == "started":
+        response.status_code = 202
+        status = TaskStatus.PROCESSING.value
+    elif outcome == "already_running":
+        response.status_code = 200
+        status = TaskStatus.PROCESSING.value
+    elif outcome == "already_completed":
+        response.status_code = 200
+        status = TaskStatus.COMPLETED.value
+    else:
+        response.status_code = 409
+        status = task.status.value if isinstance(task.status, TaskStatus) else str(task.status)
+    return {"task_id": task_id, "status": status, "outcome": outcome}
+
+
+@router.delete("/tasks/{task_id}")
+async def delete_task(
+    task_id: str,
+    response: Response,
+    delete_files: bool = Query(False, description="同时删除本地任务文件"),
+):
+    """删除任务记录，并可安全删除本地任务文件。"""
+    outcome = task_manager.request_delete(task_id, delete_files=delete_files)
+    if outcome == "missing":
+        raise HTTPException(status_code=404, detail="任务不存在")
+    response.status_code = 202 if outcome == "deleting" else 200
+    return {"task_id": task_id, "status": outcome, "outcome": outcome}
 
 
 @router.get("/tasks/{task_id}/download")
