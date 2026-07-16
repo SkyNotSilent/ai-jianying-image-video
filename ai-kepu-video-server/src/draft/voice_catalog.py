@@ -32,14 +32,14 @@ DOUBAO_PRESET_VOICES = [
     ("zh_female_mizai_uranus_bigtts", "米仔", "female", "自然真实，适合故事讲述", 50),
     ("zh_male_wennuanahu_moon_bigtts", "温暖阿虎", "male", "温暖磁性，适合情感类内容", 40),
     ("zh_male_qingchexiaoxin_moon_bigtts", "清澈小新", "male", "清澈明朗，适合青春活力内容", 30),
-    ("zh_male_yangguangxiaolei_moon_bigtts", "阳光小磊", "male", "阳光开朗，适合励志正能量内容", 20),
+    ("zh_male_jieshuoxiaoming_moon_bigtts", "讲解小明", "male", "明朗稳定，适合知识讲解和科普内容", 20),
     ("zh_male_chenwendongge_moon_bigtts", "沉稳东哥", "male", "沉稳大气，适合严肃专业内容", 10),
 ]
 
 MIMO_DEFAULT_ENABLED_IDS = ("冰糖", "茉莉", "苏打", "白桦")
 DOUBAO_DEFAULT_ENABLED_IDS = (
     "zh_female_shuangkuaisisi_moon_bigtts",
-    "zh_male_yangguangxiaolei_moon_bigtts",
+    "zh_male_jieshuoxiaoming_moon_bigtts",
 )
 MIMO_VOICE_IDS = frozenset(voice["voice_id"] for voice in MIMO_PRESET_VOICES)
 DOUBAO_VOICE_IDS = frozenset(voice[0] for voice in DOUBAO_PRESET_VOICES)

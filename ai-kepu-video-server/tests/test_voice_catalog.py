@@ -7,6 +7,7 @@ from src.database import sqlite_client as sqlite_client_module
 from src.database.sqlite_client import SQLiteClient
 from src.draft.voice_catalog import (
     DOUBAO_DEFAULT_ENABLED_IDS,
+    DOUBAO_PRESET_VOICES,
     MIMO_DEFAULT_ENABLED_IDS,
     build_voice_key,
     normalize_tts_options,
@@ -94,6 +95,16 @@ def test_fresh_database_seeds_all_presets_and_default_visibility(temp_db):
         DOUBAO_DEFAULT_ENABLED_IDS
     )
     assert all(row["id"].startswith(f'{row["provider"]}:') for row in all_voices)
+
+
+def test_default_doubao_voices_match_the_two_account_granted_legacy_voices():
+    voice_ids = {voice[0] for voice in DOUBAO_PRESET_VOICES}
+
+    assert DOUBAO_DEFAULT_ENABLED_IDS == (
+        "zh_female_shuangkuaisisi_moon_bigtts",
+        "zh_male_jieshuoxiaoming_moon_bigtts",
+    )
+    assert set(DOUBAO_DEFAULT_ENABLED_IDS) <= voice_ids
 
 
 def test_migrates_legacy_voice_table_without_losing_rows(tmp_path, monkeypatch):

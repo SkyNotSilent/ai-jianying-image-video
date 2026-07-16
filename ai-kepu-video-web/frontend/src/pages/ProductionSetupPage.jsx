@@ -40,7 +40,7 @@ function defaultVoiceKey(config) {
     const voice = config.tts.mimo?.default_voice || '冰糖'
     return voice.startsWith('mimo-clone:') ? voice : `mimo:${voice}`
   }
-  return `doubao:${config?.tts?.default_voice || 'zh_male_yangguangxiaolei_moon_bigtts'}`
+  return `doubao:${config?.tts?.default_voice || 'zh_male_jieshuoxiaoming_moon_bigtts'}`
 }
 
 function providerOptions(config, voiceType) {

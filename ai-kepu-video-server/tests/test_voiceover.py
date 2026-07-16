@@ -44,7 +44,7 @@ def tts_config():
         "api_url": "https://doubao.invalid/tts",
         "api_key": "doubao-key",
         "cluster": "volcano_tts",
-        "default_voice": "zh_male_yangguangxiaolei_moon_bigtts",
+        "default_voice": "zh_male_jieshuoxiaoming_moon_bigtts",
         "speed_level": "normal",
         "volume_ratio": 1.0,
         "mimo": {

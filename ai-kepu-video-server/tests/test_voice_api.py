@@ -31,7 +31,7 @@ def tts_config():
         "api_url": "https://doubao.invalid/tts",
         "api_key": "doubao-key",
         "cluster": "volcano_tts",
-        "default_voice": "zh_male_yangguangxiaolei_moon_bigtts",
+        "default_voice": "zh_male_jieshuoxiaoming_moon_bigtts",
         "speed_level": "normal",
         "volume_ratio": 1.0,
         "mimo": {
@@ -79,11 +79,11 @@ def test_catalog_endpoint_filters_providers_and_bulk_availability(
 
     result = asyncio.run(
         routes.update_voice_availability(
-            {"voice_keys": ["mimo:茉莉", "doubao:zh_male_yangguangxiaolei_moon_bigtts"]}
+            {"voice_keys": ["mimo:茉莉", "doubao:zh_male_jieshuoxiaoming_moon_bigtts"]}
         )
     )
     assert result["enabled_voice_keys"] == [
-        "doubao:zh_male_yangguangxiaolei_moon_bigtts",
+        "doubao:zh_male_jieshuoxiaoming_moon_bigtts",
         "mimo:茉莉",
     ]
     enabled = asyncio.run(routes.get_voices(provider=None, include_disabled=False))
@@ -200,7 +200,7 @@ def test_segment_audio_snapshot_columns_round_trip(temp_db):
         "task-1",
         0,
         {
-            "audio_voice_type": "doubao:zh_male_yangguangxiaolei_moon_bigtts",
+            "audio_voice_type": "doubao:zh_male_jieshuoxiaoming_moon_bigtts",
             "audio_tts_options_json": json.dumps({"speed_level": "fast"}),
         },
     )
@@ -272,7 +272,7 @@ def test_regenerate_audio_accepts_legacy_query_and_saves_segment_snapshot(
             "task-query",
             0,
             payload=None,
-            voice_type="doubao:zh_male_yangguangxiaolei_moon_bigtts",
+            voice_type="doubao:zh_male_jieshuoxiaoming_moon_bigtts",
         )
     )
 

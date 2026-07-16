@@ -79,7 +79,7 @@ export function normalizeConfig(config = {}) {
       token: source.tts?.token || '',
       api_key: source.tts?.api_key || '',
       cluster: source.tts?.cluster || 'volcano_tts',
-      default_voice: source.tts?.default_voice || 'zh_male_yangguangxiaolei_moon_bigtts',
+      default_voice: source.tts?.default_voice || 'zh_male_jieshuoxiaoming_moon_bigtts',
       speed_level: normalizeSpeedLevel(source.tts?.speed_level),
       volume_ratio: Number.isFinite(parsedVolume) ? Math.min(2, Math.max(.5, parsedVolume)) : 1,
       mimo: {

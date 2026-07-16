@@ -108,7 +108,7 @@ def _resolve_new_task_voice(voice_type: Optional[str]) -> str:
         selection = parse_voice_key(
             build_voice_key(
                 "doubao",
-                config.get("default_voice") or "zh_male_yangguangxiaolei_moon_bigtts",
+                config.get("default_voice") or "zh_male_jieshuoxiaoming_moon_bigtts",
             )
         )
 

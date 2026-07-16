@@ -14,7 +14,7 @@ const catalog = [
   { voice_id: '茉莉', name: '茉莉', provider: 'mimo', kind: 'preset', is_enabled: false, status: 'ready' },
   { voice_id: 'clone-1', name: '我的声音', provider: 'mimo', kind: 'clone', is_enabled: true, status: 'ready' },
   { voice_id: 'clone-draft', name: '待试听', provider: 'mimo', kind: 'clone', is_enabled: false, status: 'draft' },
-  { voice_id: 'zh_male_yangguangxiaolei_moon_bigtts', name: '阳光小磊', provider: 'doubao', kind: 'preset', is_enabled: true, status: 'ready' },
+  { voice_id: 'zh_male_jieshuoxiaoming_moon_bigtts', name: '讲解小明', provider: 'doubao', kind: 'preset', is_enabled: true, status: 'ready' },
 ]
 
 test('normalizes canonical IDs for presets and local clones', () => {
@@ -24,7 +24,7 @@ test('normalizes canonical IDs for presets and local clones', () => {
     'mimo:茉莉',
     'mimo-clone:clone-1',
     'mimo-clone:clone-draft',
-    'doubao:zh_male_yangguangxiaolei_moon_bigtts',
+    'doubao:zh_male_jieshuoxiaoming_moon_bigtts',
   ])
   assert.equal(voices[2].isClone, true)
 })
@@ -51,11 +51,11 @@ test('merges inherited options and emits only provider-relevant task fields', ()
   )
   assert.deepEqual(
     buildVoiceTaskPayload(
-      'doubao:zh_male_yangguangxiaolei_moon_bigtts',
+      'doubao:zh_male_jieshuoxiaoming_moon_bigtts',
       { speed_level: 'very_fast', volume_ratio: 1.8, style_prompt: '忽略' },
     ),
     {
-      voice_type: 'doubao:zh_male_yangguangxiaolei_moon_bigtts',
+      voice_type: 'doubao:zh_male_jieshuoxiaoming_moon_bigtts',
       tts_options: { speed_level: 'very_fast', volume_ratio: 1.8 },
     },
   )

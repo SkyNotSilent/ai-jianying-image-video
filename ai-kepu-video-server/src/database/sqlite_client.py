@@ -181,6 +181,21 @@ class SQLiteClient:
             """)
 
             self._migrate_voice_catalog(cursor)
+            self._apply_migration(
+                cursor,
+                "20260716_replace_ungranted_doubao_voice",
+                """
+                DELETE FROM tts_voices
+                WHERE provider = 'doubao'
+                  AND voice_id = 'zh_male_yangguangxiaolei_moon_bigtts'
+                  AND source = 'builtin';
+                UPDATE tts_voices
+                SET is_enabled = 1,
+                    updated_at = datetime('now','localtime')
+                WHERE provider = 'doubao'
+                  AND voice_id = 'zh_male_jieshuoxiaoming_moon_bigtts';
+                """,
+            )
             self._seed_voice_catalog(cursor)
 
             # 为已有数据库添加 ratio 字段（兼容旧表结构）
@@ -304,7 +319,7 @@ class SQLiteClient:
             SELECT id, 'doubao', voice_id, name, gender, 'zh', description, 'builtin',
                    CASE WHEN voice_id IN (
                        'zh_female_shuangkuaisisi_moon_bigtts',
-                       'zh_male_yangguangxiaolei_moon_bigtts'
+                       'zh_male_jieshuoxiaoming_moon_bigtts'
                    ) THEN 1 ELSE 0 END,
                    sort_order, created_at, updated_at
             FROM tts_voices_legacy_20260716;
