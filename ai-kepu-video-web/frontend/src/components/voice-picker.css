@@ -91,6 +91,8 @@
 
 .voice-preview-button:disabled { cursor: wait; opacity: .5; }
 .voice-status-label { position: absolute; right: 53px; bottom: 3px; color: #9b633d; font-size: 9px; }
+.voice-availability-toggle { position: absolute; left: 12px; bottom: 3px; display: flex; align-items: center; gap: 3px; color: #737d8d; font-size: 9px; }
+.voice-availability-toggle input { width: 11px; height: 11px; margin: 0; accent-color: #5d6ff0; }
 
 .voice-advanced {
   display: grid;

@@ -22,6 +22,8 @@ export function VoicePicker({
   previewError = '',
   showAdvanced = true,
   includeUnavailable = false,
+  allowAvailabilityToggle = false,
+  onAvailabilityChange,
   compact = false,
 }) {
   const normalized = normalizeVoiceCatalog(voices)
@@ -69,6 +71,7 @@ export function VoicePicker({
                 <span>{previewing ? '停止' : '试听'}</span>
               </button>
               {!voice.selectable ? <span className="voice-status-label">{voice.status === 'draft' ? '待试听' : voice.status === 'failed' ? '试听失败' : '未开放'}</span> : null}
+              {allowAvailabilityToggle && voice.kind === 'preset' ? <label className="voice-availability-toggle"><input type="checkbox" checked={voice.is_enabled} onChange={event => onAvailabilityChange?.(voice.id, event.target.checked)} /><span>{voice.is_enabled ? '已开放' : '未开放'}</span></label> : null}
             </article>
           })}
         </div>

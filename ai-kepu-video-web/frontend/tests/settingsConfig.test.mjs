@@ -33,6 +33,11 @@ test('normalizes a partial config without dropping provider fields', () => {
   assert.equal(config.tts.mimo.api_key, 'mimo-key')
   assert.equal(config.tts.mimo.base_url, MIMO_PRESET.base_url)
   assert.equal(config.tts.mimo.default_voice, 'Mia')
+  assert.deepEqual(config.tts.enabled_providers, ['doubao', 'mimo'])
+  assert.equal(config.tts.speed_level, 'normal')
+  assert.equal(config.tts.volume_ratio, 1)
+  assert.equal(config.tts.mimo.speed_level, 'normal')
+  assert.equal(config.tts.mimo.clone_model, 'mimo-v2.5-tts-voiceclone')
   assert.equal(config.generation.tts_concurrency, 8)
   assert.equal(config.generation.image_concurrency, 1)
 })
@@ -74,4 +79,24 @@ test('validates the selected TTS provider and auth method', () => {
 
   const mimo = normalizeConfig({ ...base, tts: { ...base.tts, provider: 'mimo' } })
   assert.equal(validateConfig(mimo), '请输入小米 MiMo API Key')
+})
+
+test('validates every enabled provider while allowing one side to be disabled', () => {
+  const configured = normalizeConfig({
+    llm: { base_url: 'https://llm.test', api_key: 'key', model: 'model' },
+    image: { api_url: 'https://image.test', api_key: 'key', model: 'agnes' },
+    tts: {
+      provider: 'doubao',
+      enabled_providers: ['doubao'],
+      auth_method: 'api_key',
+      api_url: 'https://doubao.test',
+      api_key: 'doubao-key',
+      cluster: 'volcano_tts',
+      default_voice: 'zh_male_yangguangxiaolei_moon_bigtts',
+    },
+  })
+  assert.equal(validateConfig(configured), '')
+
+  const both = normalizeConfig({ ...configured, tts: { ...configured.tts, enabled_providers: ['doubao', 'mimo'] } })
+  assert.equal(validateConfig(both), '请输入小米 MiMo API Key')
 })

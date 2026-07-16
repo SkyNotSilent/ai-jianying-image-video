@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeft,
   CheckCircle2,
@@ -6,17 +6,35 @@ import {
   Cpu,
   Image,
   LoaderCircle,
+  Mic,
   MessageSquareText,
+  Pencil,
   RefreshCw,
   Save,
+  Square,
+  Trash2,
+  Upload,
   Volume2,
 } from 'lucide-react'
 import { useNavigate } from 'react-router'
-import { fetchConfigModels, getConfig, testTtsConfig, updateConfig } from '../api/task'
+import {
+  createVoiceClone,
+  deleteVoiceClone,
+  fetchConfigModels,
+  getConfig,
+  getVoiceClones,
+  getVoices,
+  previewVoice,
+  previewVoiceClone,
+  replaceVoiceCloneReference,
+  testTtsConfig,
+  updateConfig,
+  updateVoiceAvailability,
+  updateVoiceClone,
+} from '../api/task'
+import { VoicePicker } from '../components/VoicePicker'
 import { EmptyState, LoadingState } from '../components/StatusStates'
 import {
-  MIMO_VOICES,
-  applyMimoPreset,
   buildModelPayload,
   normalizeConcurrency,
   normalizeConfig,
@@ -24,6 +42,7 @@ import {
   validateTtsTest,
 } from '../lib/settingsConfig'
 import { toast } from '../lib/toast'
+import { nextPreviewState, normalizeVoiceCatalog } from '../lib/voiceCatalog'
 import { normalizeMediaUrl } from '../utils/mediaUrl'
 import './delivery-pages.css'
 
@@ -45,13 +64,35 @@ export function SettingsPage() {
   const [modelLoading, setModelLoading] = useState({ llm: false, image: false })
   const [modelOptions, setModelOptions] = useState({ llm: [], image: [] })
   const [form, setForm] = useState(() => normalizeConfig())
+  const [providerTab, setProviderTab] = useState('mimo')
+  const [voices, setVoices] = useState([])
+  const [clones, setClones] = useState([])
+  const [previewState, setPreviewState] = useState(() => nextPreviewState())
+  const [cloneName, setCloneName] = useState('')
+  const [cloneConsent, setCloneConsent] = useState(false)
+  const [cloneFile, setCloneFile] = useState(null)
+  const [cloneBusy, setCloneBusy] = useState('')
+  const [recording, setRecording] = useState(false)
+  const audioRef = useRef(null)
+  const previewTokenRef = useRef(0)
+  const recorderRef = useRef(null)
+  const recordingChunksRef = useRef([])
 
   const loadConfig = useCallback(async () => {
     setLoading(true)
     setTtsTestUrl('')
     setLoadError('')
     try {
-      setForm(normalizeConfig(await getConfig()))
+      const [config, catalog, cloneList] = await Promise.all([
+        getConfig(),
+        getVoices({ include_disabled: true }),
+        getVoiceClones({ include_hidden: true }),
+      ])
+      const normalized = normalizeConfig(config)
+      setForm(normalized)
+      setProviderTab(normalized.tts.provider)
+      setVoices(normalizeVoiceCatalog(catalog))
+      setClones(Array.isArray(cloneList) ? cloneList : [])
     } catch (error) {
       console.error('加载 API 配置失败', error)
       setLoadError('API 配置暂不可用，请确认后端服务在线后重试。')
@@ -63,24 +104,234 @@ export function SettingsPage() {
 
   useEffect(() => { loadConfig() }, [loadConfig])
 
+  useEffect(() => () => {
+    audioRef.current?.pause()
+    recorderRef.current?.stream?.getTracks?.().forEach(track => track.stop())
+  }, [])
+
   const readiness = useMemo(() => {
     const llmReady = Boolean(form.llm.base_url && form.llm.api_key && form.llm.model)
     const imageReady = Boolean(form.image.api_url && form.image.api_key && form.image.model)
-    const ttsReady = form.tts.provider === 'mimo'
-      ? Boolean(form.tts.mimo.base_url && form.tts.mimo.api_key && form.tts.mimo.model && form.tts.mimo.default_voice)
-      : form.tts.auth_method === 'api_key'
-        ? Boolean(form.tts.api_url && form.tts.api_key && form.tts.cluster && form.tts.default_voice)
-        : Boolean(form.tts.api_url && form.tts.appid && form.tts.token && form.tts.cluster && form.tts.default_voice)
+    const doubaoEnabled = form.tts.enabled_providers.includes('doubao')
+    const mimoEnabled = form.tts.enabled_providers.includes('mimo')
+    const doubaoReady = !doubaoEnabled || (form.tts.auth_method === 'api_key'
+      ? Boolean(form.tts.api_url && form.tts.api_key && form.tts.cluster && form.tts.default_voice)
+      : Boolean(form.tts.api_url && form.tts.appid && form.tts.token && form.tts.cluster && form.tts.default_voice))
+    const mimoReady = !mimoEnabled || Boolean(form.tts.mimo.base_url && form.tts.mimo.api_key && form.tts.mimo.model && form.tts.mimo.clone_model && form.tts.mimo.default_voice)
     return [
       { label: '生文 API', ready: llmReady, detail: llmReady ? form.llm.model : '配置不完整' },
       { label: 'Agnes 生图', ready: imageReady, detail: imageReady ? form.image.model : '配置不完整' },
-      { label: 'TTS API', ready: ttsReady, detail: ttsReady ? (form.tts.provider === 'mimo' ? 'MiMo' : '豆包') : '配置不完整' },
+      { label: '豆包 TTS', ready: doubaoReady, detail: doubaoEnabled ? (doubaoReady ? '已启用' : '配置不完整') : '未启用' },
+      { label: 'MiMo TTS', ready: mimoReady, detail: mimoEnabled ? (mimoReady ? '已启用' : '配置不完整') : '未启用' },
     ]
   }, [form])
 
   const updateSection = (section, key, value) => setForm(current => ({ ...current, [section]: { ...current[section], [key]: value } }))
   const updateTts = (key, value) => setForm(current => ({ ...current, tts: { ...current.tts, [key]: value } }))
   const updateMimo = (key, value) => setForm(current => ({ ...current, tts: { ...current.tts, mimo: { ...current.tts.mimo, [key]: value } } }))
+
+  const refreshVoiceData = useCallback(async () => {
+    const [catalog, cloneList] = await Promise.all([
+      getVoices({ include_disabled: true }),
+      getVoiceClones({ include_hidden: true }),
+    ])
+    setVoices(normalizeVoiceCatalog(catalog))
+    setClones(Array.isArray(cloneList) ? cloneList : [])
+  }, [])
+
+  const setProviderEnabled = (provider, enabled) => {
+    setForm(current => {
+      const existing = current.tts.enabled_providers || []
+      let next = enabled
+        ? [...new Set([...existing, provider])]
+        : existing.filter(item => item !== provider)
+      if (!next.length) next = [provider === 'mimo' ? 'doubao' : 'mimo']
+      const defaultProvider = next.includes(current.tts.provider) ? current.tts.provider : next[0]
+      return { ...current, tts: { ...current.tts, enabled_providers: next, provider: defaultProvider } }
+    })
+  }
+
+  const handleAvailabilityChange = (voiceId, enabled) => {
+    setVoices(current => current.map(voice => voice.id === voiceId
+      ? { ...voice, is_enabled: enabled, selectable: enabled && voice.status === 'ready' }
+      : voice))
+  }
+
+  const setAllProviderVoices = enabled => {
+    setVoices(current => current.map(voice => (
+      voice.provider === providerTab && voice.kind === 'preset'
+        ? { ...voice, is_enabled: enabled, selectable: enabled && voice.status === 'ready' }
+        : voice
+    )))
+  }
+
+  const defaultVoiceKey = providerTab === 'mimo'
+    ? String(form.tts.mimo.default_voice || '').startsWith('mimo-clone:')
+      ? form.tts.mimo.default_voice
+      : `mimo:${form.tts.mimo.default_voice}`
+    : String(form.tts.default_voice || '').startsWith('doubao:')
+      ? form.tts.default_voice
+      : `doubao:${form.tts.default_voice}`
+
+  const providerVoices = voices.filter(voice => voice.provider === providerTab)
+  const providerOptions = providerTab === 'mimo'
+    ? { speed_level: form.tts.mimo.speed_level, style_prompt: form.tts.mimo.style_prompt }
+    : { speed_level: form.tts.speed_level, volume_ratio: form.tts.volume_ratio }
+
+  const selectDefaultVoice = voiceId => {
+    if (providerTab === 'doubao') {
+      updateTts('default_voice', voiceId.replace(/^doubao:/, ''))
+    } else {
+      updateMimo('default_voice', voiceId.startsWith('mimo-clone:') ? voiceId : voiceId.replace(/^mimo:/, ''))
+    }
+  }
+
+  const updateProviderOptions = options => {
+    if (providerTab === 'doubao') {
+      setForm(current => ({ ...current, tts: { ...current.tts, speed_level: options.speed_level, volume_ratio: options.volume_ratio } }))
+    } else {
+      setForm(current => ({ ...current, tts: { ...current.tts, mimo: { ...current.tts.mimo, speed_level: options.speed_level, style_prompt: options.style_prompt } } }))
+    }
+  }
+
+  const stopPreview = useCallback(() => {
+    audioRef.current?.pause()
+    audioRef.current = null
+    setPreviewState(current => nextPreviewState(current, { type: 'stop' }))
+  }, [])
+
+  const playPreviewUrl = useCallback((voiceId, token, url) => {
+    const audio = new Audio(normalizeMediaUrl(url))
+    audioRef.current = audio
+    audio.onended = stopPreview
+    audio.onerror = () => setPreviewState(current => nextPreviewState(current, { type: 'error', voiceId, token, error: '试听音频播放失败' }))
+    setPreviewState(current => nextPreviewState(current, { type: 'ready', voiceId, token, url }))
+    audio.play().catch(() => setPreviewState(current => nextPreviewState(current, { type: 'error', voiceId, token, error: '浏览器未能开始播放' })))
+  }, [stopPreview])
+
+  const handleVoicePreview = async voice => {
+    if (previewState.playingVoice === voice.id) {
+      stopPreview()
+      return
+    }
+    stopPreview()
+    const token = ++previewTokenRef.current
+    setPreviewState(current => nextPreviewState(current, { type: 'start', voiceId: voice.id, token }))
+    try {
+      const result = await previewVoice({
+        voice_type: voice.id,
+        text: form.tts.preview_text,
+        tts_options: providerOptions,
+        config_override: form.tts,
+      })
+      playPreviewUrl(voice.id, token, result.url)
+    } catch (error) {
+      setPreviewState(current => nextPreviewState(current, { type: 'error', voiceId: voice.id, token, error: error?.response?.data?.detail || '音色试听失败' }))
+    }
+  }
+
+  const createClone = async () => {
+    if (!cloneName.trim()) return toast.warning('请填写克隆音色名称')
+    if (!cloneFile) return toast.warning('请选择或录制参考音频')
+    if (!cloneConsent) return toast.warning('请确认已获得该声音的使用授权')
+    setCloneBusy('create')
+    try {
+      const created = await createVoiceClone({ name: cloneName.trim(), consentConfirmed: true, file: cloneFile })
+      try {
+        await previewVoiceClone(created.clone_id, { text: form.tts.preview_text, tts_options: providerOptions, config_override: form.tts })
+        toast.success('克隆音色已创建并通过试听')
+      } catch (error) {
+        toast.warning('参考音频已保存，但试听失败，可稍后重试')
+      }
+      setCloneName('')
+      setCloneFile(null)
+      setCloneConsent(false)
+      await refreshVoiceData()
+    } catch (error) {
+      toast.error(error?.response?.data?.detail || '创建克隆音色失败')
+    } finally {
+      setCloneBusy('')
+    }
+  }
+
+  const startRecording = async () => {
+    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) return toast.warning('当前浏览器不支持录音')
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const recorder = new MediaRecorder(stream)
+      recordingChunksRef.current = []
+      recorder.ondataavailable = event => { if (event.data?.size) recordingChunksRef.current.push(event.data) }
+      recorder.onstop = () => {
+        const type = recorder.mimeType || 'audio/webm'
+        const blob = new Blob(recordingChunksRef.current, { type })
+        setCloneFile(new File([blob], `recording-${Date.now()}.webm`, { type }))
+        stream.getTracks().forEach(track => track.stop())
+        setRecording(false)
+      }
+      recorderRef.current = recorder
+      recorder.start()
+      setRecording(true)
+    } catch (error) {
+      toast.error('无法访问麦克风，请检查浏览器权限')
+    }
+  }
+
+  const retryClonePreview = async clone => {
+    setCloneBusy(`preview:${clone.clone_id}`)
+    try {
+      const result = await previewVoiceClone(clone.clone_id, { text: form.tts.preview_text, tts_options: providerOptions, config_override: form.tts })
+      await refreshVoiceData()
+      const token = ++previewTokenRef.current
+      const voiceId = `mimo-clone:${clone.clone_id}`
+      setPreviewState(current => nextPreviewState(current, { type: 'start', voiceId, token }))
+      playPreviewUrl(voiceId, token, result.clone.preview_url || result.preview.url)
+    } catch (error) {
+      toast.error(error?.response?.data?.detail || '克隆试听失败')
+      await refreshVoiceData()
+    } finally {
+      setCloneBusy('')
+    }
+  }
+
+  const patchClone = async (cloneId, patch) => {
+    setCloneBusy(`patch:${cloneId}`)
+    try {
+      await updateVoiceClone(cloneId, patch)
+      await refreshVoiceData()
+    } catch (error) {
+      toast.error(error?.response?.data?.detail || '更新克隆音色失败')
+    } finally {
+      setCloneBusy('')
+    }
+  }
+
+  const replaceClone = async (cloneId, file) => {
+    if (!file) return
+    setCloneBusy(`replace:${cloneId}`)
+    try {
+      await replaceVoiceCloneReference(cloneId, file)
+      toast.success('参考音频已替换，请重新生成试听')
+      await refreshVoiceData()
+    } catch (error) {
+      toast.error(error?.response?.data?.detail || '替换参考音频失败')
+    } finally {
+      setCloneBusy('')
+    }
+  }
+
+  const removeClone = async cloneId => {
+    if (!window.confirm('确定删除这个克隆音色吗？已被任务引用的音色会改为隐藏。')) return
+    setCloneBusy(`delete:${cloneId}`)
+    try {
+      await deleteVoiceClone(cloneId)
+      await refreshVoiceData()
+      toast.success('克隆音色已处理')
+    } catch (error) {
+      toast.error(error?.response?.data?.detail || '删除克隆音色失败')
+    } finally {
+      setCloneBusy('')
+    }
+  }
 
   const loadModels = async type => {
     const payload = buildModelPayload(type, form)
@@ -122,6 +373,10 @@ export function SettingsPage() {
     setSaving(true)
     try {
       const saved = await updateConfig(normalized)
+      const enabledVoiceKeys = voices
+        .filter(voice => voice.kind === 'preset' && voice.is_enabled)
+        .map(voice => voice.id)
+      await updateVoiceAvailability(enabledVoiceKeys)
       setForm(normalizeConfig(saved || normalized))
       toast.success('配置已保存')
     } catch (error) {
@@ -134,7 +389,7 @@ export function SettingsPage() {
 
   const testTts = async () => {
     setTtsTestUrl('')
-    const issue = validateTtsTest(form)
+    const issue = validateTtsTest({ ...form, tts: { ...form.tts, provider: providerTab } })
     if (issue) {
       toast.warning(issue)
       return
@@ -142,8 +397,8 @@ export function SettingsPage() {
     setTestingTts(true)
     try {
       const result = await testTtsConfig({
-        tts: form.tts,
-        voice_type: form.tts.provider === 'mimo' ? form.tts.mimo.default_voice : form.tts.default_voice,
+        tts: { ...form.tts, provider: providerTab },
+        voice_type: defaultVoiceKey,
         text: 'InsightCut 配音配置测试成功。',
       })
       setTtsTestUrl(result?.url || '')
@@ -190,9 +445,30 @@ export function SettingsPage() {
             <Field label="图片尺寸"><select value={form.image.size} onChange={event => updateSection('image', 'size', event.target.value)}>{IMAGE_SIZES.map(size => <option value={size} key={size}>{size === 'auto' ? '自动匹配画幅' : size}</option>)}</select></Field>
           </ConfigSection>
 
-          <ConfigSection id="settings-tts" icon={Volume2} title="配音模型" badge={form.tts.provider === 'mimo' ? 'MiMo TTS' : 'Doubao TTS'} description="任务创建和重配音统一使用所选 provider 的音色 ID。">
-            <Field label="Provider" wide group><Segmented value={form.tts.provider} onChange={value => value === 'mimo' ? setForm(current => applyMimoPreset(current)) : updateTts('provider', 'doubao')} options={[['doubao', '豆包 TTS'], ['mimo', '小米 MiMo TTS']]} /></Field>
-            {form.tts.provider === 'doubao' ? <DoubaoFields form={form} updateTts={updateTts} /> : <MimoFields form={form} updateMimo={updateMimo} />}
+          <ConfigSection id="settings-tts" icon={Volume2} title="配音模型" badge="2 Providers" description="豆包与 MiMo 可同时启用；任务保存音色和参数快照。">
+            <div className="settings-provider-switches"><label><input type="checkbox" checked={form.tts.enabled_providers.includes('doubao')} onChange={event => setProviderEnabled('doubao', event.target.checked)} /><span><strong>豆包 TTS</strong><small>预置 10 个本地音色</small></span></label><label><input type="checkbox" checked={form.tts.enabled_providers.includes('mimo')} onChange={event => setProviderEnabled('mimo', event.target.checked)} /><span><strong>小米 MiMo</strong><small>9 个预置 + 本地声音克隆</small></span></label></div>
+            <Field label="新任务默认 Provider" wide group><Segmented value={form.tts.provider} onChange={value => form.tts.enabled_providers.includes(value) ? updateTts('provider', value) : toast.warning('请先启用该 Provider')} options={[['doubao', '豆包 TTS'], ['mimo', '小米 MiMo TTS']]} /></Field>
+            <Field label="当前编辑" wide group><Segmented value={providerTab} onChange={setProviderTab} options={[['doubao', '豆包配置'], ['mimo', 'MiMo 配置']]} /></Field>
+            {providerTab === 'doubao' ? <DoubaoFields form={form} updateTts={updateTts} /> : <MimoFields form={form} updateMimo={updateMimo} />}
+            <Field label="通用试听文本" wide><input value={form.tts.preview_text} maxLength="80" onChange={event => updateTts('preview_text', event.target.value)} placeholder="这是当前音色的试听。" /></Field>
+            <div className="settings-voice-library">
+              <header><div><strong>{providerTab === 'mimo' ? 'MiMo' : '豆包'} 音色库</strong><small>勾选后才会在生产页和预览页出现。</small></div><span><button type="button" onClick={() => setAllProviderVoices(true)}>全选</button><button type="button" onClick={() => setAllProviderVoices(false)}>清空</button></span></header>
+              <VoicePicker voices={providerVoices} value={defaultVoiceKey} ttsOptions={providerOptions} onChange={selectDefaultVoice} onOptionsChange={updateProviderOptions} onPreview={handleVoicePreview} playingVoice={previewState.playingVoice} previewLoading={previewState.loading} previewError={previewState.error} includeUnavailable allowAvailabilityToggle onAvailabilityChange={handleAvailabilityChange} />
+            </div>
+            {providerTab === 'mimo' ? <div className="settings-clone-library">
+              <header><div><strong>MiMo 声音克隆</strong><small>参考音频只保存在本地，试听成功后才能启用。</small></div></header>
+              <div className="clone-create-panel">
+                <label><span>音色名称</span><input value={cloneName} maxLength="80" onChange={event => setCloneName(event.target.value)} placeholder="例如：我的旁白声音" /></label>
+                <label className="clone-file-control"><span>参考音频</span><input type="file" accept="audio/wav,audio/mpeg,audio/webm,.wav,.mp3,.webm" onChange={event => setCloneFile(event.target.files?.[0] || null)} /><small>{cloneFile ? cloneFile.name : '支持 MP3 / WAV，也可直接录音'}</small></label>
+                <button className="button button-secondary" type="button" onClick={recording ? () => recorderRef.current?.stop() : startRecording}>{recording ? <Square size={15} /> : <Mic size={15} />}{recording ? '停止录音' : '浏览器录音'}</button>
+                <label className="clone-consent"><input type="checkbox" checked={cloneConsent} onChange={event => setCloneConsent(event.target.checked)} /><span>我已获得该声音的使用授权</span></label>
+                <button className="button button-primary" type="button" disabled={cloneBusy === 'create'} onClick={createClone}>{cloneBusy === 'create' ? <LoaderCircle className="spin" size={15} /> : <Upload size={15} />}创建并生成试听</button>
+              </div>
+              <div className="clone-record-list">
+                {clones.filter(clone => clone.status !== 'hidden').map(clone => <article key={clone.clone_id}><div><strong>{clone.name}</strong><small>{clone.status === 'ready' ? '已就绪' : clone.status === 'failed' ? `试听失败·${clone.error_message || '可重试'}` : '待生成试听'}{clone.duration ? ` · ${Number(clone.duration).toFixed(1)}s` : ''}</small></div><span className="clone-record-actions"><button type="button" disabled={cloneBusy === `preview:${clone.clone_id}`} onClick={() => retryClonePreview(clone)}><Volume2 size={14} />试听</button><button type="button" disabled={clone.status !== 'ready'} onClick={() => patchClone(clone.clone_id, { is_enabled: !clone.is_enabled })}>{clone.is_enabled ? '停用' : '启用'}</button><button type="button" onClick={() => { const name = window.prompt('修改音色名称', clone.name); if (name?.trim()) patchClone(clone.clone_id, { name: name.trim() }) }}><Pencil size={14} />重命名</button><label><RefreshCw size={14} />替换<input type="file" accept="audio/wav,audio/mpeg,audio/webm,.wav,.mp3,.webm" onChange={event => replaceClone(clone.clone_id, event.target.files?.[0])} /></label><button type="button" onClick={() => removeClone(clone.clone_id)}><Trash2 size={14} />删除</button></span></article>)}
+                {!clones.filter(clone => clone.status !== 'hidden').length ? <p>还没有克隆音色。上传或录制一段参考音频即可创建。</p> : null}
+              </div>
+            </div> : null}
             <div className="settings-test-row">
               <button className="button button-secondary" type="button" disabled={testingTts} onClick={testTts}>{testingTts ? <LoaderCircle className="spin" size={16} aria-hidden="true" /> : <Volume2 size={16} aria-hidden="true" />}{testingTts ? '测试中...' : '测试配音配置'}</button>
               {ttsTestUrl ? <audio src={normalizeMediaUrl(ttsTestUrl)} controls aria-label="TTS 配置测试音频" /> : <span>测试成功后可在此试听返回音频。</span>}
@@ -234,7 +510,6 @@ function DoubaoFields({ form, updateTts }) {
     <Field label="API URL"><input value={form.tts.api_url} onChange={event => updateTts('api_url', event.target.value)} placeholder="https://openspeech.bytedance.com/api/v1/tts" /></Field>
     {form.tts.auth_method === 'access_token' ? <><Field label="App ID"><input value={form.tts.appid} onChange={event => updateTts('appid', event.target.value)} placeholder="豆包 TTS App ID" /></Field><Field label="Access Token"><input type="password" autoComplete="off" value={form.tts.token} onChange={event => updateTts('token', event.target.value)} placeholder="豆包 Access Token" /></Field></> : <Field label="API Key"><input type="password" autoComplete="off" value={form.tts.api_key} onChange={event => updateTts('api_key', event.target.value)} placeholder="火山控制台 API Key" /></Field>}
     <Field label="Cluster" help="旧版在线合成通常为 volcano_tts。"><input value={form.tts.cluster} onChange={event => updateTts('cluster', event.target.value)} placeholder="volcano_tts" /></Field>
-    <Field label="默认音色 ID"><input value={form.tts.default_voice} onChange={event => updateTts('default_voice', event.target.value)} placeholder="zh_male_jieshuoxiaoming_moon_bigtts" /></Field>
   </>
 }
 
@@ -243,8 +518,7 @@ function MimoFields({ form, updateMimo }) {
     <Field label="Base URL"><input value={form.tts.mimo.base_url} onChange={event => updateMimo('base_url', event.target.value)} placeholder="https://token-plan-sgp.xiaomimimo.com/v1" /></Field>
     <Field label="API Key"><input type="password" autoComplete="off" value={form.tts.mimo.api_key} onChange={event => updateMimo('api_key', event.target.value)} placeholder="小米 Token Plan API Key" /></Field>
     <Field label="Model"><input value={form.tts.mimo.model} onChange={event => updateMimo('model', event.target.value)} placeholder="mimo-v2.5-tts" /></Field>
-    <Field label="默认音色"><select value={form.tts.mimo.default_voice} onChange={event => updateMimo('default_voice', event.target.value)}>{MIMO_VOICES.map(voice => <option value={voice.id} key={voice.id}>{voice.name}</option>)}</select></Field>
+    <Field label="克隆 Model"><input value={form.tts.mimo.clone_model} onChange={event => updateMimo('clone_model', event.target.value)} placeholder="mimo-v2.5-tts-voiceclone" /></Field>
     <Field label="音频格式" help="音频从 chat/completions 返回的 message.audio.data 读取。"><input value={form.tts.mimo.format} onChange={event => updateMimo('format', event.target.value)} placeholder="wav" /></Field>
-    <Field label="风格指令"><input value={form.tts.mimo.style_prompt} onChange={event => updateMimo('style_prompt', event.target.value)} placeholder="自然清晰，适合中文短视频旁白。" /></Field>
   </>
 }
