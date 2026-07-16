@@ -36,7 +36,7 @@ class SQLiteClient:
     SEGMENT_CHECKPOINT_COLUMNS = frozenset({
         "text", "image_prompt", "image_path", "image_url", "image_status",
         "image_error", "audio_path", "audio_url", "audio_status", "audio_error",
-        "duration",
+        "duration", "audio_voice_type", "audio_tts_options_json",
     })
     CLEARABLE_SEGMENT_ERROR_COLUMNS = frozenset({"image_error", "audio_error"})
 
@@ -410,7 +410,17 @@ class SQLiteClient:
     def _rows_to_dicts(self, rows):
         return [dict(r) for r in rows]
 
-    def create_task(self, task_id: str, theme: str, style: str, length: int, name: str = None, ratio: str = "16:9", voice_type: str = None) -> bool:
+    def create_task(
+        self,
+        task_id: str,
+        theme: str,
+        style: str,
+        length: int,
+        name: str = None,
+        ratio: str = "16:9",
+        voice_type: str = None,
+        tts_options: Dict = None,
+    ) -> bool:
         if not self._initialized:
             self._init_db()
         if not self._initialized:
@@ -419,8 +429,16 @@ class SQLiteClient:
             conn = self._get_conn()
             cur = conn.cursor()
             cur.execute(
-                "INSERT INTO tasks (task_id, name, theme, style, length, ratio, voice_type, status, current_step) VALUES (?,?,?,?,?,?,?,?,?)",
-                (task_id, name or theme[:20], theme, style, length, ratio, voice_type, 'pending', 'pending')
+                """INSERT INTO tasks
+                   (task_id, name, theme, style, length, ratio, voice_type,
+                    tts_options_json, status, current_step)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    task_id, name or theme[:20], theme, style, length, ratio,
+                    voice_type,
+                    json.dumps(tts_options, ensure_ascii=False) if tts_options else None,
+                    'pending', 'pending',
+                )
             )
             steps = [
                 "text_generation",
@@ -945,8 +963,12 @@ class SQLiteClient:
             cur = conn.cursor()
             for seg in segments:
                 cur.execute(
-                    """INSERT INTO task_segments (task_id, segment_index, text, image_prompt, image_path, image_url, image_status, image_error, audio_path, audio_url, audio_status, audio_error, duration)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """INSERT INTO task_segments
+                       (task_id, segment_index, text, image_prompt, image_path,
+                        image_url, image_status, image_error, audio_path, audio_url,
+                        audio_status, audio_error, duration, audio_voice_type,
+                        audio_tts_options_json)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(task_id, segment_index) DO UPDATE SET
                        text=excluded.text, image_prompt=excluded.image_prompt,
                        image_path=COALESCE(excluded.image_path, task_segments.image_path),
@@ -957,6 +979,8 @@ class SQLiteClient:
                        audio_url=COALESCE(excluded.audio_url, task_segments.audio_url),
                        audio_status=COALESCE(excluded.audio_status, task_segments.audio_status),
                        audio_error=COALESCE(excluded.audio_error, task_segments.audio_error),
+                       audio_voice_type=COALESCE(excluded.audio_voice_type, task_segments.audio_voice_type),
+                       audio_tts_options_json=COALESCE(excluded.audio_tts_options_json, task_segments.audio_tts_options_json),
                        duration=COALESCE(excluded.duration, task_segments.duration),
                        updated_at=datetime('now','localtime')""",
                     (task_id, seg['segment_index'], seg['text'],
@@ -965,7 +989,8 @@ class SQLiteClient:
                      seg.get('image_status'), seg.get('image_error'),
                      seg.get('audio_path'), seg.get('audio_url'),
                      seg.get('audio_status'), seg.get('audio_error'),
-                     seg.get('duration'))
+                     seg.get('duration'), seg.get('audio_voice_type'),
+                     seg.get('audio_tts_options_json'))
                 )
             conn.commit()
             conn.close()

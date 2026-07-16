@@ -69,7 +69,10 @@ class Config:
     DOUBAO_TTS_TOKEN: str = _env("DOUBAO_TTS_TOKEN", "")
     DOUBAO_TTS_API_KEY: str = _env("DOUBAO_TTS_API_KEY", "")
     DOUBAO_TTS_CLUSTER: str = _env("DOUBAO_TTS_CLUSTER", "volcano_tts")
-    DOUBAO_TTS_DEFAULT_VOICE: str = _env("DOUBAO_TTS_DEFAULT_VOICE", "zh_male_jieshuoxiaoming_moon_bigtts")
+    DOUBAO_TTS_DEFAULT_VOICE: str = _env(
+        "DOUBAO_TTS_DEFAULT_VOICE",
+        "zh_male_yangguangxiaolei_moon_bigtts",
+    )
 
     # 小米 MiMo TTS 配置。MiMo TTS 走 /v1/chat/completions，不走 /v1/audio/speech。
     TTS_PROVIDER: str = _env("TTS_PROVIDER", "doubao")
