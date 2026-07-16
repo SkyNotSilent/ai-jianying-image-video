@@ -1,9 +1,11 @@
 export const MIMO_PRESET = {
   base_url: 'https://token-plan-sgp.xiaomimimo.com/v1',
   model: 'mimo-v2.5-tts',
+  clone_model: 'mimo-v2.5-tts-voiceclone',
   default_voice: '冰糖',
   format: 'wav',
   style_prompt: '自然清晰，适合中文短视频旁白。',
+  speed_level: 'normal',
 }
 
 export const MIMO_VOICES = [
@@ -32,8 +34,24 @@ export function normalizeMimoConfig(config = {}) {
   }
 }
 
+function normalizeEnabledProviders(value) {
+  if (!Array.isArray(value)) return ['doubao', 'mimo']
+  const providers = value.filter((provider, index) => (
+    ['doubao', 'mimo'].includes(provider) && value.indexOf(provider) === index
+  ))
+  return providers.length ? providers : ['doubao', 'mimo']
+}
+
+function normalizeSpeedLevel(value) {
+  return ['very_slow', 'slow', 'normal', 'fast', 'very_fast'].includes(value) ? value : 'normal'
+}
+
 export function normalizeConfig(config = {}) {
   const source = config || {}
+  const enabledProviders = normalizeEnabledProviders(source.tts?.enabled_providers)
+  const requestedProvider = source.tts?.provider === 'mimo' ? 'mimo' : 'doubao'
+  const provider = enabledProviders.includes(requestedProvider) ? requestedProvider : enabledProviders[0]
+  const parsedVolume = Number(source.tts?.volume_ratio)
   return {
     ...source,
     llm: {
@@ -52,15 +70,22 @@ export function normalizeConfig(config = {}) {
     },
     tts: {
       ...(source.tts || {}),
-      provider: source.tts?.provider === 'mimo' ? 'mimo' : 'doubao',
+      provider,
+      enabled_providers: enabledProviders,
+      preview_text: source.tts?.preview_text || '你好，这是当前音色的试听，欢迎使用 InsightCut。',
       auth_method: source.tts?.auth_method === 'api_key' ? 'api_key' : 'access_token',
       api_url: source.tts?.api_url || '',
       appid: source.tts?.appid || '',
       token: source.tts?.token || '',
       api_key: source.tts?.api_key || '',
       cluster: source.tts?.cluster || 'volcano_tts',
-      default_voice: source.tts?.default_voice || '',
-      mimo: normalizeMimoConfig(source.tts?.mimo),
+      default_voice: source.tts?.default_voice || 'zh_male_jieshuoxiaoming_moon_bigtts',
+      speed_level: normalizeSpeedLevel(source.tts?.speed_level),
+      volume_ratio: Number.isFinite(parsedVolume) ? Math.min(2, Math.max(.5, parsedVolume)) : 1,
+      mimo: {
+        ...normalizeMimoConfig(source.tts?.mimo),
+        speed_level: normalizeSpeedLevel(source.tts?.mimo?.speed_level),
+      },
     },
     generation: {
       ...(source.generation || {}),
@@ -93,24 +118,36 @@ export function validateConfig(config) {
   if (!config.image.api_key.trim()) return '请输入生图 API Key'
   if (!config.image.model.trim()) return '请输入生图模型'
 
-  if (config.tts.provider === 'mimo') {
+  const validateMimo = () => {
     if (!config.tts.mimo.base_url.trim()) return '请输入小米 MiMo Base URL'
     if (!config.tts.mimo.api_key.trim()) return '请输入小米 MiMo API Key'
     if (!config.tts.mimo.model.trim()) return '请输入小米 MiMo TTS 模型'
+    if (!config.tts.mimo.clone_model.trim()) return '请输入小米 MiMo 声音克隆模型'
     if (!config.tts.mimo.default_voice.trim()) return '请选择小米默认音色'
     if (!config.tts.mimo.format.trim()) return '请输入小米音频格式'
     return ''
   }
 
-  if (!config.tts.api_url.trim()) return '请输入 TTS API URL'
-  if (config.tts.auth_method === 'api_key') {
-    if (!config.tts.api_key.trim()) return '请输入豆包 API Key'
-  } else {
-    if (!config.tts.appid.trim()) return '请输入 TTS App ID'
-    if (!config.tts.token.trim()) return '请输入豆包 Access Token'
+  const validateDoubao = () => {
+    if (!config.tts.api_url.trim()) return '请输入 TTS API URL'
+    if (config.tts.auth_method === 'api_key') {
+      if (!config.tts.api_key.trim()) return '请输入豆包 API Key'
+    } else {
+      if (!config.tts.appid.trim()) return '请输入 TTS App ID'
+      if (!config.tts.token.trim()) return '请输入豆包 Access Token'
+    }
+    if (!config.tts.cluster.trim()) return '请输入 TTS Cluster'
+    if (!config.tts.default_voice.trim()) return '请输入默认音色'
+    return ''
   }
-  if (!config.tts.cluster.trim()) return '请输入 TTS Cluster'
-  if (!config.tts.default_voice.trim()) return '请输入默认音色'
+
+  const enabled = normalizeEnabledProviders(config.tts.enabled_providers)
+  const validationOrder = [config.tts.provider, ...enabled.filter(provider => provider !== config.tts.provider)]
+  for (const provider of validationOrder) {
+    if (!enabled.includes(provider)) continue
+    const issue = provider === 'mimo' ? validateMimo() : validateDoubao()
+    if (issue) return issue
+  }
   return ''
 }
 

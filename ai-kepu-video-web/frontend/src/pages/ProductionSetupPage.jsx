@@ -1,8 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { CheckCircle2, Edit3, Image, Settings2, ShieldCheck, TriangleAlert } from 'lucide-react'
 import { useNavigate, useParams } from 'react-router'
-import { createTask, getConfig, getVoices } from '../api/task'
+import { createTask, getConfig, getVoices, previewVoice } from '../api/task'
+import { VoicePicker } from '../components/VoicePicker'
 import { toast } from '../lib/toast'
+import { buildVoiceTaskPayload, mergeTtsOptions, nextPreviewState, normalizeVoiceCatalog } from '../lib/voiceCatalog'
+import { normalizeMediaUrl } from '../utils/mediaUrl'
 import { estimateDuration, estimateSegments, getDraft, manuscriptText, ratioOptions, saveDraft, textStyles, updateDraft, visualStyles } from '../utils/projectDrafts'
 import './creation-flow.css'
 
@@ -12,12 +15,17 @@ function normalizedThemeLength(value) {
   return Math.max(50, Math.min(2000, Math.round(number / 50) * 50))
 }
 
-function apiReadiness(config) {
+function apiReadiness(config, voiceType = '') {
   const missing = []
   if (!config?.llm?.base_url || !config?.llm?.model || !config?.llm?.api_key) missing.push('生文 API')
   if (!config?.image?.api_url || !config?.image?.model || !config?.image?.api_key) missing.push('生图 API')
   const tts = config?.tts || {}
-  if (tts.provider === 'mimo') {
+  const provider = voiceType.startsWith('doubao:') ? 'doubao' : voiceType.startsWith('mimo') ? 'mimo' : tts.provider
+  if (Array.isArray(tts.enabled_providers) && !tts.enabled_providers.includes(provider)) {
+    missing.push(provider === 'mimo' ? '小米 MiMo TTS 未启用' : '豆包 TTS 未启用')
+    return missing
+  }
+  if (provider === 'mimo') {
     if (!tts.mimo?.base_url || !tts.mimo?.model || !tts.mimo?.api_key || !tts.mimo?.default_voice) missing.push('小米 MiMo TTS')
   } else if (tts.auth_method === 'api_key') {
     if (!tts.api_url || !tts.api_key || !tts.cluster || !tts.default_voice) missing.push('豆包 TTS')
@@ -27,6 +35,21 @@ function apiReadiness(config) {
   return missing
 }
 
+function defaultVoiceKey(config) {
+  if (config?.tts?.provider === 'mimo') {
+    const voice = config.tts.mimo?.default_voice || '冰糖'
+    return voice.startsWith('mimo-clone:') ? voice : `mimo:${voice}`
+  }
+  return `doubao:${config?.tts?.default_voice || 'zh_male_jieshuoxiaoming_moon_bigtts'}`
+}
+
+function providerOptions(config, voiceType) {
+  if (String(voiceType).startsWith('doubao:')) {
+    return { speed_level: config?.tts?.speed_level || 'normal', volume_ratio: config?.tts?.volume_ratio ?? 1 }
+  }
+  return { speed_level: config?.tts?.mimo?.speed_level || 'normal', style_prompt: config?.tts?.mimo?.style_prompt || '' }
+}
+
 export function ProductionSetupPage() {
   const { draftId } = useParams()
   const navigate = useNavigate()
@@ -34,13 +57,22 @@ export function ProductionSetupPage() {
   const [voices, setVoices] = useState([])
   const [config, setConfig] = useState(null)
   const [submitting, setSubmitting] = useState(false)
+  const [previewState, setPreviewState] = useState(() => nextPreviewState())
+  const audioRef = useRef(null)
+  const previewTokenRef = useRef(0)
   const manuscript = manuscriptText(draft)
   const isTheme = draft?.input_mode === 'theme'
   const targetLength = normalizedThemeLength(draft?.length) || 300
   const contentLength = manuscript.replace(/\s+/g, '').length
   const duration = estimateDuration(manuscript, draft?.voice_speed)
   const segments = estimateSegments(manuscript)
-  const missingApiItems = apiReadiness(config)
+  const selectedVoiceType = draft?.voice_type || defaultVoiceKey(config)
+  const selectedTtsOptions = mergeTtsOptions(
+    providerOptions(config, selectedVoiceType),
+    draft?.tts_options || {},
+    selectedVoiceType.startsWith('doubao:') ? 'doubao' : 'mimo',
+  )
+  const missingApiItems = apiReadiness(config, selectedVoiceType)
   const apiReady = Boolean(config) && missingApiItems.length === 0
 
   useEffect(() => {
@@ -52,9 +84,17 @@ export function ProductionSetupPage() {
     }
     setDraft(loaded)
     Promise.all([getVoices(), getConfig()])
-      .then(([voiceList, runtimeConfig]) => { setVoices(Array.isArray(voiceList) ? voiceList : []); setConfig(runtimeConfig) })
+      .then(([voiceList, runtimeConfig]) => { setVoices(normalizeVoiceCatalog(voiceList)); setConfig(runtimeConfig) })
       .catch(() => toast.warning('未能读取完整配置，请确认后端服务在线'))
   }, [draftId, navigate])
+
+  const stopVoicePreview = useCallback(() => {
+    audioRef.current?.pause()
+    audioRef.current = null
+    setPreviewState(current => nextPreviewState(current, { type: 'stop' }))
+  }, [])
+
+  useEffect(() => () => stopVoicePreview(), [stopVoicePreview])
 
   const plan = useMemo(() => {
     if (isTheme) return [
@@ -73,9 +113,31 @@ export function ProductionSetupPage() {
     setDraft(next)
   }
 
-  const chooseVoice = value => {
-    const voice = voices.find(item => item.id === value)
-    updateLocalDraft({ voice_type: value, voice_name: voice?.name || '' })
+  const chooseVoice = (value, selectedVoice) => {
+    const nextOptions = mergeTtsOptions(
+      providerOptions(config, value),
+      draft.tts_options || {},
+      value.startsWith('doubao:') ? 'doubao' : 'mimo',
+    )
+    updateLocalDraft({ voice_type: value, voice_name: selectedVoice?.name || '', tts_options: nextOptions })
+  }
+
+  const previewSelectedVoice = async voice => {
+    if (previewState.playingVoice === voice.id) return stopVoicePreview()
+    stopVoicePreview()
+    const token = ++previewTokenRef.current
+    setPreviewState(current => nextPreviewState(current, { type: 'start', voiceId: voice.id, token }))
+    try {
+      const result = await previewVoice({ voice_type: voice.id, tts_options: selectedTtsOptions, text: config?.tts?.preview_text })
+      const audio = new Audio(normalizeMediaUrl(result.url))
+      audioRef.current = audio
+      audio.onended = stopVoicePreview
+      audio.onerror = () => setPreviewState(current => nextPreviewState(current, { type: 'error', voiceId: voice.id, token, error: '试听播放失败' }))
+      setPreviewState(current => nextPreviewState(current, { type: 'ready', voiceId: voice.id, token, url: result.url }))
+      await audio.play()
+    } catch (error) {
+      setPreviewState(current => nextPreviewState(current, { type: 'error', voiceId: voice.id, token, error: error?.response?.data?.detail || '音色试听失败' }))
+    }
   }
 
   const startProduction = async () => {
@@ -95,6 +157,7 @@ export function ProductionSetupPage() {
     setSubmitting(true)
     try {
       const inputMode = prepared.input_mode === 'theme' ? 'theme' : 'script'
+      const voicePayload = buildVoiceTaskPayload(selectedVoiceType, selectedTtsOptions)
       const result = await createTask({
         name: prepared.name,
         theme: manuscript.slice(0, 5000),
@@ -102,7 +165,7 @@ export function ProductionSetupPage() {
         style: `${prepared.text_style || '知识科普'}|${prepared.visual_style || '吉卜力'}`,
         ratio: prepared.ratio || '16:9',
         length: inputMode === 'theme' ? normalizedThemeLength(prepared.length) : 0,
-        voice_type: prepared.voice_type || null,
+        ...voicePayload,
       })
       updateDraft(prepared.draft_id, { created_task_id: result.task_id })
       toast.success('生产任务已提交')
@@ -146,7 +209,7 @@ export function ProductionSetupPage() {
           <section className="model-summary"><Image size={20} /><div><strong>{config?.image?.model || '图像服务待配置'}</strong><span>{config?.llm?.model || config?.text?.model || '生文服务'} / {draft.voice_name || config?.tts?.provider || '自动匹配'}，提交后由 FastAPI 编排</span></div><button type="button" className="button button-secondary" onClick={() => navigate('/settings')} title="前往 API 配置"><Settings2 size={16} /></button></section>
           <fieldset className="control-group"><legend>画面风格</legend><div className="production-style-grid">{visualStyles.map(style => <button type="button" key={style.value} className={draft.visual_style === style.value ? 'is-selected' : ''} onClick={() => updateLocalDraft({ visual_style: style.value })}><img src={style.image} alt="" /><span>{style.label}</span></button>)}</div></fieldset>
           <div className="production-field-grid"><fieldset className="control-group"><legend>视频比例</legend><div className="segmented-control">{ratioOptions.map(ratio => <button type="button" key={ratio} className={draft.ratio === ratio ? 'is-selected' : ''} onClick={() => updateLocalDraft({ ratio })}>{ratio}</button>)}</div></fieldset><label className="field-label">创作风格<select value={draft.text_style || '知识科普'} onChange={event => updateLocalDraft({ text_style: event.target.value })}>{textStyles.map(style => <option key={style}>{style}</option>)}</select></label></div>
-          <label className="field-label">配音音色<select value={draft.voice_type || ''} onChange={event => chooseVoice(event.target.value)}><option value="">自动匹配</option>{voices.map(voice => <option value={voice.id} key={voice.id}>{voice.name}</option>)}</select></label>
+          <section className="production-voice-panel"><header><strong>配音音色</strong><small>可试听并按当前任务调整语速、音量或风格。</small></header><VoicePicker voices={voices} value={selectedVoiceType} ttsOptions={selectedTtsOptions} onChange={chooseVoice} onOptionsChange={options => updateLocalDraft({ tts_options: options })} onPreview={previewSelectedVoice} playingVoice={previewState.playingVoice} previewLoading={previewState.loading} previewError={previewState.error} /></section>
         </section>
 
         <aside className="work-panel readiness-panel"><PanelHeading eyebrow="生产就绪检查" title="生产检查" /><div className="readiness-list">{checks.map(item => <div className={`readiness-item ${item.ready ? 'is-ready' : 'is-warning'}`} key={item.label}>{item.ready ? <CheckCircle2 size={18} /> : <TriangleAlert size={18} />}<div><strong>{item.label}</strong><span>{item.description}</span></div></div>)}</div><section className="runtime-facts"><span>运行配置</span><strong>{apiReady ? '服务已就绪' : '需要完成 API 配置'}</strong><p>实际可用性由当前本地配置与任务状态决定。提交后会依次执行主题扩写、分镜、画面提示词与图片、TTS 和剪映草稿构建。</p></section></aside>

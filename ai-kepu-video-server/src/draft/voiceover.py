@@ -12,34 +12,37 @@ from pathlib import Path
 import requests
 
 from src.config import Config
+from src.draft.voice_catalog import (
+    MIMO_PRESET_VOICES,
+    normalize_tts_options,
+    parse_voice_key,
+)
 
 logger = logging.getLogger(__name__)
 
 
 MIMO_TTS_VOICES = [
     {
-        "id": "mimo_default",
-        "name": "MiMo 默认",
-        "gender": "auto",
-        "language": "auto",
+        "id": voice["voice_id"],
+        "name": voice["name"],
+        "gender": voice["gender"],
+        "language": voice["language"],
         "provider": "mimo",
-        "description": "小米 MiMo 默认音色，自动匹配语言和表达。",
-    },
-    {"id": "冰糖", "name": "冰糖", "gender": "female", "language": "zh", "provider": "mimo", "description": "中文女声，清亮自然。"},
-    {"id": "茉莉", "name": "茉莉", "gender": "female", "language": "zh", "provider": "mimo", "description": "中文女声，柔和克制。"},
-    {"id": "苏打", "name": "苏打", "gender": "male", "language": "zh", "provider": "mimo", "description": "中文男声，干净年轻。"},
-    {"id": "白桦", "name": "白桦", "gender": "male", "language": "zh", "provider": "mimo", "description": "中文男声，稳定沉着。"},
-    {"id": "Mia", "name": "Mia", "gender": "female", "language": "en", "provider": "mimo", "description": "English female voice."},
-    {"id": "Chloe", "name": "Chloe", "gender": "female", "language": "en", "provider": "mimo", "description": "English female voice."},
-    {"id": "Milo", "name": "Milo", "gender": "male", "language": "en", "provider": "mimo", "description": "English male voice."},
-    {"id": "Dean", "name": "Dean", "gender": "male", "language": "en", "provider": "mimo", "description": "English male voice."},
+        "description": voice["description"],
+    }
+    for voice in MIMO_PRESET_VOICES
 ]
 
 
 class VoiceOverGenerator:
     """配音生成器 - 按配置分发到豆包或小米 MiMo TTS"""
 
-    def __init__(self, output_dir: str = "output/voiceovers", tts_config: dict = None):
+    def __init__(
+        self,
+        output_dir: str = "output/voiceovers",
+        tts_config: dict = None,
+        clone_store=None,
+    ):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.tts_config = tts_config or Config.tts_config()
@@ -52,14 +55,25 @@ class VoiceOverGenerator:
         self.cluster = self.tts_config.get("cluster") or Config.DOUBAO_TTS_CLUSTER
         self.default_voice = self.tts_config.get("default_voice") or Config.DOUBAO_TTS_DEFAULT_VOICE
         self.mimo_config = self.tts_config.get("mimo") or {}
+        self.clone_store = clone_store
+
+    def _clone_store(self):
+        if self.clone_store is None:
+            from src.database import db_client
+            from src.draft.voice_clone import VoiceCloneStore
+
+            self.clone_store = VoiceCloneStore(Config.BASE_DIR, db_client)
+        return self.clone_store
 
     def generate(
         self,
         text: str,
         filename: str = None,
         voice_type: str = None,
-        speed_ratio: float = 1.25,
-        volume_ratio: float = 1.0,
+        speed_ratio: float = None,
+        volume_ratio: float = None,
+        speed_level: str = None,
+        style_prompt: str = None,
     ) -> str:
         """
         生成配音，返回 wav 文件路径。
@@ -68,12 +82,48 @@ class VoiceOverGenerator:
             text: 文本内容
             filename: 输出文件名（不含扩展名）
             voice_type: 声音类型
-            speed_ratio: 语速倍率，1.25 为默认（1.25倍速）
-            volume_ratio: 音量倍率，1.0 为正常
+            speed_ratio: 兼容旧调用的豆包数字语速
+            volume_ratio: 豆包音量倍率，0.5-2.0
+            speed_level: 统一五档语速
+            style_prompt: MiMo 风格指令
         """
-        if self.provider == "mimo":
-            return self._generate_mimo(text, filename, voice_type)
-        return self._generate_doubao(text, filename, voice_type, speed_ratio, volume_ratio)
+        if voice_type:
+            raw_voice = voice_type
+        elif self.provider == "mimo":
+            raw_voice = self.mimo_config.get("default_voice") or Config.MIMO_TTS_DEFAULT_VOICE
+        else:
+            raw_voice = self.default_voice
+        selection = parse_voice_key(raw_voice, default_provider=self.provider)
+        incoming_options = {}
+        if speed_level is not None:
+            incoming_options["speed_level"] = speed_level
+        if volume_ratio is not None:
+            incoming_options["volume_ratio"] = volume_ratio
+        if style_prompt is not None:
+            incoming_options["style_prompt"] = style_prompt
+        provider_config = self.tts_config if selection.provider == "doubao" else self.mimo_config
+        options = normalize_tts_options(incoming_options, provider_config, selection.provider)
+
+        if selection.provider == "mimo":
+            clone_data_url = None
+            if selection.kind == "clone":
+                clone_data_url = self._clone_store().reference_data_url(selection.voice_id)
+            return self._generate_mimo(
+                text,
+                filename,
+                selection.voice_id,
+                options["style_prompt"],
+                options["speed_instruction"],
+                clone_data_url=clone_data_url,
+            )
+        numeric_speed = speed_ratio if speed_ratio is not None else options["speed_ratio"]
+        return self._generate_doubao(
+            text,
+            filename,
+            selection.voice_id,
+            numeric_speed,
+            options["volume_ratio"],
+        )
 
     def _output_path(self, text: str, filename: str = None) -> Path:
         if not filename:
@@ -173,20 +223,34 @@ class VoiceOverGenerator:
         text: str,
         filename: str = None,
         voice_type: str = None,
+        style_prompt: str = "",
+        speed_instruction: str = "",
+        clone_data_url: str = None,
     ) -> str:
         output_path = self._output_path(text, filename)
         base_url = (self.mimo_config.get("base_url") or Config.MIMO_TTS_BASE_URL).rstrip("/")
         llm_config = Config.llm_config()
         api_key = (
             self.mimo_config.get("api_key")
-            or self.tts_config.get("api_key")
+            or (self.tts_config.get("api_key") if self.provider == "mimo" else "")
             or Config.MIMO_TTS_API_KEY
             or (llm_config.get("api_key") if isinstance(llm_config, dict) else "")
         )
-        model = self.mimo_config.get("model") or Config.MIMO_TTS_MODEL
+        if clone_data_url:
+            model = self.mimo_config.get("clone_model") or Config.MIMO_TTS_CLONE_MODEL
+        else:
+            model = self.mimo_config.get("model") or Config.MIMO_TTS_MODEL
         audio_format = (self.mimo_config.get("format") or Config.MIMO_TTS_FORMAT or "wav").lower()
         voice = voice_type or self.mimo_config.get("default_voice") or Config.MIMO_TTS_DEFAULT_VOICE
-        style_prompt = self.mimo_config.get("style_prompt") or Config.MIMO_TTS_STYLE_PROMPT
+        instructions = [
+            value.strip()
+            for value in (
+                style_prompt or self.mimo_config.get("style_prompt") or Config.MIMO_TTS_STYLE_PROMPT,
+                speed_instruction,
+            )
+            if value and value.strip()
+        ]
+        instruction_text = "\n".join(instructions)
 
         if not api_key:
             raise ValueError("小米 MiMo TTS 配置未完成，请在模型配置页填写 API Key")
@@ -199,19 +263,19 @@ class VoiceOverGenerator:
         payload = {
             "model": model,
             "messages": [
-                {"role": "user", "content": style_prompt},
+                {"role": "user", "content": instruction_text},
                 {"role": "assistant", "content": text},
             ],
             "audio": {
                 "format": audio_format,
-                "voice": voice,
+                "voice": clone_data_url or voice,
             },
         }
 
         logger.debug(
             "生成 MiMo 配音: provider=mimo model=%s voice=%s format=%s -> %s",
             model,
-            voice,
+            "local-reference" if clone_data_url else voice,
             audio_format,
             output_path,
         )

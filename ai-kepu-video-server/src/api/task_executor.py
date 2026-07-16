@@ -4,6 +4,7 @@
 """
 
 import logging
+import json
 import time
 import zipfile
 import shutil
@@ -266,6 +267,7 @@ class TaskExecutor:
         if not task:
             logger.error(f"[{task_id}] 任务不存在")
             return
+        tts_options = dict(getattr(task, "tts_options", {}) or {})
 
         started_at = time.time()
         pipeline = None
@@ -489,7 +491,17 @@ class TaskExecutor:
                                 else None
                             ),
                             text=segment.get("text"),
-                            voice_type=voice_type if asset_type == "audio" else None,
+                            voice_type=(
+                                segment.get("audio_voice_type") or voice_type
+                                if asset_type == "audio"
+                                else None
+                            ),
+                            metadata_json=(
+                                segment.get("audio_tts_options_json")
+                                or json.dumps({"tts_options": tts_options}, ensure_ascii=False)
+                                if asset_type == "audio"
+                                else None
+                            ),
                             status="completed",
                             error_message=preserved_error,
                         )
@@ -520,7 +532,12 @@ class TaskExecutor:
                     if cancellation:
                         cancellation.raise_if_cancelled()
                     path = pipeline.voiceover_generator.generate(
-                        seg, filename=f"seg_{i:03d}", voice_type=voice_type
+                        seg,
+                        filename=f"seg_{i:03d}",
+                        voice_type=voice_type,
+                        speed_level=tts_options.get("speed_level"),
+                        volume_ratio=tts_options.get("volume_ratio"),
+                        style_prompt=tts_options.get("style_prompt"),
                     )
                     return i, {"status": "success", "path": path, "error": None}
                 except TaskCancelled:
@@ -581,7 +598,14 @@ class TaskExecutor:
                     prompt = image_prompts[i] if i < len(image_prompts) else ""
                     voice = None
                 else:
-                    updates = {"audio_path": path, "audio_url": url, "audio_status": status, "audio_error": final_error}
+                    updates = {
+                        "audio_path": path,
+                        "audio_url": url,
+                        "audio_status": status,
+                        "audio_error": final_error,
+                        "audio_voice_type": voice_type,
+                        "audio_tts_options_json": json.dumps(tts_options, ensure_ascii=False),
+                    }
                     label = f"配音 · 分镜 {i + 1}"
                     prompt = None
                     voice = voice_type
@@ -601,6 +625,11 @@ class TaskExecutor:
                     prompt=prompt,
                     text=pipeline.segments[i] if i < len(pipeline.segments) else None,
                     voice_type=voice,
+                    metadata_json=(
+                        json.dumps({"tts_options": tts_options}, ensure_ascii=False)
+                        if asset_type == "audio"
+                        else None
+                    ),
                     status=status,
                     error_message=final_error,
                 )
@@ -859,6 +888,8 @@ class TaskExecutor:
                     'audio_url': audio_url,
                     'audio_status': audio_status,
                     'audio_error': audio_error,
+                    'audio_voice_type': voice_type,
+                    'audio_tts_options_json': json.dumps(tts_options, ensure_ascii=False),
                 }
                 segments_data.append(seg_data)
 
@@ -892,6 +923,7 @@ class TaskExecutor:
                         label=f"配音 · 分镜 {i + 1}",
                         text=seg_text,
                         voice_type=voice_type,
+                        metadata_json=json.dumps({"tts_options": tts_options}, ensure_ascii=False),
                         status=audio_status,
                         error_message=audio_error,
                     )

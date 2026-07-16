@@ -8,6 +8,7 @@ import uuid
 import time
 import logging
 import os
+import json
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Callable
 from threading import Thread, Lock
@@ -62,7 +63,17 @@ def _parse_task_datetime(value) -> Optional[datetime]:
 class Task:
     """任务对象"""
 
-    def __init__(self, task_id: str, theme: str, style: str, length: int, voice_type: Optional[str] = None, name: Optional[str] = None, ratio: str = "16:9"):
+    def __init__(
+        self,
+        task_id: str,
+        theme: str,
+        style: str,
+        length: int,
+        voice_type: Optional[str] = None,
+        name: Optional[str] = None,
+        ratio: str = "16:9",
+        tts_options: Optional[Dict] = None,
+    ):
         self.task_id = task_id
         self.theme = theme
         self.name = name or theme[:20]
@@ -70,6 +81,7 @@ class Task:
         self.ratio = ratio or "16:9"
         self.length = length
         self.voice_type = voice_type
+        self.tts_options = dict(tts_options or {})
         self.status = TaskStatus.PENDING
         self.created_at = datetime.now().isoformat()
         self.error: Optional[str] = None
@@ -185,6 +197,7 @@ class Task:
             task_id=self.task_id,
             status=self.status,
             voice_type=self.voice_type,
+            tts_options=self.tts_options or None,
             progress=progress if self.status in [
                 TaskStatus.PENDING,
                 TaskStatus.PROCESSING,
@@ -208,15 +221,27 @@ class TaskManager:
         self.deleted_task_ids = set()
         self.deletion_reports: Dict[str, DeletionReport] = {}
 
-    def create_task(self, theme: str, style: str, length: int, voice_type: Optional[str] = None, name: Optional[str] = None, ratio: str = "16:9") -> str:
+    def create_task(
+        self,
+        theme: str,
+        style: str,
+        length: int,
+        voice_type: Optional[str] = None,
+        name: Optional[str] = None,
+        ratio: str = "16:9",
+        tts_options: Optional[Dict] = None,
+    ) -> str:
         """创建新任务"""
         task_id = uuid.uuid4().hex
-        task = Task(task_id, theme, style, length, voice_type, name, ratio)
+        task = Task(task_id, theme, style, length, voice_type, name, ratio, tts_options)
 
         with self.lock:
             self.tasks[task_id] = task
 
-        db_client.create_task(task_id, theme, style, length, name, ratio, voice_type)
+        db_client.create_task(
+            task_id, theme, style, length, name, ratio, voice_type,
+            tts_options=task.tts_options,
+        )
 
         # 缓存到内存
         task_data = {
@@ -226,6 +251,7 @@ class TaskManager:
             "ratio": ratio,
             "length": length,
             "voice_type": voice_type,
+            "tts_options": task.tts_options,
             "status": "pending",
             "created_at": task.created_at,
         }
@@ -309,6 +335,7 @@ class TaskManager:
                 data["length"],
                 voice_type=data.get("voice_type"),
                 ratio=data.get("ratio", "16:9"),
+                tts_options=data.get("tts_options"),
             )
             task.status = TaskStatus(data["status"])
             task.created_at = data["created_at"]
@@ -339,6 +366,12 @@ class TaskManager:
     def _rebuild_task_from_db(self, data: dict) -> Optional[Task]:
         """从数据库数据重建 Task 对象"""
         try:
+            raw_tts_options = data.get("tts_options_json")
+            if isinstance(raw_tts_options, str):
+                try:
+                    raw_tts_options = json.loads(raw_tts_options)
+                except (TypeError, ValueError):
+                    raw_tts_options = {}
             task = Task(
                 data["task_id"],
                 data["theme"],
@@ -346,6 +379,7 @@ class TaskManager:
                 data["length"],
                 voice_type=data.get("voice_type"),
                 ratio=data.get("ratio", "16:9"),
+                tts_options=raw_tts_options,
             )
             task.status = TaskStatus(data["status"])
             task.created_at = data["created_at"].isoformat() if hasattr(data["created_at"], "isoformat") else str(data["created_at"])
@@ -391,6 +425,7 @@ class TaskManager:
             "ratio": task.ratio,
             "length": task.length,
             "voice_type": task.voice_type,
+            "tts_options": task.tts_options,
             "status": task.status,
             "created_at": task.created_at,
             "error": task.error,
