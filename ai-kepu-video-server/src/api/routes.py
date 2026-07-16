@@ -99,8 +99,10 @@ def _resolve_new_task_voice(voice_type: Optional[str]) -> str:
     if voice_type:
         selection = parse_voice_key(voice_type, default_provider=default_provider)
     elif default_provider == "mimo":
+        default_voice = (config.get("mimo") or {}).get("default_voice") or "冰糖"
         selection = parse_voice_key(
-            build_voice_key("mimo", (config.get("mimo") or {}).get("default_voice") or "冰糖")
+            default_voice if str(default_voice).startswith("mimo-clone:")
+            else build_voice_key("mimo", default_voice)
         )
     else:
         selection = parse_voice_key(
