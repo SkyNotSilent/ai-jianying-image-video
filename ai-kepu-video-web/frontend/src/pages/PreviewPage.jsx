@@ -23,6 +23,7 @@ import {
   getTaskAssets,
   getTaskStatus,
   getVoices,
+  previewVoice,
   regenerateAudio,
   regenerateImage,
   renderPreview,
@@ -31,7 +32,9 @@ import {
   uploadImage,
 } from '../api/task'
 import { EmptyState, LoadingState } from '../components/StatusStates'
+import { VoicePicker } from '../components/VoicePicker'
 import { toast } from '../lib/toast'
+import { mergeTtsOptions, nextPreviewState, normalizeVoiceCatalog } from '../lib/voiceCatalog'
 import { normalizeMediaUrl } from '../utils/mediaUrl'
 import { deriveTaskState, ratioClassName, ratioLabel } from '../utils/taskState'
 import {
@@ -56,11 +59,24 @@ function taskName(task, taskId) {
   return task?.result?.theme || task?.name || `任务 ${String(taskId).slice(0, 8)}`
 }
 
+function parseTtsOptions(value) {
+  if (value && typeof value === 'object') return value
+  if (!value) return {}
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
 export function PreviewPage() {
   const { taskId } = useParams()
   const navigate = useNavigate()
   const uploadRef = useRef(null)
   const playTimer = useRef(null)
+  const voicePreviewAudioRef = useRef(null)
+  const voicePreviewTokenRef = useRef(0)
   const loadRequestRef = useRef(0)
   const taskRequestGuardRef = useRef(createTaskRequestGuard(taskId))
   taskRequestGuardRef.current.changeTask(taskId)
@@ -75,6 +91,8 @@ export function PreviewPage() {
   const [textDraft, setTextDraft] = useState('')
   const [imagePromptDraft, setImagePromptDraft] = useState('')
   const [selectedVoiceType, setSelectedVoiceType] = useState('')
+  const [segmentTtsOptions, setSegmentTtsOptions] = useState({ speed_level: 'normal' })
+  const [voicePreviewState, setVoicePreviewState] = useState(() => nextPreviewState())
   const [imageSize, setImageSize] = useState(null)
   const [playing, setPlaying] = useState(false)
   const [busyAction, setBusyAction] = useState('')
@@ -142,7 +160,7 @@ export function PreviewPage() {
       setTask(taskData || null)
       setSegments(sortSegmentsByIndex(segmentData))
       setExportState(exportData)
-      setVoices(Array.isArray(voiceData) ? voiceData : [])
+      setVoices(normalizeVoiceCatalog(voiceData))
       setAssets(Array.isArray(assetData) ? assetData : [])
       setLoadedTaskId(taskId)
     } catch (error) {
@@ -166,6 +184,7 @@ export function PreviewPage() {
     setTextDraft('')
     setImagePromptDraft('')
     setSelectedVoiceType('')
+    setSegmentTtsOptions({ speed_level: 'normal' })
     setImageSize(null)
   }, [taskId])
 
@@ -179,8 +198,21 @@ export function PreviewPage() {
   }, [currentDraft])
 
   useEffect(() => {
-    setSelectedVoiceType('')
-  }, [currentSegmentIdentity])
+    const voice = currentSegment?.audio_voice_type || task?.voice_type || ''
+    const provider = voice.startsWith('doubao:') ? 'doubao' : 'mimo'
+    const inherited = parseTtsOptions(currentSegment?.audio_tts_options_json)
+    const taskOptions = task?.tts_options || {}
+    setSelectedVoiceType(voice)
+    setSegmentTtsOptions(mergeTtsOptions(taskOptions, inherited, provider))
+  }, [currentSegment?.audio_tts_options_json, currentSegment?.audio_voice_type, currentSegmentIdentity, task?.tts_options, task?.voice_type])
+
+  const stopVoicePreview = useCallback(() => {
+    voicePreviewAudioRef.current?.pause()
+    voicePreviewAudioRef.current = null
+    setVoicePreviewState(current => nextPreviewState(current, { type: 'stop' }))
+  }, [])
+
+  useEffect(() => () => stopVoicePreview(), [stopVoicePreview])
 
   useEffect(() => {
     setImageSize(null)
@@ -257,15 +289,45 @@ export function PreviewPage() {
     }
   }
 
+  const previewSegmentVoice = async voice => {
+    if (voicePreviewState.playingVoice === voice.id) return stopVoicePreview()
+    stopVoicePreview()
+    const token = ++voicePreviewTokenRef.current
+    setVoicePreviewState(current => nextPreviewState(current, { type: 'start', voiceId: voice.id, token }))
+    try {
+      const result = await previewVoice({
+        voice_type: voice.id,
+        text: textDraft || currentSegment?.text || '这是当前分段的音色试听。',
+        tts_options: segmentTtsOptions,
+      })
+      const audio = new Audio(normalizeMediaUrl(result.url))
+      voicePreviewAudioRef.current = audio
+      audio.onended = stopVoicePreview
+      audio.onerror = () => setVoicePreviewState(current => nextPreviewState(current, { type: 'error', voiceId: voice.id, token, error: '试听播放失败' }))
+      setVoicePreviewState(current => nextPreviewState(current, { type: 'ready', voiceId: voice.id, token, url: result.url }))
+      await audio.play()
+    } catch (error) {
+      setVoicePreviewState(current => nextPreviewState(current, { type: 'error', voiceId: voice.id, token, error: error?.response?.data?.detail || '音色试听失败' }))
+    }
+  }
+
   const regenerateCurrentAudio = async () => {
     if (!currentSegment) return
     const requestToken = beginTaskRequest()
     setBusyAction('audio')
     try {
       if (!await saveCurrentSegment({ quiet: true, requestToken })) return
-      const result = await regenerateAudio(taskId, segmentIndex(currentSegment, selectedIndex), selectedVoiceType || null)
+      const result = await regenerateAudio(taskId, segmentIndex(currentSegment, selectedIndex), {
+        voice_type: selectedVoiceType || null,
+        tts_options: segmentTtsOptions,
+      })
       if (!acceptsTaskRequest(requestToken)) return
-      patchCurrentSegment({ audio_url: result?.audio_url || currentSegment.audio_url, audio_status: 'completed' })
+      patchCurrentSegment({
+        audio_url: result?.audio_url || currentSegment.audio_url,
+        audio_status: 'completed',
+        audio_voice_type: result?.voice_type || selectedVoiceType,
+        audio_tts_options_json: JSON.stringify(result?.tts_options || segmentTtsOptions),
+      })
       await reloadAssets(requestToken)
       if (!acceptsTaskRequest(requestToken)) return
       toast.success('配音已重新生成')
@@ -395,7 +457,7 @@ export function PreviewPage() {
             <div className="preview-segment-range"><span>片段范围</span><strong>{segmentRange(orderedSegments, selectedIndex)}</strong></div>
             <dl className="preview-media-grid"><div><dt>视频比例</dt><dd>{ratioLabel(ratio)}</dd></div><div><dt>画布尺寸</dt><dd>{exportState?.canvas?.width && exportState?.canvas?.height ? `${exportState.canvas.width} x ${exportState.canvas.height}` : '未读取'}</dd></div><div><dt>图片尺寸</dt><dd>{!imageUrl ? '未生成' : imageSize?.width && imageSize?.height ? `${imageSize.width} x ${imageSize.height}` : '读取中'}</dd></div></dl>
             <label className="preview-field"><span>提示词 Prompt</span><textarea value={imagePromptDraft} maxLength="800" placeholder="描述这一段需要生成的画面" onChange={event => setImagePromptDraft(event.target.value)} /><small>{imagePromptDraft.length}/800</small><button type="button" className="preview-smart-button" onClick={() => setImagePromptDraft(value => appendPromptGuidance(value || textDraft || currentSegment.text))}><Sparkles size={15} />优化提示词</button></label>
-            <label className="preview-field"><span>配音音色</span><select value={selectedVoiceType} onChange={event => setSelectedVoiceType(event.target.value)}><option value="">沿用任务音色</option>{voices.map(voice => <option key={voice.id} value={voice.id}>{voice.name}</option>)}</select></label>
+            <section className="preview-voice-picker"><header><span>配音音色</span><small>仅覆盖当前分段</small></header><VoicePicker voices={voices} value={selectedVoiceType} ttsOptions={segmentTtsOptions} onChange={voiceId => setSelectedVoiceType(voiceId)} onOptionsChange={setSegmentTtsOptions} onPreview={previewSegmentVoice} playingVoice={voicePreviewState.playingVoice} previewLoading={voicePreviewState.loading} previewError={voicePreviewState.error} compact /></section>
             <label className="preview-field"><span>字幕文案</span><textarea value={textDraft} maxLength="1000" placeholder="当前分镜字幕文案" onChange={event => setTextDraft(event.target.value)} /><small>{textDraft.length}/1000</small></label>
             <section className="preview-subtitle-settings"><div><span>启用字幕</span><strong>开启</strong></div><div><span>字幕位置</span><strong>底部安全区</strong></div></section>
             <div className="preview-action-grid"><button type="button" className="button button-secondary" onClick={saveSegment}><Save size={16} />保存文案</button><button type="button" className="button button-secondary" onClick={() => uploadRef.current?.click()} disabled={busyAction === 'upload'}><Upload size={16} />上传替换</button><button type="button" className="button button-secondary" onClick={regenerateCurrentImage} disabled={busyAction === 'image'}><RefreshCw size={16} />{busyAction === 'image' ? '生成中...' : '重生图片'}</button><button type="button" className="button button-secondary" onClick={regenerateCurrentAudio} disabled={busyAction === 'audio'}><Volume2 size={16} />{busyAction === 'audio' ? '生成中...' : '重配音'}</button></div>

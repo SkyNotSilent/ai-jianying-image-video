@@ -1936,6 +1936,8 @@ async def get_segments(task_id: str, request: Request):
             'image_error': seg.get('image_error'),
             'audio_status': seg.get('audio_status') or 'completed',
             'audio_error': seg.get('audio_error'),
+            'audio_voice_type': seg.get('audio_voice_type'),
+            'audio_tts_options_json': seg.get('audio_tts_options_json'),
             'duration': seg.get('duration'),
             'created_at': seg.get('created_at'),
             'updated_at': seg.get('updated_at'),

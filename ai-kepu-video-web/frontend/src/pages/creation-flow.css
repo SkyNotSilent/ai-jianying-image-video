@@ -95,6 +95,7 @@
 .model-summary strong { font-size: 13px; }
 .model-summary span { color: #667085; font-size: 12px; line-height: 1.4; }
 .production-field-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: end; }
+.production-voice-panel { display: grid; gap: 12px; padding-top: 16px; border-top: 1px solid #e5ebf1; }.production-voice-panel > header { display: grid; gap: 3px; }.production-voice-panel > header strong { color: #344054; font-size: 13px; }.production-voice-panel > header small { color: #667085; font-size: 11px; line-height: 1.45; }
 .readiness-list { display: grid; gap: 8px; }
 .readiness-item { display: flex; align-items: flex-start; gap: 9px; padding: 10px; border: 1px solid #e5ebf1; border-radius: 6px; }
 .readiness-item.is-ready { color: #14724c; }
