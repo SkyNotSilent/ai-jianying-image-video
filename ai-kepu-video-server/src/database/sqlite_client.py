@@ -7,10 +7,20 @@ import logging
 import sqlite3
 import os
 import uuid
+import json
 from datetime import datetime
 from typing import Optional, List, Dict
 from contextlib import contextmanager
 from pathlib import Path
+
+from src.draft.voice_catalog import (
+    DOUBAO_DEFAULT_ENABLED_IDS,
+    DOUBAO_PRESET_VOICES,
+    MIMO_DEFAULT_ENABLED_IDS,
+    MIMO_PRESET_VOICES,
+    build_voice_key,
+    parse_voice_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,14 +101,20 @@ class SQLiteClient:
 
                 CREATE TABLE IF NOT EXISTS tts_voices (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    voice_id TEXT NOT NULL UNIQUE,
+                    provider TEXT NOT NULL DEFAULT 'doubao',
+                    voice_id TEXT NOT NULL,
                     name TEXT NOT NULL,
                     gender TEXT NOT NULL,
+                    language TEXT NOT NULL DEFAULT 'zh',
                     description TEXT,
+                    source TEXT NOT NULL DEFAULT 'builtin',
+                    capabilities_json TEXT,
+                    preview_url TEXT,
                     is_enabled INTEGER NOT NULL DEFAULT 1,
                     sort_order INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-                    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                    UNIQUE(provider, voice_id)
                 );
 
                 CREATE TABLE IF NOT EXISTS task_segments (
@@ -147,25 +163,8 @@ class SQLiteClient:
                 );
             """)
 
-            # 插入默认音色数据（如果表为空）
-            cursor.execute("SELECT COUNT(*) FROM tts_voices")
-            if cursor.fetchone()[0] == 0:
-                voices = [
-                    ('zh_female_shuangkuaisisi_moon_bigtts', '爽快思思', 'female', '活泼开朗，适合轻松愉快的内容', 1, 100),
-                    ('zh_female_wanwanxiaohe_moon_bigtts', '弯弯小鹤', 'female', '温柔甜美，适合温馨治愈的内容', 1, 90),
-                    ('zh_female_tianmeibeibei_moon_bigtts', '甜美贝贝', 'female', '甜美可爱，适合少女风格内容', 1, 80),
-                    ('zh_female_qingxinruoxi_moon_bigtts', '清新若溪', 'female', '清新自然，适合文艺清新内容', 1, 70),
-                    ('zh_female_wenrouxiaoya_moon_bigtts', '温柔小雅', 'female', '温柔知性，适合知识科普内容', 1, 60),
-                    ('zh_female_mizai_uranus_bigtts', '米仔', 'female', '自然真实，适合故事讲述', 1, 50),
-                    ('zh_male_wennuanahu_moon_bigtts', '温暖阿虎', 'male', '温暖磁性，适合情感类内容', 1, 40),
-                    ('zh_male_qingchexiaoxin_moon_bigtts', '清澈小新', 'male', '清澈明朗，适合青春活力内容', 1, 30),
-                    ('zh_male_yangguangxiaolei_moon_bigtts', '阳光小磊', 'male', '阳光开朗，适合励志正能量内容', 1, 20),
-                    ('zh_male_chenwendongge_moon_bigtts', '沉稳东哥', 'male', '沉稳大气，适合严肃专业内容', 1, 10),
-                ]
-                cursor.executemany(
-                    "INSERT INTO tts_voices (voice_id, name, gender, description, is_enabled, sort_order) VALUES (?,?,?,?,?,?)",
-                    voices
-                )
+            self._migrate_voice_catalog(cursor)
+            self._seed_voice_catalog(cursor)
 
             # 为已有数据库添加 ratio 字段（兼容旧表结构）
             try:
@@ -241,6 +240,88 @@ class SQLiteClient:
         cursor.executescript(sql)
         cursor.execute("INSERT INTO schema_migrations (version) VALUES (?)", (version,))
         logger.info(f"SQLite 迁移已应用: {version}")
+
+    def _migrate_voice_catalog(self, cursor) -> None:
+        cursor.execute("PRAGMA table_info(tts_voices)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if "provider" in columns and "language" in columns and "source" in columns:
+            return
+        cursor.executescript(
+            """
+            ALTER TABLE tts_voices RENAME TO tts_voices_legacy_20260716;
+            CREATE TABLE tts_voices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider TEXT NOT NULL DEFAULT 'doubao',
+                voice_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                gender TEXT NOT NULL,
+                language TEXT NOT NULL DEFAULT 'zh',
+                description TEXT,
+                source TEXT NOT NULL DEFAULT 'builtin',
+                capabilities_json TEXT,
+                preview_url TEXT,
+                is_enabled INTEGER NOT NULL DEFAULT 1,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                UNIQUE(provider, voice_id)
+            );
+            INSERT INTO tts_voices
+                (id, provider, voice_id, name, gender, language, description, source,
+                 is_enabled, sort_order, created_at, updated_at)
+            SELECT id, 'doubao', voice_id, name, gender, 'zh', description, 'builtin',
+                   CASE WHEN voice_id IN (
+                       'zh_female_shuangkuaisisi_moon_bigtts',
+                       'zh_male_yangguangxiaolei_moon_bigtts'
+                   ) THEN 1 ELSE 0 END,
+                   sort_order, created_at, updated_at
+            FROM tts_voices_legacy_20260716;
+            DROP TABLE tts_voices_legacy_20260716;
+            """
+        )
+
+    def _seed_voice_catalog(self, cursor) -> None:
+        capabilities = json.dumps(
+            {"preview": True, "speed": "numeric", "volume": True},
+            ensure_ascii=False,
+        )
+        for voice_id, name, gender, description, sort_order in DOUBAO_PRESET_VOICES:
+            cursor.execute(
+                """INSERT OR IGNORE INTO tts_voices
+                   (provider, voice_id, name, gender, language, description, source,
+                    capabilities_json, is_enabled, sort_order)
+                   VALUES ('doubao', ?, ?, ?, 'zh', ?, 'builtin', ?, ?, ?)""",
+                (
+                    voice_id,
+                    name,
+                    gender,
+                    description,
+                    capabilities,
+                    1 if voice_id in DOUBAO_DEFAULT_ENABLED_IDS else 0,
+                    sort_order,
+                ),
+            )
+        mimo_capabilities = json.dumps(
+            {"preview": True, "speed": "style", "style": True},
+            ensure_ascii=False,
+        )
+        for voice in MIMO_PRESET_VOICES:
+            cursor.execute(
+                """INSERT OR IGNORE INTO tts_voices
+                   (provider, voice_id, name, gender, language, description, source,
+                    capabilities_json, is_enabled, sort_order)
+                   VALUES ('mimo', ?, ?, ?, ?, ?, 'builtin', ?, ?, ?)""",
+                (
+                    voice["voice_id"],
+                    voice["name"],
+                    voice["gender"],
+                    voice["language"],
+                    voice["description"],
+                    mimo_capabilities,
+                    1 if voice["voice_id"] in MIMO_DEFAULT_ENABLED_IDS else 0,
+                    voice["sort_order"],
+                ),
+            )
 
     def _apply_column_migration(self, cursor, version: str, table: str,
                                 columns: Dict[str, str]) -> None:
@@ -535,7 +616,7 @@ class SQLiteClient:
             logger.error(f"获取任务信息失败: {e}")
             return None
 
-    def get_enabled_voices(self) -> List[Dict]:
+    def list_tts_voices(self, provider: str = None, include_disabled: bool = False) -> List[Dict]:
         if not self._initialized:
             self._init_db()
         if not self._initialized:
@@ -543,13 +624,65 @@ class SQLiteClient:
         try:
             conn = self._get_conn()
             cur = conn.cursor()
-            cur.execute("SELECT voice_id, name, gender, description, sort_order FROM tts_voices WHERE is_enabled=1 ORDER BY sort_order DESC, id ASC")
+            sql = "SELECT * FROM tts_voices WHERE 1=1"
+            values = []
+            if provider:
+                sql += " AND provider=?"
+                values.append(provider)
+            if not include_disabled:
+                sql += " AND is_enabled=1"
+            sql += " ORDER BY provider ASC, sort_order DESC, id ASC"
+            cur.execute(sql, values)
             rows = [dict(r) for r in cur.fetchall()]
             conn.close()
+            for row in rows:
+                row["id"] = build_voice_key(row["provider"], row["voice_id"])
+                row["is_enabled"] = bool(row["is_enabled"])
+                try:
+                    row["capabilities"] = json.loads(row.get("capabilities_json") or "{}")
+                except (TypeError, ValueError):
+                    row["capabilities"] = {}
             return rows
         except Exception as e:
             logger.error(f"获取音色列表失败: {e}")
             return []
+
+    def get_enabled_voices(self) -> List[Dict]:
+        return self.list_tts_voices(include_disabled=False)
+
+    def find_tts_voice(self, provider: str, voice_id: str) -> Optional[Dict]:
+        rows = self.list_tts_voices(provider=provider, include_disabled=True)
+        return next((row for row in rows if row["voice_id"] == voice_id), None)
+
+    def set_voice_availability(self, voice_keys: List[str]) -> int:
+        if not self._initialized:
+            self._init_db()
+        if not self._initialized:
+            return 0
+        selections = {
+            (selection.provider, selection.voice_id)
+            for selection in (parse_voice_key(key) for key in voice_keys)
+            if selection.kind == "preset"
+        }
+        try:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            cur.execute("SELECT provider, voice_id FROM tts_voices")
+            rows = cur.fetchall()
+            for row in rows:
+                cur.execute(
+                    """UPDATE tts_voices SET is_enabled=?,
+                       updated_at=datetime('now','localtime')
+                       WHERE provider=? AND voice_id=?""",
+                    (1 if (row["provider"], row["voice_id"]) in selections else 0,
+                     row["provider"], row["voice_id"]),
+                )
+            conn.commit()
+            conn.close()
+            return len(rows)
+        except Exception as e:
+            logger.error(f"更新音色开放状态失败: {e}")
+            return 0
 
     def update_voice_status(self, voice_id: str, is_enabled: bool) -> bool:
         if not self._initialized:

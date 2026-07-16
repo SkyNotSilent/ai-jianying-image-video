@@ -76,6 +76,7 @@ class Config:
     MIMO_TTS_BASE_URL: str = _env("MIMO_TTS_BASE_URL", "https://token-plan-sgp.xiaomimimo.com/v1")
     MIMO_TTS_API_KEY: str = _env("MIMO_TTS_API_KEY", "")
     MIMO_TTS_MODEL: str = _env("MIMO_TTS_MODEL", "mimo-v2.5-tts")
+    MIMO_TTS_CLONE_MODEL: str = _env("MIMO_TTS_CLONE_MODEL", "mimo-v2.5-tts-voiceclone")
     MIMO_TTS_DEFAULT_VOICE: str = _env("MIMO_TTS_DEFAULT_VOICE", "冰糖")
     MIMO_TTS_FORMAT: str = _env("MIMO_TTS_FORMAT", "wav")
     MIMO_TTS_STYLE_PROMPT: str = _env("MIMO_TTS_STYLE_PROMPT", "自然清晰，适合中文短视频旁白。")
@@ -108,6 +109,8 @@ class Config:
             },
             "tts": {
                 "provider": cls.TTS_PROVIDER,
+                "enabled_providers": ["doubao", "mimo"],
+                "preview_text": "你好，这是当前音色的试听，欢迎使用 InsightCut。",
                 "auth_method": cls.DOUBAO_TTS_AUTH_METHOD,
                 "api_url": cls.DOUBAO_TTS_API_URL,
                 "appid": cls.DOUBAO_TTS_APPID,
@@ -115,13 +118,17 @@ class Config:
                 "api_key": cls.DOUBAO_TTS_API_KEY,
                 "cluster": cls.DOUBAO_TTS_CLUSTER,
                 "default_voice": cls.DOUBAO_TTS_DEFAULT_VOICE,
+                "speed_level": "normal",
+                "volume_ratio": 1.0,
                 "mimo": {
                     "base_url": cls.MIMO_TTS_BASE_URL,
                     "api_key": cls.MIMO_TTS_API_KEY,
                     "model": cls.MIMO_TTS_MODEL,
+                    "clone_model": cls.MIMO_TTS_CLONE_MODEL,
                     "default_voice": cls.MIMO_TTS_DEFAULT_VOICE,
                     "format": cls.MIMO_TTS_FORMAT,
                     "style_prompt": cls.MIMO_TTS_STYLE_PROMPT,
+                    "speed_level": "normal",
                 },
             },
             "generation": {
@@ -186,9 +193,18 @@ class Config:
 
     @classmethod
     def _normalize_tts_config(cls, config: dict) -> None:
+        from src.draft.voice_catalog import normalized_enabled_providers
+
         tts = config.setdefault("tts", {})
         provider = (tts.get("provider") or cls.TTS_PROVIDER or "doubao").strip().lower()
         tts["provider"] = provider if provider in {"doubao", "mimo"} else "doubao"
+        tts["enabled_providers"] = list(
+            normalized_enabled_providers(tts.get("enabled_providers"))
+        )
+        tts["preview_text"] = str(
+            tts.get("preview_text")
+            or "你好，这是当前音色的试听，欢迎使用 InsightCut。"
+        )[:80]
         raw_auth_method = (tts.get("auth_method") or cls.DOUBAO_TTS_AUTH_METHOD or "").strip().lower()
         if raw_auth_method not in {"access_token", "api_key"}:
             raw_auth_method = "api_key" if tts.get("api_key") and not (tts.get("appid") and tts.get("token")) else "access_token"
@@ -225,13 +241,24 @@ class Config:
             or tts.get("voice")
             or cls.DOUBAO_TTS_DEFAULT_VOICE
         )
+        tts["speed_level"] = (
+            tts.get("speed_level")
+            if tts.get("speed_level") in {"very_slow", "slow", "normal", "fast", "very_fast"}
+            else "normal"
+        )
+        try:
+            tts["volume_ratio"] = max(0.5, min(2.0, float(tts.get("volume_ratio", 1.0))))
+        except (TypeError, ValueError):
+            tts["volume_ratio"] = 1.0
         mimo_defaults = {
             "base_url": cls.MIMO_TTS_BASE_URL,
             "api_key": cls.MIMO_TTS_API_KEY,
             "model": cls.MIMO_TTS_MODEL,
+            "clone_model": cls.MIMO_TTS_CLONE_MODEL,
             "default_voice": cls.MIMO_TTS_DEFAULT_VOICE,
             "format": cls.MIMO_TTS_FORMAT,
             "style_prompt": cls.MIMO_TTS_STYLE_PROMPT,
+            "speed_level": "normal",
         }
         raw_mimo = tts.get("mimo") if isinstance(tts.get("mimo"), dict) else {}
         mimo = {
@@ -240,9 +267,12 @@ class Config:
         }
         mimo["base_url"] = mimo.get("base_url") or cls.MIMO_TTS_BASE_URL
         mimo["model"] = mimo.get("model") or cls.MIMO_TTS_MODEL
+        mimo["clone_model"] = mimo.get("clone_model") or cls.MIMO_TTS_CLONE_MODEL
         mimo["default_voice"] = mimo.get("default_voice") or cls.MIMO_TTS_DEFAULT_VOICE
         mimo["format"] = (mimo.get("format") or cls.MIMO_TTS_FORMAT).lower()
         mimo["style_prompt"] = mimo.get("style_prompt") or cls.MIMO_TTS_STYLE_PROMPT
+        if mimo.get("speed_level") not in {"very_slow", "slow", "normal", "fast", "very_fast"}:
+            mimo["speed_level"] = "normal"
         tts["mimo"] = mimo
 
     @classmethod
