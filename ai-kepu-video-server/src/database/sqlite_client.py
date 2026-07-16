@@ -117,6 +117,23 @@ class SQLiteClient:
                     UNIQUE(provider, voice_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS tts_voice_clones (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    clone_id TEXT NOT NULL UNIQUE,
+                    provider TEXT NOT NULL DEFAULT 'mimo',
+                    name TEXT NOT NULL,
+                    reference_path TEXT NOT NULL,
+                    duration REAL,
+                    file_size INTEGER,
+                    status TEXT NOT NULL DEFAULT 'draft',
+                    preview_path TEXT,
+                    error_message TEXT,
+                    is_enabled INTEGER NOT NULL DEFAULT 0,
+                    consent_confirmed INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+                );
+
                 CREATE TABLE IF NOT EXISTS task_segments (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     task_id TEXT NOT NULL,
@@ -216,6 +233,21 @@ class SQLiteClient:
                     "script_text": "TEXT",
                     "summary": "TEXT",
                     "input_mode": "TEXT NOT NULL DEFAULT 'script'",
+                },
+            )
+            self._apply_column_migration(
+                cursor,
+                "20260716_tts_task_options",
+                "tasks",
+                {"tts_options_json": "TEXT"},
+            )
+            self._apply_column_migration(
+                cursor,
+                "20260716_segment_tts_options",
+                "task_segments",
+                {
+                    "audio_voice_type": "TEXT",
+                    "audio_tts_options_json": "TEXT",
                 },
             )
             self._apply_column_migration(
@@ -699,6 +731,127 @@ class SQLiteClient:
         except Exception as e:
             logger.error(f"更新音色状态失败: {e}")
             return False
+
+    def create_voice_clone(self, record: Dict) -> Dict:
+        if not self._initialized:
+            self._init_db()
+        if not self._initialized:
+            return {}
+        try:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            cur.execute(
+                """INSERT INTO tts_voice_clones
+                   (clone_id, provider, name, reference_path, duration, file_size,
+                    status, preview_path, error_message, is_enabled, consent_confirmed)
+                   VALUES (?, 'mimo', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    record["clone_id"], record["name"], record["reference_path"],
+                    record.get("duration"), record.get("file_size"),
+                    record.get("status", "draft"), record.get("preview_path"),
+                    record.get("error_message"), 1 if record.get("is_enabled") else 0,
+                    1 if record.get("consent_confirmed") else 0,
+                ),
+            )
+            conn.commit()
+            conn.close()
+            return self.get_voice_clone(record["clone_id"]) or {}
+        except Exception as exc:
+            logger.error(f"创建克隆音色失败: {exc}")
+            return {}
+
+    def get_voice_clone(self, clone_id: str) -> Optional[Dict]:
+        if not self._initialized:
+            self._init_db()
+        if not self._initialized:
+            return None
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM tts_voice_clones WHERE clone_id=?", (clone_id,))
+        row = cur.fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def list_voice_clones(self, include_hidden: bool = False) -> List[Dict]:
+        if not self._initialized:
+            self._init_db()
+        if not self._initialized:
+            return []
+        conn = self._get_conn()
+        cur = conn.cursor()
+        sql = "SELECT * FROM tts_voice_clones"
+        if not include_hidden:
+            sql += " WHERE status != 'hidden'"
+        sql += " ORDER BY updated_at DESC, id DESC"
+        cur.execute(sql)
+        rows = [dict(row) for row in cur.fetchall()]
+        conn.close()
+        return rows
+
+    def update_voice_clone(self, clone_id: str, updates: Dict) -> Optional[Dict]:
+        allowed = {
+            "name", "reference_path", "duration", "file_size", "status",
+            "preview_path", "error_message", "is_enabled", "consent_confirmed",
+        }
+        fields = {key: value for key, value in updates.items() if key in allowed}
+        if not fields:
+            return self.get_voice_clone(clone_id)
+        if not self._initialized:
+            self._init_db()
+        if not self._initialized:
+            return None
+        conn = self._get_conn()
+        cur = conn.cursor()
+        parts = [f"{key}=?" for key in fields]
+        values = [
+            1 if key in {"is_enabled", "consent_confirmed"} and value else
+            0 if key in {"is_enabled", "consent_confirmed"} else value
+            for key, value in fields.items()
+        ]
+        values.append(clone_id)
+        cur.execute(
+            f"UPDATE tts_voice_clones SET {', '.join(parts)}, "
+            "updated_at=datetime('now','localtime') WHERE clone_id=?",
+            values,
+        )
+        conn.commit()
+        conn.close()
+        return self.get_voice_clone(clone_id)
+
+    def delete_voice_clone(self, clone_id: str) -> bool:
+        if not self._initialized:
+            self._init_db()
+        if not self._initialized:
+            return False
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM tts_voice_clones WHERE clone_id=?", (clone_id,))
+        deleted = cur.rowcount > 0
+        conn.commit()
+        conn.close()
+        return deleted
+
+    def is_voice_clone_referenced(self, clone_id: str) -> bool:
+        if not self._initialized:
+            self._init_db()
+        if not self._initialized:
+            return False
+        key = f"mimo-clone:{clone_id}"
+        conn = self._get_conn()
+        cur = conn.cursor()
+        checks = (
+            ("SELECT 1 FROM tasks WHERE voice_type=? LIMIT 1", (key,)),
+            ("SELECT 1 FROM task_segments WHERE audio_voice_type=? LIMIT 1", (key,)),
+            ("SELECT 1 FROM task_assets WHERE voice_type=? LIMIT 1", (key,)),
+        )
+        referenced = False
+        for sql, values in checks:
+            cur.execute(sql, values)
+            if cur.fetchone():
+                referenced = True
+                break
+        conn.close()
+        return referenced
 
     def update_extract_path(self, task_id: str, extract_path: str) -> bool:
         if not self._initialized:
