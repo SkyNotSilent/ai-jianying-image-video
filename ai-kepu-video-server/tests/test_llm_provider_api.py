@@ -1,10 +1,12 @@
 import asyncio
+import logging
 
 import pytest
 import requests
 from fastapi import HTTPException
 
 from src.api import routes
+from src.text import provider_models
 from src.text.provider_models import ProviderModelSyncError, refresh_provider_models
 
 
@@ -232,7 +234,7 @@ def test_network_failure_is_sanitized_and_drops_exception_context():
 
 @pytest.mark.parametrize(
     ("status_code", "expected_kind", "expected_status"),
-    [(429, "rate_limit", 429), (503, "network", 502)],
+    [(429, "rate_limit", 429), (503, "invalid_response", 502)],
 )
 def test_http_failures_map_to_public_error_kinds(
     status_code, expected_kind, expected_status
@@ -263,6 +265,86 @@ def test_invalid_or_empty_model_payload_is_rejected(payload):
     assert error.value.kind == "invalid_response"
     assert error.value.status_code == 502
     assert error.value.__context__ is None
+
+
+def test_response_without_json_reader_is_invalid_response():
+    class MissingJsonResponse:
+        status_code = 200
+
+    with pytest.raises(ProviderModelSyncError) as error:
+        refresh_provider_models(
+            "mimo",
+            {"base_url": "https://mimo.test/v1", "api_key": "secret"},
+            request_get=lambda *_args, **_kwargs: MissingJsonResponse(),
+        )
+
+    assert error.value.kind == "invalid_response"
+    assert error.value.status_code == 502
+
+
+@pytest.mark.parametrize("failure_stage", ["request", "merge"])
+def test_unknown_internal_failure_is_safe_and_not_mislabeled_network(
+    failure_stage, monkeypatch, caplog
+):
+    markers = {
+        "INTERNAL-API-KEY-TOP-SECRET",
+        "INTERNAL-URL-TOP-SECRET",
+        "INTERNAL-HEADER-TOP-SECRET",
+        "INTERNAL-BODY-TOP-SECRET",
+    }
+
+    class InjectedInternalError(RuntimeError):
+        pass
+
+    class SensitiveResponse(FakeResponse):
+        headers = {"X-Private": "INTERNAL-HEADER-TOP-SECRET"}
+
+        def __repr__(self):
+            return (
+                "SensitiveResponse("
+                f"payload={self._payload!r}, headers={self.headers!r})"
+            )
+
+    def fail_internal(*_args, **_kwargs):
+        raise InjectedInternalError(
+            "INTERNAL-BODY-TOP-SECRET INTERNAL-API-KEY-TOP-SECRET"
+        )
+
+    if failure_stage == "merge":
+        monkeypatch.setattr(provider_models, "_merge_models", fail_internal)
+        request_get = lambda *_args, **_kwargs: SensitiveResponse(
+            {"data": [{"id": "mimo-v2.5-pro"}]}
+        )
+    else:
+        request_get = fail_internal
+
+    with caplog.at_level(logging.ERROR, logger="src.text.provider_models"):
+        with pytest.raises(ProviderModelSyncError) as error:
+            refresh_provider_models(
+                "mimo",
+                {
+                    "base_url": (
+                        "https://mimo.test/v1?token=INTERNAL-URL-TOP-SECRET"
+                    ),
+                    "api_key": "INTERNAL-API-KEY-TOP-SECRET",
+                },
+                request_get=request_get,
+            )
+
+    assert error.value.kind == "internal"
+    assert error.value.status_code == 500
+    assert error.value.correlation_id
+    assert error.value.correlation_id in str(error.value)
+    assert error.value.correlation_id in caplog.text
+    assert "InjectedInternalError" in caplog.text
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    assert_traceback_has_no_markers(
+        error.value, "/src/text/provider_models.py", markers
+    )
+    for marker in markers:
+        assert marker not in str(error.value)
+        assert marker not in caplog.text
 
 
 def test_provider_routes_return_catalog_fallback_and_404():

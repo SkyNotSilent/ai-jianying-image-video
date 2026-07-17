@@ -2,8 +2,10 @@
 
 from copy import deepcopy
 from dataclasses import dataclass
+import logging
 from typing import Any, Mapping
 from urllib.parse import urlparse, urlunparse
+import uuid
 
 import requests
 
@@ -13,14 +15,23 @@ from src.text.provider_catalog import (
     list_provider_models,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class ProviderModelSyncError(Exception):
     """A model synchronization failure safe to return through the API."""
 
-    def __init__(self, kind: str, public_message: str, status_code: int):
+    def __init__(
+        self,
+        kind: str,
+        public_message: str,
+        status_code: int,
+        correlation_id: str = "",
+    ):
         self.kind = kind
         self.public_message = public_message
         self.status_code = status_code
+        self.correlation_id = correlation_id
         super().__init__(public_message)
 
 
@@ -29,6 +40,7 @@ class _SafeSyncFailure:
     kind: str
     public_message: str
     status_code: int
+    correlation_id: str = ""
 
 
 _KNOWN_ENDPOINT_SUFFIXES = (
@@ -40,8 +52,35 @@ _KNOWN_ENDPOINT_SUFFIXES = (
 )
 
 
-def _failure(kind: str, public_message: str, status_code: int):
-    return _SafeSyncFailure(kind, public_message, status_code)
+def _failure(
+    kind: str,
+    public_message: str,
+    status_code: int,
+    correlation_id: str = "",
+):
+    return _SafeSyncFailure(kind, public_message, status_code, correlation_id)
+
+
+def _internal_failure(exception_type: str):
+    correlation_id = uuid.uuid4().hex[:12]
+    safe_exception_type = (
+        exception_type if str(exception_type).isidentifier() else "Exception"
+    )
+    try:
+        logger.error(
+            "Provider model sync internal failure correlation_id=%s "
+            "exception_type=%s",
+            correlation_id,
+            safe_exception_type,
+        )
+    except Exception:
+        pass
+    return _failure(
+        "internal",
+        f"模型列表同步失败，请稍后重试（参考编号：{correlation_id}）",
+        500,
+        correlation_id,
+    )
 
 
 def _base_parts(base_url: str):
@@ -245,12 +284,14 @@ def _refresh_provider_models_internal(
 
         try:
             response = request_get(models_url, headers=headers, timeout=20)
-        except Exception:
+        except requests.RequestException:
             return None, _failure(
                 "network",
                 "模型列表请求失败，请检查服务地址或稍后重试",
                 502,
             )
+        except Exception as exc:
+            return None, _internal_failure(type(exc).__name__)
 
         status_code = getattr(response, "status_code", 0)
         if status_code in {401, 403}:
@@ -267,12 +308,17 @@ def _refresh_provider_models_internal(
             or status_code >= 400
         ):
             return None, _failure(
-                "network", "模型列表请求失败，请稍后重试", 502
+                "invalid_response", "模型列表服务返回了无效状态", 502
             )
 
+        json_reader = getattr(response, "json", None)
+        if not callable(json_reader):
+            return None, _failure(
+                "invalid_response", "模型列表接口没有返回有效 JSON", 502
+            )
         try:
-            response_payload = response.json()
-        except Exception:
+            response_payload = json_reader()
+        except (TypeError, ValueError):
             return None, _failure(
                 "invalid_response", "模型列表接口没有返回有效 JSON", 502
             )
@@ -297,10 +343,8 @@ def _refresh_provider_models_internal(
                 list_provider_models(provider_id), account_models
             ),
         }, None
-    except Exception:
-        return None, _failure(
-            "network", "模型列表请求失败，请稍后重试", 502
-        )
+    except Exception as exc:
+        return None, _internal_failure(type(exc).__name__)
 
 
 def refresh_provider_models(
@@ -322,6 +366,9 @@ def refresh_provider_models(
     kind = failure.kind
     public_message = failure.public_message
     status_code = failure.status_code
+    correlation_id = failure.correlation_id
     failure = None
     result = None
-    raise ProviderModelSyncError(kind, public_message, status_code) from None
+    raise ProviderModelSyncError(
+        kind, public_message, status_code, correlation_id
+    ) from None
