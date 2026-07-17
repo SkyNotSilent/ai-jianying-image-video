@@ -3,6 +3,7 @@
 from copy import deepcopy
 from dataclasses import dataclass
 import logging
+import re
 from typing import Any, Mapping
 from urllib.parse import urlparse, urlunparse
 import uuid
@@ -10,8 +11,10 @@ import uuid
 import requests
 
 from src.text.provider_catalog import (
+    TEXT_MODES,
     canonical_model_id,
     get_provider,
+    get_model_mode,
     list_provider_models,
 )
 
@@ -49,6 +52,40 @@ _KNOWN_ENDPOINT_SUFFIXES = (
     "/completions",
     "/responses",
     "/messages",
+)
+
+_TEXT_MODEL_MODES = TEXT_MODES | {
+    "language",
+    "messages",
+    "responses",
+    "text",
+    "text-generation",
+    "text_generation",
+}
+_NON_TEXT_MODES = {
+    "asr",
+    "audio",
+    "audio_speech",
+    "audio_transcription",
+    "embeddings",
+    "embedding",
+    "image",
+    "image_generation",
+    "moderation",
+    "rerank",
+    "search",
+    "speech",
+    "stt",
+    "transcription",
+    "tts",
+}
+_NON_TEXT_MODEL_ID = re.compile(
+    r"(?:^|[-_.:/])(?:"
+    r"asr|audio|dall-?e|embed(?:ding|dings)?|flux|image|imagen|moderation|"
+    r"rerank|speech|stt|transcri(?:be|ption)|tts|voice[-_]?clone|"
+    r"voice[-_]?design"
+    r")(?:$|[-_.:/])",
+    re.IGNORECASE,
 )
 
 
@@ -152,6 +189,46 @@ def _adapter_for(provider_id: str, provider: Mapping[str, Any], draft: Mapping):
     return str(adapter), None
 
 
+def _declared_model_modes(item: Any) -> set[str]:
+    if not isinstance(item, Mapping):
+        return set()
+
+    modes = {
+        str(item.get(field) or "").strip().lower()
+        for field in ("mode", "model_type", "type")
+    }
+    capabilities = item.get("capabilities")
+    if isinstance(capabilities, Mapping):
+        modes.update(
+            str(name).strip().lower()
+            for name, enabled in capabilities.items()
+            if enabled is True
+        )
+    elif isinstance(capabilities, (list, tuple, set)):
+        modes.update(
+            str(capability or "").strip().lower()
+            for capability in capabilities
+        )
+    return {mode for mode in modes if mode and mode != "model"}
+
+
+def _is_text_account_model(
+    raw_id: str,
+    item: Any,
+    canonical_provider: str,
+) -> bool:
+    declared_modes = _declared_model_modes(item)
+    if declared_modes & _TEXT_MODEL_MODES:
+        return True
+    if declared_modes & _NON_TEXT_MODES:
+        return False
+
+    catalog_mode = get_model_mode(canonical_provider, raw_id)
+    if catalog_mode:
+        return catalog_mode in _TEXT_MODEL_MODES
+    return _NON_TEXT_MODEL_ID.search(raw_id) is None
+
+
 def _account_models(payload: Any, adapter: str, canonical_provider: str) -> list[dict]:
     if isinstance(payload, Mapping):
         raw_items = payload.get("models") if adapter == "ollama" else payload.get("data")
@@ -186,6 +263,8 @@ def _account_models(payload: Any, adapter: str, canonical_provider: str) -> list
 
         raw_id = str(raw_id or "").strip()
         if not raw_id:
+            continue
+        if not _is_text_account_model(raw_id, item, canonical_provider):
             continue
         model_id = canonical_model_id(canonical_provider, raw_id)
         models.setdefault(

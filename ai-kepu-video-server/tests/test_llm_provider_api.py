@@ -66,6 +66,35 @@ def test_openai_sync_normalizes_and_merges_account_models():
     assert result["models"][0]["sources"] == ["project", "account"]
 
 
+def test_openai_sync_only_returns_text_generation_models():
+    result = refresh_provider_models(
+        "mimo",
+        {"base_url": "https://mimo.test/v1", "api_key": "secret"},
+        request_get=lambda *_args, **_kwargs: FakeResponse(
+            {
+                "data": [
+                    {"id": "mimo-v2.5", "mode": "chat"},
+                    {"id": "mimo-v2.5-asr", "mode": "audio_transcription"},
+                    {"id": "mimo-v2.5-tts", "mode": "audio_speech"},
+                    {"id": "mimo-v2.5-tts-voiceclone"},
+                    {"id": "mimo-v2.5-tts-voicedesign"},
+                    {"id": "mimo-listen-v1", "model_type": "asr"},
+                    {"id": "mimo-next-preview"},
+                ]
+            }
+        ),
+    )
+
+    model_ids = {model["id"] for model in result["models"]}
+    assert "openai/mimo-v2.5" in model_ids
+    assert "openai/mimo-next-preview" in model_ids
+    assert "openai/mimo-v2.5-asr" not in model_ids
+    assert "openai/mimo-v2.5-tts" not in model_ids
+    assert "openai/mimo-v2.5-tts-voiceclone" not in model_ids
+    assert "openai/mimo-v2.5-tts-voicedesign" not in model_ids
+    assert "openai/mimo-listen-v1" not in model_ids
+
+
 def test_custom_anthropic_sync_uses_messages_provider_headers():
     calls = []
 

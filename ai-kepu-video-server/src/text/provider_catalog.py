@@ -208,6 +208,32 @@ def _model_map(model_cost: Optional[Mapping] = None) -> Mapping:
     return _load_litellm_model_cost() if model_cost is None else model_cost
 
 
+def get_model_mode(
+    provider_id: str,
+    model_id: str,
+    model_cost: Optional[Mapping] = None,
+) -> str:
+    """Return LiteLLM's declared mode for a provider model when known."""
+
+    provider_id = str(provider_id or "").strip().lower()
+    model_id = str(model_id or "").strip()
+    if not provider_id or not model_id:
+        return ""
+
+    target_id = canonical_model_id(provider_id, model_id)
+    for raw_model_id, metadata in _model_map(model_cost).items():
+        if not isinstance(raw_model_id, str) or not isinstance(metadata, Mapping):
+            continue
+        catalog_provider = str(
+            metadata.get("litellm_provider") or ""
+        ).strip().lower()
+        if catalog_provider != provider_id:
+            continue
+        if canonical_model_id(catalog_provider, raw_model_id) == target_id:
+            return str(metadata.get("mode") or "").strip().lower()
+    return ""
+
+
 def _catalog_models(model_cost: Optional[Mapping] = None) -> dict[str, list[dict]]:
     models_by_provider: dict[str, dict[str, dict]] = {}
     for raw_model_id, metadata in _model_map(model_cost).items():

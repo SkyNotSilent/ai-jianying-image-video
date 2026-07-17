@@ -1,4 +1,5 @@
 import { useEffect, useId, useMemo, useState } from 'react'
+import { ChevronDown } from 'lucide-react'
 import { closedComboboxState, preventComboboxOptionBlur } from '../lib/comboboxInteractions'
 import { mergeProviderModels, modelGroups } from '../lib/llmProviderCatalog'
 
@@ -95,6 +96,11 @@ export function ModelCombobox({ value, models = [], onChange }) {
         }}
         onKeyDown={handleKeyDown}
         onBlur={handleBlur}
+      />
+      <ChevronDown
+        className={`provider-combobox-chevron${open ? ' is-open' : ''}`}
+        size={16}
+        aria-hidden="true"
       />
       <div className="provider-combobox-list" id={listboxId} role="listbox" hidden={!open}>
         {groups.map(group => (
