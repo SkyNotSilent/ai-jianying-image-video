@@ -1,7 +1,10 @@
 """Local LiteLLM provider and model metadata registry."""
 
+import json
 from copy import deepcopy
 from functools import lru_cache
+from importlib.metadata import distribution
+from pathlib import Path
 from typing import Any, Mapping, Optional
 
 
@@ -172,12 +175,13 @@ _BASE_URL_PROVIDERS = {"custom", "mimo", "ollama"}
 
 @lru_cache(maxsize=1)
 def _load_litellm_model_cost() -> Mapping[str, Any]:
-    """Load LiteLLM's large catalog only when a caller needs it."""
+    """Load LiteLLM's bundled backup catalog without importing LiteLLM."""
 
     try:
-        import litellm
-
-        model_cost = litellm.model_cost
+        backup_path = distribution("litellm").locate_file(
+            "litellm/model_prices_and_context_window_backup.json"
+        )
+        model_cost = json.loads(Path(backup_path).read_text(encoding="utf-8"))
         if isinstance(model_cost, Mapping):
             return model_cost
     except Exception:
@@ -203,7 +207,7 @@ def _model_map(model_cost: Optional[Mapping] = None) -> Mapping:
 
 
 def _catalog_models(model_cost: Optional[Mapping] = None) -> dict[str, list[dict]]:
-    models_by_provider: dict[str, list[dict]] = {}
+    models_by_provider: dict[str, dict[str, dict]] = {}
     for raw_model_id, metadata in _model_map(model_cost).items():
         if not isinstance(raw_model_id, str) or not isinstance(metadata, Mapping):
             continue
@@ -212,16 +216,27 @@ def _catalog_models(model_cost: Optional[Mapping] = None) -> dict[str, list[dict
         if mode not in TEXT_MODES or not provider_id:
             continue
 
+        model_id = canonical_model_id(provider_id, raw_model_id)
         item = dict(metadata)
         item.update(
             {
-                "id": canonical_model_id(provider_id, raw_model_id),
+                "id": model_id,
                 "label": metadata.get("display_name") or raw_model_id,
                 "sources": ["catalog"],
             }
         )
-        models_by_provider.setdefault(provider_id, []).append(item)
-    return models_by_provider
+        provider_models = models_by_provider.setdefault(provider_id, {})
+        existing = provider_models.get(model_id)
+        if existing is None:
+            provider_models[model_id] = item
+        elif raw_model_id == model_id:
+            provider_models[model_id] = {**existing, **item}
+        else:
+            provider_models[model_id] = {**item, **existing}
+    return {
+        provider_id: list(provider_models.values())
+        for provider_id, provider_models in models_by_provider.items()
+    }
 
 
 def _models_by_provider(model_cost: Optional[Mapping] = None) -> dict[str, list[dict]]:
