@@ -19,6 +19,28 @@ class FakeResponse:
         return self._payload
 
 
+def production_traceback_locals(error, filename):
+    frames = []
+    traceback = error.__traceback__
+    while traceback:
+        frame = traceback.tb_frame
+        if frame.f_code.co_filename.endswith(filename):
+            frames.append((frame.f_code.co_name, dict(frame.f_locals)))
+        traceback = traceback.tb_next
+    return frames
+
+
+def assert_traceback_has_no_markers(error, filename, markers):
+    frames = production_traceback_locals(error, filename)
+    assert frames
+    rendered_locals = "\n".join(
+        f"{function}: {values!r}" for function, values in frames
+    )
+    for marker in markers:
+        assert marker not in rendered_locals
+    return frames
+
+
 def test_openai_sync_normalizes_and_merges_account_models():
     calls = []
 
@@ -110,6 +132,58 @@ def test_failed_sync_does_not_expose_secret_or_response_body():
     assert "TOP-SECRET" not in str(error.value)
     assert "URL-TOP-SECRET" not in str(error.value)
     assert "PRIVATE-HEADER" not in str(error.value)
+
+
+def test_sync_error_traceback_drops_all_sensitive_request_locals():
+    markers = {
+        "DRAFT-TOP-SECRET",
+        "URL-QUERY-TOP-SECRET",
+        "PRIVATE-HEADER-TOP-SECRET",
+        "RESPONSE-BODY-TOP-SECRET",
+    }
+
+    class SensitiveResponse(FakeResponse):
+        headers = {"X-Private": "PRIVATE-HEADER-TOP-SECRET"}
+
+        def __repr__(self):
+            return (
+                "SensitiveResponse("
+                f"payload={self._payload!r}, headers={self.headers!r})"
+            )
+
+    with pytest.raises(ProviderModelSyncError) as error:
+        refresh_provider_models(
+            "mimo",
+            {
+                "base_url": (
+                    "https://mimo.test/v1?token=URL-QUERY-TOP-SECRET"
+                ),
+                "api_key": "DRAFT-TOP-SECRET",
+            },
+            request_get=lambda *_args, **_kwargs: SensitiveResponse(
+                {"error": "RESPONSE-BODY-TOP-SECRET"}, 401
+            ),
+        )
+
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    frames = assert_traceback_has_no_markers(
+        error.value, "/src/text/provider_models.py", markers
+    )
+    public_frame = next(
+        values for function, values in frames
+        if function == "refresh_provider_models"
+    )
+    for local_name in (
+        "draft",
+        "request_get",
+        "base_url",
+        "api_key",
+        "headers",
+        "response",
+        "response_payload",
+    ):
+        assert public_frame.get(local_name) is None
 
 
 def test_malformed_url_is_rejected_without_exposing_query_values():
@@ -216,6 +290,62 @@ def test_refresh_route_maps_unsupported_provider_to_400():
 
     assert error.value.status_code == 400
     assert error.value.detail == "该生文服务商不支持同步模型列表"
+
+
+@pytest.mark.parametrize(
+    ("route_call", "payload_local"),
+    [
+        (
+            lambda payload: routes.refresh_llm_provider_models("mimo", payload),
+            "payload",
+        ),
+        (lambda payload: routes.fetch_config_models(payload), "config"),
+    ],
+)
+def test_route_error_traceback_unlinks_sync_error_and_drops_payload(
+    monkeypatch, route_call, payload_local
+):
+    markers = {
+        "ROUTE-API-KEY-TOP-SECRET",
+        "ROUTE-URL-TOP-SECRET",
+        "ROUTE-HEADER-TOP-SECRET",
+        "ROUTE-BODY-TOP-SECRET",
+    }
+
+    def fail_refresh(_provider_id, payload):
+        headers = {
+            "Authorization": f"Bearer {payload['api_key']}",
+            "X-Private": "ROUTE-HEADER-TOP-SECRET",
+        }
+        response_body = {"error": "ROUTE-BODY-TOP-SECRET"}
+        assert headers and response_body
+        raise ProviderModelSyncError("credentials", "safe detail", 401)
+
+    monkeypatch.setattr(routes, "refresh_provider_models", fail_refresh)
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            route_call(
+                {
+                    "base_url": (
+                        "https://route.test/v1?token=ROUTE-URL-TOP-SECRET"
+                    ),
+                    "api_key": "ROUTE-API-KEY-TOP-SECRET",
+                }
+            )
+        )
+
+    assert error.value.status_code == 401
+    assert error.value.detail == "safe detail"
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    frames = assert_traceback_has_no_markers(
+        error.value, "/src/api/routes.py", markers
+    )
+    route_frame = next(
+        values for function, values in frames
+        if function in {"refresh_llm_provider_models", "fetch_config_models"}
+    )
+    assert route_frame.get(payload_local) is None
 
 
 def test_refresh_route_delegates_to_sync_service(monkeypatch):

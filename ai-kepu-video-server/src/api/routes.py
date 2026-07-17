@@ -1230,12 +1230,20 @@ async def test_tts_config(request: Request, payload: dict = Body(...)):
 async def fetch_config_models(config: dict = Body(...)):
     """根据当前填写的 Base URL 和 API Key 拉取可选模型列表。"""
     protocol = (config.get("protocol") or "openai").lower()
+    result = None
+    error_status = None
+    error_detail = None
     try:
         result = refresh_provider_models("custom", config)
     except ProviderModelSyncError as exc:
+        error_status = exc.status_code
+        error_detail = exc.public_message
+    config = None
+    if error_status is not None:
+        result = None
         raise HTTPException(
-            status_code=exc.status_code, detail=exc.public_message
-        ) from exc
+            status_code=error_status, detail=error_detail
+        ) from None
 
     prefix = f"{protocol}/"
     models = []
@@ -1266,12 +1274,21 @@ async def get_llm_provider_models(provider_id: str):
 async def refresh_llm_provider_models(
     provider_id: str, payload: dict = Body(...)
 ):
+    result = None
+    error_status = None
+    error_detail = None
     try:
-        return refresh_provider_models(provider_id, payload)
+        result = refresh_provider_models(provider_id, payload)
     except ProviderModelSyncError as exc:
+        error_status = exc.status_code
+        error_detail = exc.public_message
+    payload = None
+    if error_status is not None:
+        result = None
         raise HTTPException(
-            status_code=exc.status_code, detail=exc.public_message
-        ) from exc
+            status_code=error_status, detail=error_detail
+        ) from None
+    return result
 
 
 @router.get("/render-config")
