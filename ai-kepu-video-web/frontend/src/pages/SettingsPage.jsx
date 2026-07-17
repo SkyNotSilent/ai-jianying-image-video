@@ -22,16 +22,20 @@ import {
   deleteVoiceClone,
   fetchConfigModels,
   getConfig,
+  getLlmProviderModels,
+  getLlmProviders,
   getVoiceClones,
   getVoices,
   previewVoice,
   previewVoiceClone,
   replaceVoiceCloneReference,
+  refreshLlmProviderModels,
   testTtsConfig,
   updateConfig,
   updateVoiceAvailability,
   updateVoiceClone,
 } from '../api/task'
+import { LlmProviderSettings } from '../components/LlmProviderSettings'
 import { VoicePicker } from '../components/VoicePicker'
 import { EmptyState, LoadingState } from '../components/StatusStates'
 import {
@@ -41,6 +45,15 @@ import {
   validateConfig,
   validateTtsTest,
 } from '../lib/settingsConfig'
+import {
+  buildProviderRefreshPayload,
+  chooseProviderModel,
+  fallbackProviders,
+  isLlmProviderReady,
+  mergeProviderModels,
+  normalizeProviders,
+  switchProviderDraft,
+} from '../lib/llmProviderCatalog'
 import { toast } from '../lib/toast'
 import { nextPreviewState, normalizeVoiceCatalog } from '../lib/voiceCatalog'
 import { normalizeMediaUrl } from '../utils/mediaUrl'
@@ -64,6 +77,10 @@ export function SettingsPage() {
   const [modelLoading, setModelLoading] = useState({ llm: false, image: false })
   const [modelOptions, setModelOptions] = useState({ llm: [], image: [] })
   const [form, setForm] = useState(() => normalizeConfig())
+  const [llmProviders, setLlmProviders] = useState([])
+  const [localModels, setLocalModels] = useState([])
+  const [accountModels, setAccountModels] = useState([])
+  const [llmSyncState, setLlmSyncState] = useState({ status: 'idle', message: '' })
   const [providerTab, setProviderTab] = useState('mimo')
   const [voices, setVoices] = useState([])
   const [clones, setClones] = useState([])
@@ -77,19 +94,58 @@ export function SettingsPage() {
   const previewTokenRef = useRef(0)
   const recorderRef = useRef(null)
   const recordingChunksRef = useRef([])
+  const llmDraftsRef = useRef({})
+  const localModelsRequestRef = useRef(0)
+  const syncRequestRef = useRef(0)
 
   const loadConfig = useCallback(async () => {
     setLoading(true)
     setTtsTestUrl('')
     setLoadError('')
     try {
-      const [config, catalog, cloneList] = await Promise.all([
+      const [config, catalog, cloneList, providerResult] = await Promise.all([
         getConfig(),
         getVoices({ include_disabled: true }),
         getVoiceClones({ include_hidden: true }),
+        getLlmProviders()
+          .then(data => ({ data, error: null }))
+          .catch(error => ({ data: null, error })),
       ])
       const normalized = normalizeConfig(config)
-      setForm(normalized)
+      let providers = normalizeProviders(providerResult.data)
+      if (!providers.length) {
+        if (providerResult.error) console.warn('生文服务商目录加载失败，使用当前配置回退', providerResult.error)
+        providers = fallbackProviders(normalized.llm)
+      } else if (!providers.some(provider => provider.id === normalized.llm.provider)) {
+        const synthetic = fallbackProviders(normalized.llm)
+        const knownIds = new Set(providers.map(provider => provider.id))
+        providers = [...synthetic.filter(provider => !knownIds.has(provider.id)), ...providers]
+      }
+
+      const currentProvider = providers.find(provider => provider.id === normalized.llm.provider)
+        || providers[0]
+      let initialModels = []
+      if (currentProvider?.id) {
+        try {
+          const result = await getLlmProviderModels(currentProvider.id)
+          initialModels = Array.isArray(result?.models) ? result.models : []
+        } catch (error) {
+          console.warn('本地生文模型列表加载失败', error)
+        }
+      }
+      const initialModel = chooseProviderModel(normalized.llm.model, currentProvider, initialModels)
+      const initialized = initialModel === normalized.llm.model
+        ? normalized
+        : { ...normalized, llm: { ...normalized.llm, model: initialModel } }
+
+      setForm(initialized)
+      setLlmProviders(providers)
+      setLocalModels(initialModels)
+      setAccountModels([])
+      setLlmSyncState({ status: 'idle', message: '' })
+      llmDraftsRef.current = initialized.llm.provider
+        ? { [initialized.llm.provider]: { ...initialized.llm, provider_options: { ...(initialized.llm.provider_options || {}) } } }
+        : {}
       setProviderTab(normalized.tts.provider)
       setVoices(normalizeVoiceCatalog(catalog))
       setClones(Array.isArray(cloneList) ? cloneList : [])
@@ -109,8 +165,21 @@ export function SettingsPage() {
     recorderRef.current?.stream?.getTracks?.().forEach(track => track.stop())
   }, [])
 
+  const selectedLlmProvider = useMemo(
+    () => llmProviders.find(provider => provider.id === form.llm.provider) || null,
+    [form.llm.provider, llmProviders],
+  )
+  const displayedLlmModels = useMemo(
+    () => mergeProviderModels(localModels, accountModels, form.llm.model),
+    [accountModels, form.llm.model, localModels],
+  )
+
   const readiness = useMemo(() => {
-    const llmReady = Boolean(form.llm.base_url && form.llm.api_key && form.llm.model)
+    const llmReady = Boolean(
+      selectedLlmProvider
+      && isLlmProviderReady(form.llm, selectedLlmProvider)
+      && form.llm.model?.trim(),
+    )
     const imageReady = Boolean(form.image.api_url && form.image.api_key && form.image.model)
     const doubaoEnabled = form.tts.enabled_providers.includes('doubao')
     const mimoEnabled = form.tts.enabled_providers.includes('mimo')
@@ -124,11 +193,87 @@ export function SettingsPage() {
       { label: '豆包 TTS', ready: doubaoReady, detail: doubaoEnabled ? (doubaoReady ? '已启用' : '配置不完整') : '未启用' },
       { label: 'MiMo TTS', ready: mimoReady, detail: mimoEnabled ? (mimoReady ? '已启用' : '配置不完整') : '未启用' },
     ]
-  }, [form])
+  }, [form, selectedLlmProvider])
 
   const updateSection = (section, key, value) => setForm(current => ({ ...current, [section]: { ...current[section], [key]: value } }))
   const updateTts = (key, value) => setForm(current => ({ ...current, tts: { ...current.tts, [key]: value } }))
   const updateMimo = (key, value) => setForm(current => ({ ...current, tts: { ...current.tts, mimo: { ...current.tts.mimo, [key]: value } } }))
+
+  const loadLlmProviderModels = useCallback(async (provider, { clear = true } = {}) => {
+    const requestId = ++localModelsRequestRef.current
+    if (clear) setLocalModels([])
+    try {
+      const result = await getLlmProviderModels(provider.id)
+      if (requestId !== localModelsRequestRef.current) return
+      const models = Array.isArray(result?.models) ? result.models : []
+      setLocalModels(models)
+      setForm(current => {
+        if (current.llm.provider !== provider.id) return current
+        const model = chooseProviderModel(current.llm.model, provider, models)
+        return model === current.llm.model
+          ? current
+          : { ...current, llm: { ...current.llm, model } }
+      })
+    } catch (error) {
+      if (requestId !== localModelsRequestRef.current) return
+      console.warn(`加载 ${provider.id} 本地模型列表失败`, error)
+    }
+  }, [])
+
+  const updateLlm = nextLlm => {
+    setForm(current => ({ ...current, llm: nextLlm }))
+  }
+
+  const selectLlmProvider = provider => {
+    if (!provider || provider.id === form.llm.provider) return
+    const switched = switchProviderDraft(llmDraftsRef.current, form.llm, provider)
+    llmDraftsRef.current = switched.drafts
+    syncRequestRef.current += 1
+    setAccountModels([])
+    setLlmSyncState({ status: 'idle', message: '' })
+    setForm(current => ({ ...current, llm: switched.llm }))
+    void loadLlmProviderModels(provider)
+  }
+
+  const syncLlmProviderModels = async () => {
+    if (!selectedLlmProvider) return
+    const provider = selectedLlmProvider
+    const requestId = ++syncRequestRef.current
+    setLlmSyncState({ status: 'loading', message: '' })
+    try {
+      const result = await refreshLlmProviderModels(
+        provider.id,
+        buildProviderRefreshPayload(form.llm, provider),
+      )
+      if (requestId !== syncRequestRef.current) return
+      const refreshed = Array.isArray(result?.models) ? result.models : []
+      const availableToAccount = refreshed.filter(model => model?.sources?.includes('account'))
+      const syncedModels = availableToAccount.length
+        ? availableToAccount
+        : refreshed.map(model => ({
+          ...model,
+          sources: [...new Set([...(model?.sources || []), 'account'])],
+        }))
+      setAccountModels(syncedModels)
+      setForm(current => {
+        if (current.llm.provider !== provider.id) return current
+        const model = chooseProviderModel(current.llm.model, provider, [...localModels, ...syncedModels])
+        return model === current.llm.model
+          ? current
+          : { ...current, llm: { ...current.llm, model } }
+      })
+      setLlmSyncState({
+        status: 'success',
+        message: `验证成功，已同步 ${syncedModels.length} 个当前账号模型。`,
+      })
+    } catch (error) {
+      if (requestId !== syncRequestRef.current) return
+      setLlmSyncState({
+        status: 'error',
+        message: error?.response?.data?.detail || '验证或同步失败，已保留当前模型列表和选择。',
+      })
+    }
+  }
 
   const refreshVoiceData = useCallback(async () => {
     const [catalog, cloneList] = await Promise.all([
@@ -365,7 +510,7 @@ export function SettingsPage() {
 
   const saveConfig = async () => {
     const normalized = normalizeConfig(form)
-    const issue = validateConfig(normalized)
+    const issue = validateConfig(normalized, selectedLlmProvider)
     if (issue) {
       toast.warning(issue)
       return
@@ -377,7 +522,15 @@ export function SettingsPage() {
         .filter(voice => voice.kind === 'preset' && voice.is_enabled)
         .map(voice => voice.id)
       await updateVoiceAvailability(enabledVoiceKeys)
-      setForm(normalizeConfig(saved || normalized))
+      const savedConfig = normalizeConfig(saved || normalized)
+      setForm(savedConfig)
+      llmDraftsRef.current = {
+        ...llmDraftsRef.current,
+        [savedConfig.llm.provider]: {
+          ...savedConfig.llm,
+          provider_options: { ...(savedConfig.llm.provider_options || {}) },
+        },
+      }
       toast.success('配置已保存')
     } catch (error) {
       console.error('保存 API 配置失败', error)
@@ -432,10 +585,15 @@ export function SettingsPage() {
 
         <div className="settings-console">
           <ConfigSection id="settings-llm" icon={MessageSquareText} title="生文模型" badge="LLM" description="LiteLLM 统一调用层，支持 OpenAI 或 Anthropic 兼容协议。">
-            <Field label="协议类型" wide group><Segmented value={form.llm.protocol} onChange={value => updateSection('llm', 'protocol', value)} options={[['openai', 'OpenAI 兼容'], ['anthropic', 'Anthropic 兼容']]} /></Field>
-            <Field label="API Base URL"><input value={form.llm.base_url} onChange={event => updateSection('llm', 'base_url', event.target.value)} placeholder="https://api.example.com/v1" /></Field>
-            <Field label="API Key"><input type="password" autoComplete="off" value={form.llm.api_key} onChange={event => updateSection('llm', 'api_key', event.target.value)} placeholder="sk-..." /></Field>
-            <ModelField type="llm" value={form.llm.model} options={modelOptions.llm} loading={modelLoading.llm} onChange={value => updateSection('llm', 'model', value)} onLoad={() => loadModels('llm')} />
+            <LlmProviderSettings
+              value={form.llm}
+              providers={llmProviders}
+              models={displayedLlmModels}
+              syncState={llmSyncState}
+              onChange={updateLlm}
+              onProviderChange={selectLlmProvider}
+              onSync={syncLlmProviderModels}
+            />
           </ConfigSection>
 
           <ConfigSection id="settings-image" icon={Image} title="Agnes 生图" badge="Image" description="真实调用 Agnes Image 2.1 Flash 图片生成接口。">

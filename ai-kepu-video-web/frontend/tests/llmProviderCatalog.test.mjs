@@ -4,12 +4,59 @@ import assert from 'node:assert/strict'
 import {
   applyProviderPreset,
   buildProviderRefreshPayload,
+  chooseProviderModel,
+  fallbackProviders,
   isLlmProviderReady,
   mergeProviderModels,
+  modelGroups,
   normalizeProviders,
   providerGroups,
   switchProviderDraft,
 } from '../src/lib/llmProviderCatalog.js'
+
+test('provider group output exposes stable listbox option keys', () => {
+  const groups = providerGroups(normalizeProviders({ providers: [
+    { id: 'mimo', name: '小米 MiMo', group: 'project', config_status: 'ready' },
+    { id: 'bedrock', name: 'Amazon Bedrock', group: 'all', config_status: 'advanced' },
+  ] }), '')
+
+  assert.deepEqual(groups.flatMap(group => group.items).map(item => item.optionKey), [
+    'provider:mimo', 'provider:bedrock',
+  ])
+  assert.equal(groups[1].items[0].statusLabel, '需要高级配置')
+})
+
+test('model groups put account availability before catalog-only models', () => {
+  const grouped = modelGroups([
+    { id: 'one', label: 'One', sources: ['catalog'] },
+    { id: 'two', label: 'Two', sources: ['catalog', 'account'] },
+  ], '')
+
+  assert.deepEqual(grouped.map(group => group.key), ['account', 'catalog'])
+})
+
+test('provider fallback keeps the current connection and custom escape hatch', () => {
+  const providers = fallbackProviders({
+    provider: 'legacy-gateway',
+    protocol: 'anthropic',
+    base_url: 'https://legacy.test',
+    model: 'legacy-model',
+  })
+
+  assert.deepEqual(providers.map(provider => provider.id), ['legacy-gateway', 'custom'])
+  assert.equal(providers[0].recommended_model, 'legacy-model')
+  assert.equal(providers[0].default_base_url, 'https://legacy.test')
+})
+
+test('model initialization preserves drafts and only falls back to an available option', () => {
+  const provider = { recommended_model: 'provider/recommended' }
+  const models = [{ id: 'provider/first' }, { id: 'provider/recommended' }]
+
+  assert.equal(chooseProviderModel('saved/model', provider, models), 'saved/model')
+  assert.equal(chooseProviderModel('', provider, models), 'provider/recommended')
+  assert.equal(chooseProviderModel('', provider, models.slice(0, 1)), 'provider/first')
+  assert.equal(chooseProviderModel('', provider, []), '')
+})
 
 test('groups and searches recommended, project, and complete providers', () => {
   const providers = normalizeProviders({ providers: [
@@ -185,4 +232,21 @@ test('checks registry credential fields across top-level and provider options', 
 
   assert.equal(isLlmProviderReady(ready, provider), true)
   assert.equal(isLlmProviderReady({ ...ready, provider_options: {} }, provider), false)
+})
+
+test('reads the custom model credential from the top-level LLM draft', () => {
+  const custom = {
+    credential_fields: [
+      { id: 'base_url', required: true },
+      { id: 'api_key', required: true },
+      { id: 'model', required: true },
+    ],
+  }
+
+  assert.equal(isLlmProviderReady({
+    base_url: 'https://custom.test',
+    api_key: 'key',
+    model: 'custom-model',
+    provider_options: {},
+  }, custom), true)
 })

@@ -4,7 +4,19 @@ const PROVIDER_GROUPS = [
   { key: 'all', label: '全部服务商' },
 ]
 
-const TOP_LEVEL_CREDENTIAL_FIELDS = new Set(['api_key', 'base_url'])
+const MODEL_GROUPS = [
+  { key: 'recommended', label: '推荐模型' },
+  { key: 'account', label: '当前账号可用' },
+  { key: 'catalog', label: '其他内置模型' },
+  { key: 'historical', label: '当前配置 / 历史模型' },
+]
+
+const PROVIDER_STATUS_LABELS = {
+  ready: '可直接配置',
+  advanced: '需要高级配置',
+}
+
+const TOP_LEVEL_CREDENTIAL_FIELDS = new Set(['api_key', 'base_url', 'model'])
 
 function cloneProviderOptions(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
@@ -36,6 +48,8 @@ export function normalizeProviders(payload = {}) {
       ...provider,
       id: String(provider.id).trim(),
       name: String(provider.name || provider.id).trim(),
+      optionKey: `provider:${String(provider.id).trim()}`,
+      statusLabel: PROVIDER_STATUS_LABELS[provider.config_status] || '',
       group: PROVIDER_GROUPS.some(group => group.key === provider.group) ? provider.group : 'all',
       credential_fields: Array.isArray(provider.credential_fields)
         ? provider.credential_fields.map(field => ({ ...field }))
@@ -44,6 +58,41 @@ export function normalizeProviders(payload = {}) {
         ? [...provider.allowed_provider_options]
         : [],
     }))
+}
+
+export function fallbackProviders(currentLlm = {}) {
+  const providerId = String(currentLlm?.provider || 'custom').trim() || 'custom'
+  const protocol = currentLlm?.protocol === 'anthropic' ? 'anthropic' : 'openai'
+  const custom = {
+    id: 'custom',
+    name: '自定义兼容接口',
+    group: 'all',
+    connection_mode: 'custom',
+    compatibility_protocol: protocol,
+    default_base_url: providerId === 'custom' ? currentLlm?.base_url || '' : '',
+    recommended_model: providerId === 'custom' ? currentLlm?.model || '' : '',
+    credential_fields: [
+      { id: 'base_url', label: 'Base URL', required: true, secret: false },
+      { id: 'api_key', label: 'API Key', required: true, secret: true },
+      { id: 'model', label: 'Model', required: true, secret: false },
+    ],
+    supports_live_models: true,
+    config_status: 'ready',
+  }
+  if (providerId === 'custom') return normalizeProviders({ providers: [custom] })
+
+  return normalizeProviders({ providers: [{
+    id: providerId,
+    name: `当前配置 · ${providerId}`,
+    group: 'project',
+    connection_mode: 'legacy',
+    compatibility_protocol: protocol,
+    default_base_url: currentLlm?.base_url || '',
+    recommended_model: currentLlm?.model || '',
+    credential_fields: [{ id: 'api_key', label: 'API Key', required: true, secret: true }],
+    supports_live_models: false,
+    config_status: 'advanced',
+  }, custom] })
 }
 
 export function providerGroups(providers = [], query = '') {
@@ -127,6 +176,47 @@ export function mergeProviderModels(local = [], account = [], currentModel = '')
       label: model.label || model.id,
       sources: [...model.sources],
     }))
+}
+
+export function modelGroups(models = [], query = '') {
+  const normalizedQuery = String(query || '').trim().toLocaleLowerCase()
+  const filtered = (Array.isArray(models) ? models : [])
+    .filter(model => model && String(model.id || '').trim())
+    .filter(model => {
+      if (!normalizedQuery) return true
+      return [model.id, model.label].some(value => (
+        String(value || '').toLocaleLowerCase().includes(normalizedQuery)
+      ))
+    })
+    .map(model => ({
+      ...model,
+      id: String(model.id).trim(),
+      label: String(model.label || model.id).trim(),
+      optionKey: `model:${String(model.id).trim()}`,
+    }))
+
+  const groupKey = model => {
+    const sources = modelSources(model.sources)
+    if (model.historical) return 'historical'
+    if (model.recommended || sources.includes('recommended')) return 'recommended'
+    if (sources.includes('account')) return 'account'
+    return 'catalog'
+  }
+
+  return MODEL_GROUPS.map(group => ({
+    ...group,
+    items: filtered.filter(model => groupKey(model) === group.key),
+  })).filter(group => group.items.length)
+}
+
+export function chooseProviderModel(currentModel = '', provider = {}, localModels = []) {
+  if (hasValue(currentModel)) return currentModel
+  const available = (Array.isArray(localModels) ? localModels : [])
+    .map(model => String(model?.id || '').trim())
+    .filter(Boolean)
+  const recommended = String(provider?.recommended_model || '').trim()
+  if (recommended && available.includes(recommended)) return recommended
+  return available[0] || ''
 }
 
 export function applyProviderPreset(_currentLlm = {}, provider = {}) {
