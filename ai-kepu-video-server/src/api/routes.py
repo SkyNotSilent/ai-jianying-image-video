@@ -9,7 +9,6 @@ import logging
 import hashlib
 import os
 import platform
-import requests
 import shutil
 import subprocess
 import tempfile
@@ -22,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
 from threading import Thread, Lock
-from urllib.parse import quote, urlparse, urlunparse
+from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Query, Body, UploadFile, File, Form, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
 from .models import (
@@ -43,6 +42,12 @@ from src.draft.voice_catalog import (
 from src.draft.voice_clone import VoiceCloneStore
 from src.draft.voice_preview import VoicePreviewService
 from src.draft.voiceover import VoiceOverGenerator
+from src.text.provider_catalog import (
+    get_provider,
+    list_llm_providers,
+    list_provider_models,
+)
+from src.text.provider_models import ProviderModelSyncError, refresh_provider_models
 from src.utils.path_fixer import (
     apply_content_info,
     apply_extract_path,
@@ -296,63 +301,6 @@ def _local_media_url_from_path(path: Optional[str], request: Request) -> Optiona
             continue
         return str(request.url_for("media", file_path=str(rel).replace(os.sep, "/")))
     return None
-
-
-def _build_models_url(base_url: str) -> str:
-    base_url = (base_url or "").strip()
-    if not base_url:
-        raise ValueError("请先填写 Base URL")
-
-    parsed = urlparse(base_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("Base URL 必须是 http:// 或 https:// 开头的完整地址")
-
-    path = (parsed.path or "").rstrip("/")
-    known_suffixes = (
-        "/chat/completions",
-        "/responses",
-        "/messages",
-        "/images/generations",
-        "/completions",
-    )
-    for suffix in known_suffixes:
-        if path.endswith(suffix):
-            path = path[: -len(suffix)].rstrip("/")
-            break
-
-    if not path.endswith("/models"):
-        path = f"{path}/models" if path else "/models"
-
-    return urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
-
-
-def _extract_model_options(payload) -> List[dict]:
-    if isinstance(payload, dict):
-        raw_items = payload.get("data") or payload.get("models") or payload.get("model_list") or []
-    elif isinstance(payload, list):
-        raw_items = payload
-    else:
-        raw_items = []
-
-    seen = set()
-    models = []
-    for item in raw_items:
-        if isinstance(item, str):
-            model_id = item
-            label = item
-        elif isinstance(item, dict):
-            model_id = item.get("id") or item.get("model") or item.get("name") or item.get("model_name")
-            label = item.get("display_name") or item.get("label") or item.get("name") or model_id
-        else:
-            continue
-
-        if not model_id or model_id in seen:
-            continue
-        seen.add(model_id)
-        models.append({"id": model_id, "label": label or model_id})
-
-    models.sort(key=lambda value: value["id"])
-    return models
 
 
 def _task_ratio(task) -> str:
@@ -1282,42 +1230,48 @@ async def test_tts_config(request: Request, payload: dict = Body(...)):
 async def fetch_config_models(config: dict = Body(...)):
     """根据当前填写的 Base URL 和 API Key 拉取可选模型列表。"""
     protocol = (config.get("protocol") or "openai").lower()
-    base_url = config.get("base_url") or config.get("api_url") or ""
-    api_key = config.get("api_key") or config.get("token") or ""
-    if not api_key:
-        raise HTTPException(status_code=400, detail="请先填写 API Key")
-
     try:
-        models_url = _build_models_url(base_url)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        result = refresh_provider_models("custom", config)
+    except ProviderModelSyncError as exc:
+        raise HTTPException(
+            status_code=exc.status_code, detail=exc.public_message
+        ) from exc
 
-    headers = {"Accept": "application/json"}
-    if protocol == "anthropic":
-        headers["x-api-key"] = api_key
-        headers["anthropic-version"] = "2023-06-01"
-    else:
-        headers["Authorization"] = f"Bearer {api_key}"
+    prefix = f"{protocol}/"
+    models = []
+    for model in result["models"]:
+        model_id = str(model.get("id") or "")
+        if model_id.startswith(prefix):
+            model_id = model_id[len(prefix):]
+        models.append({"id": model_id, "label": model.get("label") or model_id})
+    return {"models_url": result["models_url"], "models": models}
 
+
+@router.get("/config/llm-providers")
+async def get_llm_providers():
+    return {"providers": list_llm_providers()}
+
+
+@router.get("/config/llm-providers/{provider_id}/models")
+async def get_llm_provider_models(provider_id: str):
+    if not get_provider(provider_id):
+        raise HTTPException(status_code=404, detail="生文服务商不存在")
+    return {
+        "provider": provider_id,
+        "models": list_provider_models(provider_id),
+    }
+
+
+@router.post("/config/llm-providers/{provider_id}/models/refresh")
+async def refresh_llm_provider_models(
+    provider_id: str, payload: dict = Body(...)
+):
     try:
-        response = requests.get(models_url, headers=headers, timeout=20)
-    except requests.RequestException as e:
-        raise HTTPException(status_code=502, detail=f"模型列表请求失败: {e}")
-
-    if response.status_code >= 400:
-        message = response.text[:300] if response.text else response.reason
-        raise HTTPException(status_code=502, detail=f"模型列表请求失败 ({response.status_code}): {message}")
-
-    try:
-        payload = response.json()
-    except ValueError:
-        raise HTTPException(status_code=502, detail="模型列表接口没有返回 JSON")
-
-    models = _extract_model_options(payload)
-    if not models:
-        raise HTTPException(status_code=502, detail="没有从响应中解析到模型列表")
-
-    return {"models_url": models_url, "models": models}
+        return refresh_provider_models(provider_id, payload)
+    except ProviderModelSyncError as exc:
+        raise HTTPException(
+            status_code=exc.status_code, detail=exc.public_message
+        ) from exc
 
 
 @router.get("/render-config")
