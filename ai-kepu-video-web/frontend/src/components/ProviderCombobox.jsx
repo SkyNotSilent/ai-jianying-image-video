@@ -1,11 +1,10 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useState } from 'react'
+import { closedComboboxState, preventComboboxOptionBlur } from '../lib/comboboxInteractions'
 import { providerGroups } from '../lib/llmProviderCatalog'
 
 export function ProviderCombobox({ value, providers = [], onChange }) {
   const inputId = useId()
   const listboxId = `${inputId}-providers`
-  const inputRef = useRef(null)
-  const pointerSelectingRef = useRef(false)
   const selected = providers.find(provider => provider.id === value)
   const selectedLabel = selected?.name || value || ''
   const [query, setQuery] = useState(selectedLabel)
@@ -40,9 +39,7 @@ export function ProviderCombobox({ value, providers = [], onChange }) {
     if (!provider) return
     setQuery(provider.name)
     setOpen(false)
-    pointerSelectingRef.current = false
     onChange?.(provider)
-    inputRef.current?.focus()
   }
 
   const handleKeyDown = event => {
@@ -67,17 +64,14 @@ export function ProviderCombobox({ value, providers = [], onChange }) {
   }
 
   const handleBlur = () => {
-    window.setTimeout(() => {
-      if (pointerSelectingRef.current) return
-      setQuery(selectedLabel)
-      setOpen(false)
-    }, 0)
+    const closed = closedComboboxState(selectedLabel)
+    setQuery(closed.query)
+    setOpen(closed.open)
   }
 
   return (
     <div className="provider-combobox">
       <input
-        ref={inputRef}
         id={inputId}
         role="combobox"
         aria-label="生文服务商"
@@ -109,8 +103,7 @@ export function ProviderCombobox({ value, providers = [], onChange }) {
                 role="option"
                 aria-selected={provider.id === value}
                 key={provider.optionKey}
-                onPointerDown={() => { pointerSelectingRef.current = true }}
-                onPointerCancel={() => { pointerSelectingRef.current = false }}
+                onPointerDown={preventComboboxOptionBlur}
                 onClick={() => selectProvider(provider)}
                 onMouseEnter={() => setActiveIndex(options.findIndex(item => item.optionKey === provider.optionKey))}
               >

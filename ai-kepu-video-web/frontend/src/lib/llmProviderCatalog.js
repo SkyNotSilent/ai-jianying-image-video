@@ -110,7 +110,7 @@ export function providerGroups(providers = [], query = '') {
   })).filter(group => group.items.length)
 }
 
-export function mergeProviderModels(local = [], account = [], currentModel = '') {
+export function mergeProviderModels(local = [], account = [], currentModel = '', recommendedModel = '') {
   const merged = new Map()
   let insertionIndex = 0
 
@@ -162,6 +162,11 @@ export function mergeProviderModels(local = [], account = [], currentModel = '')
     merged.set(selectedModel, { ...merged.get(selectedModel), current: true })
   }
 
+  const recommendedId = String(recommendedModel || '').trim()
+  if (recommendedId && merged.has(recommendedId) && !merged.get(recommendedId).historical) {
+    merged.set(recommendedId, { ...merged.get(recommendedId), recommended: true })
+  }
+
   const rank = model => {
     if (model.historical) return 3
     if (model.recommended || model.sources.includes('recommended')) return 0
@@ -209,14 +214,26 @@ export function modelGroups(models = [], query = '') {
   })).filter(group => group.items.length)
 }
 
-export function chooseProviderModel(currentModel = '', provider = {}, localModels = []) {
-  if (hasValue(currentModel)) return currentModel
+export function chooseProviderModel(currentModel = '', provider = {}, localModels = [], initialization = {}) {
+  const presetModel = String(initialization?.presetModel || '').trim()
+  const untouchedFirstUsePreset = initialization?.firstUse === true
+    && String(currentModel || '').trim() === presetModel
+  if (hasValue(currentModel) && !untouchedFirstUsePreset) return currentModel
   const available = (Array.isArray(localModels) ? localModels : [])
     .map(model => String(model?.id || '').trim())
     .filter(Boolean)
   const recommended = String(provider?.recommended_model || '').trim()
   if (recommended && available.includes(recommended)) return recommended
   return available[0] || ''
+}
+
+export function isCurrentProviderRequest(request = {}, current = {}) {
+  return Number.isInteger(request.loadGeneration)
+    && Number.isInteger(request.requestId)
+    && Boolean(request.providerId)
+    && request.loadGeneration === current.loadGeneration
+    && request.requestId === current.requestId
+    && request.providerId === current.providerId
 }
 
 export function applyProviderPreset(_currentLlm = {}, provider = {}) {
@@ -238,9 +255,12 @@ export function switchProviderDraft(drafts = {}, currentLlm = {}, provider = {})
   if (currentProvider) nextDrafts[currentProvider] = cloneLlm(currentLlm)
 
   const restored = nextDrafts[provider.id]
+  const llm = restored ? cloneLlm(restored) : applyProviderPreset(currentLlm, provider)
   return {
     drafts: nextDrafts,
-    llm: restored ? cloneLlm(restored) : applyProviderPreset(currentLlm, provider),
+    llm,
+    firstUse: !restored,
+    presetModel: restored ? '' : llm.model,
   }
 }
 

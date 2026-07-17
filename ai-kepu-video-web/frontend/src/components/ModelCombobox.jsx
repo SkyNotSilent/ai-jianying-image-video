@@ -1,10 +1,10 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useState } from 'react'
+import { closedComboboxState, preventComboboxOptionBlur } from '../lib/comboboxInteractions'
 import { mergeProviderModels, modelGroups } from '../lib/llmProviderCatalog'
 
 export function ModelCombobox({ value, models = [], onChange }) {
   const inputId = useId()
   const listboxId = `${inputId}-models`
-  const pointerSelectingRef = useRef(false)
   const displayModels = useMemo(
     () => mergeProviderModels(models, [], value),
     [models, value],
@@ -43,7 +43,6 @@ export function ModelCombobox({ value, models = [], onChange }) {
     if (!model) return
     setQuery(model.label)
     setOpen(false)
-    pointerSelectingRef.current = false
     onChange?.(model.id)
   }
 
@@ -69,11 +68,9 @@ export function ModelCombobox({ value, models = [], onChange }) {
   }
 
   const handleBlur = () => {
-    window.setTimeout(() => {
-      if (pointerSelectingRef.current) return
-      setQuery(selectedLabel)
-      setOpen(false)
-    }, 0)
+    const closed = closedComboboxState(selectedLabel)
+    setQuery(closed.query)
+    setOpen(closed.open)
   }
 
   return (
@@ -110,8 +107,7 @@ export function ModelCombobox({ value, models = [], onChange }) {
                 role="option"
                 aria-selected={model.id === value}
                 key={model.optionKey}
-                onPointerDown={() => { pointerSelectingRef.current = true }}
-                onPointerCancel={() => { pointerSelectingRef.current = false }}
+                onPointerDown={preventComboboxOptionBlur}
                 onClick={() => selectModel(model)}
                 onMouseEnter={() => setActiveIndex(options.findIndex(item => item.optionKey === model.optionKey))}
               >

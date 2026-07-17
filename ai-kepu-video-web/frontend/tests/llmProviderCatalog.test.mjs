@@ -7,6 +7,7 @@ import {
   chooseProviderModel,
   fallbackProviders,
   isLlmProviderReady,
+  isCurrentProviderRequest,
   mergeProviderModels,
   modelGroups,
   normalizeProviders,
@@ -58,6 +59,25 @@ test('model initialization preserves drafts and only falls back to an available 
   assert.equal(chooseProviderModel('', provider, []), '')
 })
 
+test('first-use presets fall back only while the untouched preset is still selected', () => {
+  const provider = { recommended_model: 'provider/missing' }
+  const models = [{ id: 'provider/first' }]
+  const firstUse = { firstUse: true, presetModel: 'provider/missing' }
+
+  assert.equal(
+    chooseProviderModel('provider/missing', provider, models, firstUse),
+    'provider/first',
+  )
+  assert.equal(
+    chooseProviderModel('provider/manual', provider, models, firstUse),
+    'provider/manual',
+  )
+  assert.equal(
+    chooseProviderModel('provider/missing', provider, models, { ...firstUse, firstUse: false }),
+    'provider/missing',
+  )
+})
+
 test('groups and searches recommended, project, and complete providers', () => {
   const providers = normalizeProviders({ providers: [
     { id: 'deepseek', name: 'DeepSeek', group: 'recommended' },
@@ -98,6 +118,22 @@ test('orders models as recommended, account, catalog, then historical', () => {
   assert.deepEqual(models.map(model => model.id), ['recommended', 'account', 'catalog', 'legacy'])
 })
 
+test('marks the selected provider recommendation as the recommended group', () => {
+  const models = mergeProviderModels(
+    [
+      { id: 'provider/one', sources: ['catalog'] },
+      { id: 'provider/two', sources: ['catalog'] },
+    ],
+    [],
+    '',
+    'provider/two',
+  )
+
+  assert.equal(models[0].id, 'provider/two')
+  assert.equal(models[0].recommended, true)
+  assert.deepEqual(modelGroups(models).map(group => group.key), ['recommended', 'catalog'])
+})
+
 test('switching providers caches unsaved drafts and applies a first-use preset', () => {
   const current = { provider: 'mimo', api_key: 'mimo-key', model: 'openai/mimo-v2.5-pro' }
   const deepseek = {
@@ -112,6 +148,8 @@ test('switching providers caches unsaved drafts and applies a first-use preset',
   assert.equal(result.llm.provider, 'deepseek')
   assert.equal(result.llm.api_key, '')
   assert.equal(result.llm.model, 'deepseek/deepseek-chat')
+  assert.equal(result.firstUse, true)
+  assert.equal(result.presetModel, 'deepseek/deepseek-chat')
 })
 
 test('restores only the selected provider draft without leaking provider options', () => {
@@ -136,6 +174,7 @@ test('restores only the selected provider draft without leaking provider options
   const restored = switchProviderDraft(drafts, current, deepseek)
   assert.deepEqual(restored.llm.provider_options, { api_version: 'deepseek-only' })
   assert.deepEqual(restored.drafts.bedrock.provider_options, { aws_region_name: 'us-east-1' })
+  assert.equal(restored.firstUse, false)
 
   const firstUse = switchProviderDraft(restored.drafts, restored.llm, mimo)
   assert.deepEqual(firstUse.llm.provider_options, {})
@@ -249,4 +288,14 @@ test('reads the custom model credential from the top-level LLM draft', () => {
     model: 'custom-model',
     provider_options: {},
   }, custom), true)
+})
+
+test('provider responses apply only to the current load, request, and provider', () => {
+  const request = { loadGeneration: 3, requestId: 8, providerId: 'mimo' }
+
+  assert.equal(isCurrentProviderRequest({}, {}), false)
+  assert.equal(isCurrentProviderRequest(request, { ...request }), true)
+  assert.equal(isCurrentProviderRequest(request, { ...request, loadGeneration: 4 }), false)
+  assert.equal(isCurrentProviderRequest(request, { ...request, requestId: 9 }), false)
+  assert.equal(isCurrentProviderRequest(request, { ...request, providerId: 'deepseek' }), false)
 })
