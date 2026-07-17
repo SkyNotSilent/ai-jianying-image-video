@@ -82,7 +82,7 @@ npm run dev
 
 使用 **LiteLLM** 统一调用层，支持 100+ 模型提供商：
 
-- **服务商选择**：`llm.provider` 选择 LiteLLM provider 或项目扩展服务商；旧配置没有该字段时，会根据模型前缀、`base_url` 和 `protocol` 推断。
+- **服务商选择**：`llm.provider` 选择 LiteLLM provider 或项目扩展服务商；旧配置没有该字段时，先根据规范模型前缀、再根据 Registry 已识别的 `base_url` 推断，均无法识别则归入 `custom`。`protocol` 不参与 provider 推断，只在 `custom` 兼容路由中保留。
 - **模型 ID**：已知服务商的模型保存为 LiteLLM 规范 ID（如 `deepseek/deepseek-chat`、`openai/mimo-v2.5-pro`），不使用 UI 显示名称作为运行参数。
 - **自定义兼容接口**：`protocol` / `base_url` / `model` 仍可编辑，用于自定义 OpenAI-compatible 或 Anthropic-compatible 端点及旧配置兼容。
 - **Provider Registry**：默认目录来自当前安装的 LiteLLM 本地元数据，并合并项目覆盖与 MiMo 等扩展；账号可用模型的在线同步是可选能力，失败不影响本地目录和已选模型。
