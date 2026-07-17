@@ -8,6 +8,11 @@ import logging
 from pathlib import Path
 
 from src.config import Config
+from src.text.provider_catalog import (
+    get_provider,
+    sanitize_provider_options,
+    should_pass_base_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -19,14 +24,25 @@ class ArticleGenerator:
         self.config_path = Path(config_path)
         self.prompt_config = self._load_config()
         self.llm_config = Config.llm_config()
+        self.provider = self.llm_config.get("provider") or "custom"
         self.protocol = (self.llm_config.get("protocol") or "openai").lower()
         self.api_key = self.llm_config.get("api_key") or ""
         self.model = self.llm_config.get("model") or Config.LLM_MODEL or Config.ANTHROPIC_MODEL
-        self.api_url = self._build_api_url(
-            self.llm_config.get("base_url") or Config.LLM_BASE_URL or Config.ANTHROPIC_BASE_URL
+        self.base_url = (self.llm_config.get("base_url") or "").rstrip("/")
+        raw_provider_options = self.llm_config.get("provider_options") or {}
+        self.provider_options = (
+            raw_provider_options if isinstance(raw_provider_options, dict) else {}
         )
 
-        if not self.api_key:
+        provider_config = get_provider(self.provider)
+        credential_fields = (
+            provider_config.get("credential_fields", []) if provider_config else []
+        )
+        requires_api_key = provider_config is None or any(
+            field.get("id") == "api_key" and field.get("required")
+            for field in credential_fields
+        )
+        if requires_api_key and not self.api_key:
             raise ValueError("LLM API Key 未配置")
 
     def _load_config(self) -> dict:
@@ -39,21 +55,6 @@ class ArticleGenerator:
                 "user": "请为主题「{theme}」写一篇约{length}字的短视频旁白脚本。风格：{style}。要求：每个自然段只有1-2句话，语言口语化，适合配音朗读。直接输出脚本正文，不要标题和说明。",
             }
 
-    def _build_api_url(self, base_url: str) -> str:
-        base = (base_url or "").rstrip("/")
-        if self.protocol == "openai":
-            if base.endswith("/chat/completions"):
-                return base
-            if base.endswith("/v1"):
-                return f"{base}/chat/completions"
-            return f"{base}/v1/chat/completions"
-
-        if base.endswith("/messages"):
-            return base
-        if base.endswith("/v1"):
-            return f"{base}/messages"
-        return f"{base}/v1/messages"
-
     def _build_litellm_model(self) -> str:
         """根据协议和模型名构建 LiteLLM 的 model 参数。"""
         model = self.model
@@ -63,39 +64,42 @@ class ArticleGenerator:
             return f"anthropic/{model}"
         return f"openai/{model}"
 
-    def _build_litellm_base(self) -> str:
-        """构建 LiteLLM 的 api_base，去掉 /chat/completions 等端点路径，保留 /v1。"""
-        base = (self.api_url or "").rstrip("/")
-        for suffix in ("/chat/completions", "/messages"):
-            if base.endswith(suffix):
-                base = base[:-len(suffix)].rstrip("/")
-                break
-        return base
+    def _build_completion_kwargs(self, messages: list, max_tokens: int) -> dict:
+        """构建传给 LiteLLM 的 provider-aware completion 参数。"""
+        kwargs = {
+            "model": self._build_litellm_model(),
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "timeout": 90,
+        }
+        if self.api_key:
+            kwargs["api_key"] = self.api_key
+        if self.base_url and should_pass_base_url(self.provider, self.base_url):
+            kwargs["api_base"] = self.base_url
+        kwargs.update(
+            sanitize_provider_options(self.provider, self.provider_options)
+        )
+        return kwargs
 
     def _call_api(self, messages: list, max_tokens: int = 2048) -> str:
         import litellm
 
-        litellm_model = self._build_litellm_model()
-        kwargs = {
-            "model": litellm_model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "api_key": self.api_key,
-            "timeout": 90,
-        }
-        if self.api_url and self.protocol != "anthropic":
-            kwargs["api_base"] = self._build_litellm_base()
+        kwargs = self._build_completion_kwargs(messages, max_tokens)
 
         for attempt in range(3):
             try:
                 response = litellm.completion(**kwargs)
                 return response.choices[0].message.content
-            except Exception as e:
+            except Exception:
                 if attempt == 2:
-                    logger.error(f"API 调用失败，已重试 3 次: {e}")
+                    logger.error("API 调用失败，已重试 3 次")
                     raise
                 wait_time = (attempt + 1) * 5
-                logger.warning(f"API 调用失败（第 {attempt + 1} 次），{wait_time} 秒后重试: {e}")
+                logger.warning(
+                    "API 调用失败（第 %s 次），%s 秒后重试",
+                    attempt + 1,
+                    wait_time,
+                )
                 import time
                 time.sleep(wait_time)
 
