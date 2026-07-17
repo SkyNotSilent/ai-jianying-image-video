@@ -1,4 +1,4 @@
-import { Clapperboard, FileText, FolderKanban, Settings } from 'lucide-react'
+import { FileText, FolderKanban, Settings } from 'lucide-react'
 import { NavLink } from 'react-router'
 
 const navigationItems = [
@@ -11,7 +11,21 @@ export function BrandNavigation() {
   return (
     <header className="app-header">
       <NavLink className="brand" to="/" aria-label="InsightCut 首页">
-        <span className="brand-mark" aria-hidden="true"><Clapperboard size={20} strokeWidth={2.25} /></span>
+        <span className="brand-mark" aria-hidden="true">
+          <span className="brand-glow" />
+          <span className="brand-inner" />
+          <span className="brand-reticles">
+            <span className="brand-reticle-row">
+              <span className="brand-reticle-corner brand-reticle-tl" />
+              <span className="brand-reticle-corner brand-reticle-tr" />
+            </span>
+            <span className="brand-reticle-row">
+              <span className="brand-reticle-corner brand-reticle-bl" />
+              <span className="brand-reticle-corner brand-reticle-br" />
+            </span>
+          </span>
+          <span className="brand-dot" />
+        </span>
         <span>
           <strong>InsightCut</strong>
           <small>AI 视频工作台</small>
