@@ -1,5 +1,6 @@
 import logging
 import sys
+import traceback
 from types import SimpleNamespace
 
 import pytest
@@ -72,6 +73,23 @@ def test_custom_legacy_model_keeps_protocol_prefix(monkeypatch, tmp_path):
     assert kwargs["api_base"] == "https://private.test/v1"
 
 
+def test_non_custom_bare_model_is_not_protocol_prefixed(monkeypatch, tmp_path):
+    generator = make_generator(
+        monkeypatch,
+        tmp_path,
+        {
+            "provider": "deepseek",
+            "model": "deepseek-chat",
+            "api_key": "key",
+            "base_url": "https://api.deepseek.com",
+            "protocol": "openai",
+            "provider_options": {},
+        },
+    )
+
+    assert generator._build_completion_kwargs([], 100)["model"] == "deepseek-chat"
+
+
 def test_allowlisted_cloud_options_reach_litellm(monkeypatch, tmp_path):
     generator = make_generator(
         monkeypatch,
@@ -122,8 +140,21 @@ def test_retry_logs_do_not_expose_secrets(monkeypatch, tmp_path, caplog):
     monkeypatch.setattr("time.sleep", lambda _: None)
 
     with caplog.at_level(logging.WARNING, logger="src.text.generator"):
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError) as exc_info:
             generator._call_api([], 100)
 
+    error = exc_info.value
+    rendered_traceback = "".join(
+        traceback.format_exception(type(error), error, error.__traceback__)
+    )
+    rendered_context = str(error.__context__ or "")
+
     assert attempts == 3
+    assert str(error) == "LLM API 调用失败，请检查模型配置或稍后重试"
     assert secret not in caplog.text
+    assert secret not in str(error)
+    assert secret not in rendered_traceback
+    assert secret not in rendered_context
+    assert error.__context__ is None
+    assert error.__cause__ is None
+    assert error.__suppress_context__ is True

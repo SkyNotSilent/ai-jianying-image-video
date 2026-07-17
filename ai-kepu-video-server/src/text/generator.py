@@ -58,7 +58,7 @@ class ArticleGenerator:
     def _build_litellm_model(self) -> str:
         """根据协议和模型名构建 LiteLLM 的 model 参数。"""
         model = self.model
-        if "/" in model:
+        if "/" in model or self.provider != "custom":
             return model
         if self.protocol == "anthropic":
             return f"anthropic/{model}"
@@ -93,7 +93,7 @@ class ArticleGenerator:
             except Exception:
                 if attempt == 2:
                     logger.error("API 调用失败，已重试 3 次")
-                    raise
+                    break
                 wait_time = (attempt + 1) * 5
                 logger.warning(
                     "API 调用失败（第 %s 次），%s 秒后重试",
@@ -102,6 +102,8 @@ class ArticleGenerator:
                 )
                 import time
                 time.sleep(wait_time)
+
+        raise RuntimeError("LLM API 调用失败，请检查模型配置或稍后重试") from None
 
     def _extract_text(self, data: dict) -> str:
         """兼容 Anthropic Messages 与 OpenAI Chat Completions 的常见返回格式。"""
