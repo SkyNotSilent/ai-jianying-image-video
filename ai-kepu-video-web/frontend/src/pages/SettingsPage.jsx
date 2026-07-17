@@ -20,7 +20,6 @@ import { useNavigate } from 'react-router'
 import {
   createVoiceClone,
   deleteVoiceClone,
-  fetchConfigModels,
   getConfig,
   getLlmProviderModels,
   getLlmProviders,
@@ -35,13 +34,16 @@ import {
   updateVoiceAvailability,
   updateVoiceClone,
 } from '../api/task'
+import { AdvancedSettings } from '../components/AdvancedSettings'
 import { LlmProviderSettings } from '../components/LlmProviderSettings'
 import { VoicePicker } from '../components/VoicePicker'
 import { EmptyState, LoadingState } from '../components/StatusStates'
 import {
-  buildModelPayload,
+  AGNES_PRESET,
   normalizeConcurrency,
   normalizeConfig,
+  restoreAgnesPreset,
+  restoreMimoTechnicalPreset,
   validateConfig,
   validateTtsTest,
 } from '../lib/settingsConfig'
@@ -75,8 +77,6 @@ export function SettingsPage() {
   const [saving, setSaving] = useState(false)
   const [testingTts, setTestingTts] = useState(false)
   const [ttsTestUrl, setTtsTestUrl] = useState('')
-  const [modelLoading, setModelLoading] = useState({ llm: false, image: false })
-  const [modelOptions, setModelOptions] = useState({ llm: [], image: [] })
   const [form, setForm] = useState(() => normalizeConfig())
   const [llmProviders, setLlmProviders] = useState([])
   const [localModels, setLocalModels] = useState([])
@@ -536,36 +536,6 @@ export function SettingsPage() {
     }
   }
 
-  const loadModels = async type => {
-    const payload = buildModelPayload(type, form)
-    const isImage = type === 'image'
-    if (!payload.base_url?.trim()) {
-      toast.warning(isImage ? '请先填写生图 API URL' : '请先填写生文 Base URL')
-      return
-    }
-    if (!payload.api_key?.trim()) {
-      toast.warning(isImage ? '请先填写生图 API Key' : '请先填写生文 API Key')
-      return
-    }
-    setModelLoading(current => ({ ...current, [type]: true }))
-    try {
-      const result = await fetchConfigModels(payload)
-      const models = Array.isArray(result?.models) ? result.models : []
-      setModelOptions(current => ({ ...current, [type]: models }))
-      if (!models.length) {
-        toast.warning('没有获取到可选模型')
-      } else {
-        if (!form[type].model && models[0]?.id) updateSection(type, 'model', models[0].id)
-        toast.success(`已获取 ${models.length} 个模型`)
-      }
-    } catch (error) {
-      console.error('获取模型列表失败', error)
-      toast.error('获取模型列表失败')
-    } finally {
-      setModelLoading(current => ({ ...current, [type]: false }))
-    }
-  }
-
   const saveConfig = async () => {
     const normalized = normalizeConfig(form)
     const issue = validateConfig(normalized, selectedLlmProvider)
@@ -656,17 +626,26 @@ export function SettingsPage() {
           </ConfigSection>
 
           <ConfigSection id="settings-image" icon={Image} title="Agnes 生图" badge="Image" description="真实调用 Agnes Image 2.1 Flash 图片生成接口。">
-            <Field label="API URL"><input value={form.image.api_url} onChange={event => updateSection('image', 'api_url', event.target.value)} placeholder="https://apihub.agnes-ai.com/v1/images/generations" /></Field>
+            <Field label="服务商 / 模型" wide group><span className="settings-fixed-summary">Agnes / <code>{AGNES_PRESET.model}</code></span></Field>
             <Field label="API Key"><input type="password" autoComplete="off" value={form.image.api_key} onChange={event => updateSection('image', 'api_key', event.target.value)} placeholder="sk-..." /></Field>
-            <ModelField type="image" value={form.image.model} options={modelOptions.image} loading={modelLoading.image} onChange={value => updateSection('image', 'model', value)} onLoad={() => loadModels('image')} />
             <Field label="图片尺寸"><select value={form.image.size} onChange={event => updateSection('image', 'size', event.target.value)}>{IMAGE_SIZES.map(size => <option value={size} key={size}>{size === 'auto' ? '自动匹配画幅' : size}</option>)}</select></Field>
+            <AdvancedSettings
+              title="高级配置"
+              summary={`${form.image.api_url || '未设置 URL'} · ${form.image.model || '未设置模型'}`}
+              onRestore={() => setForm(current => restoreAgnesPreset(current))}
+            >
+              <label><span>API URL</span><input value={form.image.api_url} onChange={event => updateSection('image', 'api_url', event.target.value)} placeholder={AGNES_PRESET.api_url} /></label>
+              <label><span>Model</span><input value={form.image.model} onChange={event => updateSection('image', 'model', event.target.value)} placeholder={AGNES_PRESET.model} /></label>
+            </AdvancedSettings>
           </ConfigSection>
 
           <ConfigSection id="settings-tts" icon={Volume2} title="配音模型" badge="2 Providers" description="豆包与 MiMo 可同时启用；任务保存音色和参数快照。">
             <div className="settings-provider-switches"><label><input type="checkbox" checked={form.tts.enabled_providers.includes('doubao')} onChange={event => setProviderEnabled('doubao', event.target.checked)} /><span><strong>豆包 TTS</strong><small>预置 10 个本地音色</small></span></label><label><input type="checkbox" checked={form.tts.enabled_providers.includes('mimo')} onChange={event => setProviderEnabled('mimo', event.target.checked)} /><span><strong>小米 MiMo</strong><small>9 个预置 + 本地声音克隆</small></span></label></div>
             <Field label="新任务默认 Provider" wide group><Segmented value={form.tts.provider} onChange={value => form.tts.enabled_providers.includes(value) ? updateTts('provider', value) : toast.warning('请先启用该 Provider')} options={[['doubao', '豆包 TTS'], ['mimo', '小米 MiMo TTS']]} /></Field>
             <Field label="当前编辑" wide group><Segmented value={providerTab} onChange={setProviderTab} options={[['doubao', '豆包配置'], ['mimo', 'MiMo 配置']]} /></Field>
-            {providerTab === 'doubao' ? <DoubaoFields form={form} updateTts={updateTts} /> : <MimoFields form={form} updateMimo={updateMimo} />}
+            {providerTab === 'doubao'
+              ? <DoubaoFields form={form} updateTts={updateTts} />
+              : <MimoFields form={form} updateMimo={updateMimo} onRestore={() => setForm(current => restoreMimoTechnicalPreset(current))} />}
             <Field label="通用试听文本" wide><input value={form.tts.preview_text} maxLength="80" onChange={event => updateTts('preview_text', event.target.value)} placeholder="这是当前音色的试听。" /></Field>
             <div className="settings-voice-library">
               <header><div><strong>{providerTab === 'mimo' ? 'MiMo' : '豆包'} 音色库</strong><small>勾选后才会在生产页和预览页出现。</small></div><span><button type="button" onClick={() => setAllProviderVoices(true)}>全选</button><button type="button" onClick={() => setAllProviderVoices(false)}>清空</button></span></header>
@@ -717,25 +696,25 @@ function Segmented({ value, options, onChange }) {
   return <span className="settings-segmented">{options.map(([key, label]) => <button type="button" className={value === key ? 'is-active' : ''} onClick={() => onChange(key)} key={key}>{label}</button>)}</span>
 }
 
-function ModelField({ type, value, options, loading, onChange, onLoad }) {
-  return <Field label="Model" group><span className="settings-model-field"><input aria-label={`${type} 模型`} value={value} onChange={event => onChange(event.target.value)} placeholder={type === 'image' ? 'agnes-image-2.1-flash' : 'mimo-v2.5-pro'} /><button className="button button-secondary" type="button" disabled={loading} onClick={onLoad}>{loading ? <LoaderCircle className="spin" size={15} aria-hidden="true" /> : <RefreshCw size={15} aria-hidden="true" />}<span>{loading ? '获取中' : '获取列表'}</span></button></span>{options.length > 0 && <select aria-label={`${type} 模型列表`} value={value} onChange={event => onChange(event.target.value)}><option value="">请选择模型</option>{options.map(model => <option value={model.id} key={model.id}>{model.label}</option>)}</select>}</Field>
-}
-
 function DoubaoFields({ form, updateTts }) {
   return <>
     <Field label="豆包认证方式" wide group help="旧版在线合成使用 AppID / Access Token；火山新版语音接口也支持 API Key。"><Segmented value={form.tts.auth_method} onChange={value => updateTts('auth_method', value)} options={[['access_token', 'AppID / Access Token'], ['api_key', 'API Key']]} /></Field>
-    <Field label="API URL"><input value={form.tts.api_url} onChange={event => updateTts('api_url', event.target.value)} placeholder="https://openspeech.bytedance.com/api/v1/tts" /></Field>
     {form.tts.auth_method === 'access_token' ? <><Field label="App ID"><input value={form.tts.appid} onChange={event => updateTts('appid', event.target.value)} placeholder="豆包 TTS App ID" /></Field><Field label="Access Token"><input type="password" autoComplete="off" value={form.tts.token} onChange={event => updateTts('token', event.target.value)} placeholder="豆包 Access Token" /></Field></> : <Field label="API Key"><input type="password" autoComplete="off" value={form.tts.api_key} onChange={event => updateTts('api_key', event.target.value)} placeholder="火山控制台 API Key" /></Field>}
-    <Field label="Cluster" help="旧版在线合成通常为 volcano_tts。"><input value={form.tts.cluster} onChange={event => updateTts('cluster', event.target.value)} placeholder="volcano_tts" /></Field>
+    <AdvancedSettings title="高级配置" summary={`${form.tts.api_url || '未设置 URL'} · ${form.tts.cluster || '未设置 Cluster'}`}>
+      <label><span>API URL</span><input value={form.tts.api_url} onChange={event => updateTts('api_url', event.target.value)} placeholder="https://openspeech.bytedance.com/api/v1/tts" /></label>
+      <label><span>Cluster</span><input value={form.tts.cluster} onChange={event => updateTts('cluster', event.target.value)} placeholder="volcano_tts" /></label>
+    </AdvancedSettings>
   </>
 }
 
-function MimoFields({ form, updateMimo }) {
+function MimoFields({ form, updateMimo, onRestore }) {
   return <>
-    <Field label="Base URL"><input value={form.tts.mimo.base_url} onChange={event => updateMimo('base_url', event.target.value)} placeholder="https://token-plan-sgp.xiaomimimo.com/v1" /></Field>
     <Field label="API Key"><input type="password" autoComplete="off" value={form.tts.mimo.api_key} onChange={event => updateMimo('api_key', event.target.value)} placeholder="小米 Token Plan API Key" /></Field>
-    <Field label="Model"><input value={form.tts.mimo.model} onChange={event => updateMimo('model', event.target.value)} placeholder="mimo-v2.5-tts" /></Field>
-    <Field label="克隆 Model"><input value={form.tts.mimo.clone_model} onChange={event => updateMimo('clone_model', event.target.value)} placeholder="mimo-v2.5-tts-voiceclone" /></Field>
-    <Field label="音频格式" help="音频从 chat/completions 返回的 message.audio.data 读取。"><input value={form.tts.mimo.format} onChange={event => updateMimo('format', event.target.value)} placeholder="wav" /></Field>
+    <AdvancedSettings title="高级配置" summary={`${form.tts.mimo.model || '未设置 TTS 模型'} · ${form.tts.mimo.format || '未设置格式'}`} onRestore={onRestore}>
+      <label><span>Base URL</span><input value={form.tts.mimo.base_url} onChange={event => updateMimo('base_url', event.target.value)} placeholder="https://token-plan-sgp.xiaomimimo.com/v1" /></label>
+      <label><span>TTS Model</span><input value={form.tts.mimo.model} onChange={event => updateMimo('model', event.target.value)} placeholder="mimo-v2.5-tts" /></label>
+      <label><span>克隆 Model</span><input value={form.tts.mimo.clone_model} onChange={event => updateMimo('clone_model', event.target.value)} placeholder="mimo-v2.5-tts-voiceclone" /></label>
+      <label><span>音频格式</span><input value={form.tts.mimo.format} onChange={event => updateMimo('format', event.target.value)} placeholder="wav" /></label>
+    </AdvancedSettings>
   </>
 }

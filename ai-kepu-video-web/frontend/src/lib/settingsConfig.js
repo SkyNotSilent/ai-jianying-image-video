@@ -1,5 +1,10 @@
 import { isLlmProviderReady } from './llmProviderCatalog.js'
 
+export const AGNES_PRESET = {
+  api_url: 'https://apihub.agnes-ai.com/v1/images/generations',
+  model: 'agnes-image-2.1-flash',
+}
+
 export const MIMO_PRESET = {
   base_url: 'https://token-plan-sgp.xiaomimimo.com/v1',
   model: 'mimo-v2.5-tts',
@@ -103,6 +108,32 @@ export function normalizeConfig(config = {}) {
       ...(source.generation || {}),
       tts_concurrency: normalizeConcurrency(source.generation?.tts_concurrency),
       image_concurrency: 1,
+    },
+  }
+}
+
+export function restoreAgnesPreset(config) {
+  return {
+    ...config,
+    image: {
+      ...config.image,
+      ...AGNES_PRESET,
+    },
+  }
+}
+
+export function restoreMimoTechnicalPreset(config) {
+  return {
+    ...config,
+    tts: {
+      ...config.tts,
+      mimo: {
+        ...config.tts?.mimo,
+        base_url: MIMO_PRESET.base_url,
+        model: MIMO_PRESET.model,
+        clone_model: MIMO_PRESET.clone_model,
+        format: MIMO_PRESET.format,
+      },
     },
   }
 }

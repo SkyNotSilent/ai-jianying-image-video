@@ -2,11 +2,14 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  AGNES_PRESET,
   MIMO_PRESET,
   MIMO_VOICES,
   buildModelPayload,
   normalizeConfig,
   normalizeConcurrency,
+  restoreAgnesPreset,
+  restoreMimoTechnicalPreset,
   validateConfig,
 } from '../src/lib/settingsConfig.js'
 
@@ -82,6 +85,41 @@ test('builds current model discovery payloads', () => {
   assert.deepEqual(buildModelPayload('image', config), {
     protocol: 'openai', base_url: 'https://image.test', api_key: 'image-key',
   })
+})
+
+test('restores fixed Agnes endpoint and model without changing key or size', () => {
+  const config = normalizeConfig({ image: {
+    api_url: 'https://custom.test/images',
+    api_key: 'keep-key',
+    model: 'custom-image',
+    size: '1024x1024',
+  } })
+
+  const restored = restoreAgnesPreset(config)
+
+  assert.equal(restored.image.api_url, AGNES_PRESET.api_url)
+  assert.equal(restored.image.model, AGNES_PRESET.model)
+  assert.equal(restored.image.api_key, 'keep-key')
+  assert.equal(restored.image.size, '1024x1024')
+})
+
+test('restores MiMo technical fields without changing credentials or voice', () => {
+  const config = normalizeConfig({ tts: { mimo: {
+    api_key: 'keep-key',
+    default_voice: 'Mia',
+    base_url: 'bad',
+    model: 'bad',
+    clone_model: 'bad-clone',
+    format: 'mp3',
+  } } })
+
+  const restored = restoreMimoTechnicalPreset(config)
+
+  assert.equal(restored.tts.mimo.api_key, 'keep-key')
+  assert.equal(restored.tts.mimo.default_voice, 'Mia')
+  assert.equal(restored.tts.mimo.model, MIMO_PRESET.model)
+  assert.equal(restored.tts.mimo.clone_model, MIMO_PRESET.clone_model)
+  assert.equal(restored.tts.mimo.format, MIMO_PRESET.format)
 })
 
 test('validates the selected TTS provider and auth method', () => {
