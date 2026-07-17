@@ -163,6 +163,7 @@ def test_base_url_is_passed_for_compatible_and_overridden_known_providers():
     assert should_pass_base_url("custom", "") is True
     assert should_pass_base_url("mimo", "https://example.test/v1") is True
     assert should_pass_base_url("ollama", "http://localhost:11434") is True
+    assert should_pass_base_url("deepseek", "https://api.deepseek.com") is False
     assert should_pass_base_url("deepseek", "https://example.test/v1") is True
     assert should_pass_base_url("deepseek", "") is False
     assert should_pass_base_url("not-registered", "https://example.test/v1") is False

@@ -86,6 +86,7 @@ PROVIDER_OVERRIDES = {
     "deepseek": {
         "name": "DeepSeek",
         "group": "recommended",
+        "default_base_url": "https://api.deepseek.com",
         "config_status": "ready",
     },
     "dashscope": {
