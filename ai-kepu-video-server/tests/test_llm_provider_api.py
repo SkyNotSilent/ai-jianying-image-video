@@ -336,7 +336,8 @@ def test_unknown_internal_failure_is_safe_and_not_mislabeled_network(
     assert error.value.correlation_id
     assert error.value.correlation_id in str(error.value)
     assert error.value.correlation_id in caplog.text
-    assert "InjectedInternalError" in caplog.text
+    assert "unexpected_internal" in caplog.text
+    assert "InjectedInternalError" not in caplog.text
     assert error.value.__cause__ is None
     assert error.value.__context__ is None
     assert_traceback_has_no_markers(
@@ -345,6 +346,51 @@ def test_unknown_internal_failure_is_safe_and_not_mislabeled_network(
     for marker in markers:
         assert marker not in str(error.value)
         assert marker not in caplog.text
+
+
+def test_dynamic_secret_exception_class_name_is_never_logged(
+    monkeypatch, caplog
+):
+    class_name_marker = "DYNAMIC_EXCEPTION_CLASS_TOP_SECRET"
+    message_marker = "DYNAMIC_EXCEPTION_MESSAGE_TOP_SECRET"
+    api_key_marker = "DYNAMIC_EXCEPTION_API_KEY_TOP_SECRET"
+    url_marker = "DYNAMIC_EXCEPTION_URL_TOP_SECRET"
+    secret_exception = type(class_name_marker, (RuntimeError,), {})
+
+    def fail_merge(*_args, **_kwargs):
+        raise secret_exception(message_marker)
+
+    monkeypatch.setattr(provider_models, "_merge_models", fail_merge)
+    with caplog.at_level(logging.ERROR, logger="src.text.provider_models"):
+        with pytest.raises(ProviderModelSyncError) as error:
+            refresh_provider_models(
+                "mimo",
+                {
+                    "base_url": f"https://mimo.test/v1?token={url_marker}",
+                    "api_key": api_key_marker,
+                },
+                request_get=lambda *_args, **_kwargs: FakeResponse(
+                    {"data": [{"id": "mimo-v2.5-pro"}]}
+                ),
+            )
+
+    markers = {
+        class_name_marker,
+        message_marker,
+        api_key_marker,
+        url_marker,
+    }
+    assert error.value.kind == "internal"
+    assert error.value.correlation_id in caplog.text
+    assert "unexpected_internal" in caplog.text
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    assert_traceback_has_no_markers(
+        error.value, "/src/text/provider_models.py", markers
+    )
+    for marker in markers:
+        assert marker not in caplog.text
+        assert marker not in str(error.value)
 
 
 def test_provider_routes_return_catalog_fallback_and_404():

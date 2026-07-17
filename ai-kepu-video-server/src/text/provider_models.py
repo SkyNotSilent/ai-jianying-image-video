@@ -61,17 +61,12 @@ def _failure(
     return _SafeSyncFailure(kind, public_message, status_code, correlation_id)
 
 
-def _internal_failure(exception_type: str):
+def _internal_failure():
     correlation_id = uuid.uuid4().hex[:12]
-    safe_exception_type = (
-        exception_type if str(exception_type).isidentifier() else "Exception"
-    )
     try:
         logger.error(
-            "Provider model sync internal failure correlation_id=%s "
-            "exception_type=%s",
+            "Provider model sync failure=unexpected_internal correlation_id=%s",
             correlation_id,
-            safe_exception_type,
         )
     except Exception:
         pass
@@ -290,8 +285,8 @@ def _refresh_provider_models_internal(
                 "模型列表请求失败，请检查服务地址或稍后重试",
                 502,
             )
-        except Exception as exc:
-            return None, _internal_failure(type(exc).__name__)
+        except Exception:
+            return None, _internal_failure()
 
         status_code = getattr(response, "status_code", 0)
         if status_code in {401, 403}:
@@ -343,8 +338,8 @@ def _refresh_provider_models_internal(
                 list_provider_models(provider_id), account_models
             ),
         }, None
-    except Exception as exc:
-        return None, _internal_failure(type(exc).__name__)
+    except Exception:
+        return None, _internal_failure()
 
 
 def refresh_provider_models(
