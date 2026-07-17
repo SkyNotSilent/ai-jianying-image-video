@@ -27,6 +27,25 @@ test('provider group output exposes stable listbox option keys', () => {
   assert.equal(groups[1].items[0].statusLabel, '需要高级配置')
 })
 
+test('Azure stays advanced and cannot report ready without runtime deployment mapping', () => {
+  const [azure] = normalizeProviders({ providers: [{
+    id: 'azure',
+    name: 'Azure OpenAI',
+    group: 'all',
+    config_status: 'advanced',
+    credential_fields: [
+      { id: 'api_key', required: true },
+      { id: 'api_version', required: true },
+    ],
+  }] })
+
+  assert.equal(azure.statusLabel, '需要高级配置')
+  assert.equal(isLlmProviderReady({
+    api_key: 'key',
+    provider_options: { api_version: '2025-01-01' },
+  }, azure), false)
+})
+
 test('model groups put account availability before catalog-only models', () => {
   const grouped = modelGroups([
     { id: 'one', label: 'One', sources: ['catalog'] },

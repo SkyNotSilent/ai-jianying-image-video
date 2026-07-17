@@ -6,6 +6,7 @@
 import json
 import logging
 from pathlib import Path
+import time
 
 from src.config import Config
 from src.text.provider_catalog import (
@@ -15,6 +16,37 @@ from src.text.provider_catalog import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _SafeLlmFailure:
+    """Traceback-free marker returned across the credential-safe boundary."""
+
+
+_SAFE_LLM_FAILURE = _SafeLlmFailure()
+
+
+def _run_completion_with_retries(completion, kwargs):
+    """Use sensitive request state internally and return only safe values."""
+
+    for attempt in range(3):
+        try:
+            response = completion(**kwargs)
+            return response.choices[0].message.content, None
+        except Exception:
+            if attempt == 2:
+                logger.error("API 调用失败，已重试 3 次")
+                return None, _SAFE_LLM_FAILURE
+            wait_time = (attempt + 1) * 5
+            logger.warning(
+                "API 调用失败（第 %s 次），%s 秒后重试",
+                attempt + 1,
+                wait_time,
+            )
+            time.sleep(wait_time)
+
+
+def _raise_safe_llm_failure():
+    raise RuntimeError("LLM API 调用失败，请检查模型配置或稍后重试") from None
 
 
 class ArticleGenerator:
@@ -85,25 +117,22 @@ class ArticleGenerator:
         import litellm
 
         kwargs = self._build_completion_kwargs(messages, max_tokens)
+        content, failure = _run_completion_with_retries(
+            litellm.completion, kwargs
+        )
 
-        for attempt in range(3):
-            try:
-                response = litellm.completion(**kwargs)
-                return response.choices[0].message.content
-            except Exception:
-                if attempt == 2:
-                    logger.error("API 调用失败，已重试 3 次")
-                    break
-                wait_time = (attempt + 1) * 5
-                logger.warning(
-                    "API 调用失败（第 %s 次），%s 秒后重试",
-                    attempt + 1,
-                    wait_time,
-                )
-                import time
-                time.sleep(wait_time)
-
-        raise RuntimeError("LLM API 调用失败，请检查模型配置或稍后重试") from None
+        # The public exception traceback includes this frame. Clear every
+        # credential-bearing reference before crossing that boundary.
+        self = None
+        messages = None
+        max_tokens = None
+        litellm = None
+        kwargs = None
+        if failure is not None:
+            content = None
+            failure = None
+            _raise_safe_llm_failure()
+        return content
 
     def _extract_text(self, data: dict) -> str:
         """兼容 Anthropic Messages 与 OpenAI Chat Completions 的常见返回格式。"""
@@ -155,10 +184,20 @@ class ArticleGenerator:
 
         combined_prompt = f"{system_prompt}\n\n{user_prompt}" if system_prompt else user_prompt
 
-        article = self._call_api(
-            messages=[{"role": "user", "content": combined_prompt}],
-            max_tokens=2048,
-        )
+        article = None
+        failure = None
+        try:
+            article = self._call_api(
+                messages=[{"role": "user", "content": combined_prompt}],
+                max_tokens=2048,
+            )
+        except RuntimeError:
+            failure = _SAFE_LLM_FAILURE
+        if failure is not None:
+            self = None
+            article = None
+            failure = None
+            _raise_safe_llm_failure()
         logger.info(f"文章生成成功，长度: {len(article)} 字")
         return article
 
@@ -178,10 +217,20 @@ class ArticleGenerator:
 旁白分段：
 {segments_text}"""
 
-        text = self._call_api(
-            messages=[{"role": "user", "content": user_prompt}],
-            max_tokens=1024,
-        )
+        text = None
+        failure = None
+        try:
+            text = self._call_api(
+                messages=[{"role": "user", "content": user_prompt}],
+                max_tokens=1024,
+            )
+        except RuntimeError:
+            failure = _SAFE_LLM_FAILURE
+        if failure is not None:
+            self = None
+            text = None
+            failure = None
+            _raise_safe_llm_failure()
 
         lines = [l.strip() for l in text.strip().splitlines() if l.strip()]
         while len(lines) < len(segments):

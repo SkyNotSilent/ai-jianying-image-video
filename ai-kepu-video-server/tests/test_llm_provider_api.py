@@ -59,6 +59,7 @@ def test_openai_sync_normalizes_and_merges_account_models():
     assert calls[0][1]["headers"]["Authorization"] == "Bearer secret"
     assert calls[0][1]["timeout"] == 20
     assert result["provider"] == "mimo"
+    assert result["synced"] is True
     assert result["models_url"] == "https://mimo.test/v1/models"
     assert result["models"][0]["id"] == "openai/mimo-v2.5-pro"
     assert result["models"][0]["label"] == "MiMo V2.5 Pro"
@@ -478,7 +479,7 @@ def test_route_error_traceback_unlinks_sync_error_and_drops_payload(
 
 def test_refresh_route_delegates_to_sync_service(monkeypatch):
     calls = []
-    expected = {"provider": "mimo", "models": []}
+    expected = {"provider": "mimo", "models": [], "synced": True}
 
     def fake_refresh(provider_id, payload):
         calls.append((provider_id, payload))
@@ -493,6 +494,7 @@ def test_refresh_route_delegates_to_sync_service(monkeypatch):
     )
 
     assert result is expected
+    assert result["synced"] is True
     assert calls == [
         (
             "mimo",

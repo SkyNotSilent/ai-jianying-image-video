@@ -81,6 +81,7 @@ PROVIDER_OVERRIDES = {
     "anthropic": {
         "name": "Anthropic",
         "group": "recommended",
+        "compatibility_protocol": "anthropic",
         "config_status": "ready",
     },
     "deepseek": {
@@ -130,7 +131,7 @@ PROVIDER_OVERRIDES = {
             },
         ],
         "allowed_provider_options": ["api_version"],
-        "config_status": "ready",
+        "config_status": "advanced",
     },
     "bedrock": {
         "name": "Amazon Bedrock",

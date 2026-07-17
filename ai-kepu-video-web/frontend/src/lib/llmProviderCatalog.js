@@ -284,6 +284,7 @@ export function buildProviderRefreshPayload(llm = {}, provider = {}) {
 }
 
 export function isLlmProviderReady(llm = {}, provider = {}) {
+  if (provider?.config_status === 'advanced') return false
   const providerOptions = cloneProviderOptions(llm?.provider_options)
   const credentialFields = Array.isArray(provider?.credential_fields) ? provider.credential_fields : []
 

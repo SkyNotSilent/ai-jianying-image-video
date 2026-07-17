@@ -4,6 +4,11 @@
  */
 
 import axios from 'axios'
+import {
+  safeApiLogArgs,
+  safeApiRequestLogArgs,
+  toSafeApiError,
+} from '../lib/apiErrorSafety'
 import { toast } from '../lib/toast'
 
 // 从环境变量读取 API 地址
@@ -27,32 +32,34 @@ request.interceptors.request.use(
     //   config.headers.Authorization = `Bearer ${token}`
     // }
 
-    console.log('[API Request]', config.method.toUpperCase(), config.url)
+    console.log(...safeApiRequestLogArgs('[API Request]', config))
     return config
   },
   error => {
-    console.error('[API Request Error]', error)
-    return Promise.reject(error)
+    const safeError = toSafeApiError(error)
+    console.error(...safeApiLogArgs('[API Request Error]', safeError))
+    return Promise.reject(safeError)
   }
 )
 
 // 响应拦截器
 request.interceptors.response.use(
   response => {
-    console.log('[API Response]', response.config.url, response.status)
+    console.log(...safeApiRequestLogArgs('[API Response]', response.config, response.status))
     return response.data
   },
   error => {
-    console.error('[API Response Error]', error)
+    const safeError = toSafeApiError(error)
+    console.error(...safeApiLogArgs('[API Response Error]', safeError))
 
     // 网络错误
-    if (!error.response) {
+    if (!safeError.response) {
       toast.error('网络异常，请检查连接')
-      return Promise.reject(new Error('网络异常'))
+      return Promise.reject(safeError)
     }
 
     // HTTP 错误
-    const { status, data } = error.response
+    const { status, data } = safeError.response
 
     switch (status) {
       case 404:
@@ -68,7 +75,7 @@ request.interceptors.response.use(
         toast.error(data?.detail || '请求失败')
     }
 
-    return Promise.reject(error)
+    return Promise.reject(safeError)
   }
 )
 

@@ -132,6 +132,14 @@ def test_special_credentials_and_option_allowlist_are_declared():
     ) == {"aws_region_name": "us-east-1"}
 
 
+def test_azure_requires_advanced_configuration_and_anthropic_uses_native_protocol():
+    azure = get_provider("azure", FAKE_MODELS)
+    anthropic = get_provider("anthropic", FAKE_MODELS)
+
+    assert azure["config_status"] == "advanced"
+    assert anthropic["compatibility_protocol"] == "anthropic"
+
+
 def test_inference_prefers_model_prefix_then_known_base_url():
     assert infer_provider({"model": "deepseek/deepseek-chat"}) == "deepseek"
     assert (

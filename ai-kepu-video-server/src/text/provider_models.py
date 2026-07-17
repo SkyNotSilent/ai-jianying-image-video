@@ -333,6 +333,7 @@ def _refresh_provider_models_internal(
 
         return {
             "provider": provider_id,
+            "synced": True,
             "models_url": models_url,
             "models": _merge_models(
                 list_provider_models(provider_id), account_models
