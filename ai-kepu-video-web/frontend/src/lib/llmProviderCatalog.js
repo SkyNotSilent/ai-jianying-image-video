@@ -155,14 +155,9 @@ export function switchProviderDraft(drafts = {}, currentLlm = {}, provider = {})
 }
 
 export function buildProviderRefreshPayload(llm = {}, provider = {}) {
-  const allowedOptionIds = new Set([
-    ...(Array.isArray(provider.allowed_provider_options) ? provider.allowed_provider_options : []),
-    ...(Array.isArray(provider.credential_fields)
-      ? provider.credential_fields
-        .map(field => field?.id)
-        .filter(id => id && !TOP_LEVEL_CREDENTIAL_FIELDS.has(id))
-      : []),
-  ])
+  const allowedOptionIds = new Set(
+    Array.isArray(provider.allowed_provider_options) ? provider.allowed_provider_options : [],
+  )
   const currentOptions = cloneProviderOptions(llm?.provider_options)
   const providerOptions = Object.fromEntries(
     Object.entries(currentOptions).filter(([id]) => allowedOptionIds.has(id)),

@@ -128,6 +128,7 @@ test('builds a provider refresh payload from the unsaved draft and allowed optio
     id: 'azure',
     compatibility_protocol: 'openai',
     default_base_url: 'https://azure.test',
+    allowed_provider_options: ['api_version'],
     credential_fields: [
       { id: 'api_key', required: true },
       { id: 'api_version', required: true },
@@ -142,6 +143,29 @@ test('builds a provider refresh payload from the unsaved draft and allowed optio
     model: 'azure/deployment',
     provider_options: { api_version: '2025-01-01' },
   })
+})
+
+test('does not promote custom credential fields into provider options', () => {
+  const payload = buildProviderRefreshPayload({
+    provider: 'custom',
+    protocol: 'anthropic',
+    base_url: 'https://custom.test',
+    api_key: 'custom-key',
+    model: 'custom-model',
+    provider_options: { model: 'must-not-leak', stale: 'drop-me' },
+  }, {
+    id: 'custom',
+    compatibility_protocol: 'openai',
+    allowed_provider_options: [],
+    credential_fields: [
+      { id: 'base_url', required: true },
+      { id: 'api_key', required: true },
+      { id: 'model', required: true },
+    ],
+  })
+
+  assert.equal(payload.model, 'custom-model')
+  assert.deepEqual(payload.provider_options, {})
 })
 
 test('checks registry credential fields across top-level and provider options', () => {
