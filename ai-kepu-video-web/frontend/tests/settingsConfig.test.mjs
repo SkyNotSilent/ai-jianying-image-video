@@ -12,7 +12,14 @@ import {
 
 test('normalizes a partial config without dropping provider fields', () => {
   const config = normalizeConfig({
-    llm: { protocol: 'anthropic', base_url: 'https://llm.test', api_key: 'llm-key', model: 'claude' },
+    llm: {
+      provider: 'anthropic',
+      protocol: 'anthropic',
+      base_url: 'https://llm.test',
+      api_key: 'llm-key',
+      model: 'claude',
+      provider_options: { api_version: '2025-01-01' },
+    },
     image: { api_url: 'https://image.test', api_key: 'image-key', model: 'agnes', size: '1024x1024' },
     tts: {
       provider: 'mimo',
@@ -28,7 +35,9 @@ test('normalizes a partial config without dropping provider fields', () => {
     generation: { tts_concurrency: 99, image_concurrency: 5 },
   })
 
+  assert.equal(config.llm.provider, 'anthropic')
   assert.equal(config.llm.protocol, 'anthropic')
+  assert.deepEqual(config.llm.provider_options, { api_version: '2025-01-01' })
   assert.equal(config.tts.api_key, 'doubao-key')
   assert.equal(config.tts.mimo.api_key, 'mimo-key')
   assert.equal(config.tts.mimo.base_url, MIMO_PRESET.base_url)
@@ -40,6 +49,11 @@ test('normalizes a partial config without dropping provider fields', () => {
   assert.equal(config.tts.mimo.clone_model, 'mimo-v2.5-tts-voiceclone')
   assert.equal(config.generation.tts_concurrency, 8)
   assert.equal(config.generation.image_concurrency, 1)
+})
+
+test('normalizes missing or invalid LLM provider state to custom defaults', () => {
+  assert.equal(normalizeConfig({}).llm.provider, 'custom')
+  assert.deepEqual(normalizeConfig({ llm: { provider_options: [] } }).llm.provider_options, {})
 })
 
 test('clamps TTS concurrency to 1-8 and always fixes image concurrency to one', () => {
@@ -99,4 +113,33 @@ test('validates every enabled provider while allowing one side to be disabled', 
 
   const both = normalizeConfig({ ...configured, tts: { ...configured.tts, enabled_providers: ['doubao', 'mimo'] } })
   assert.equal(validateConfig(both), '请输入小米 MiMo API Key')
+})
+
+test('uses provider metadata instead of requiring Base URL for native LLM providers', () => {
+  const configured = normalizeConfig({
+    llm: {
+      provider: 'deepseek',
+      base_url: '',
+      api_key: 'deepseek-key',
+      model: 'deepseek/deepseek-chat',
+    },
+    image: { api_url: 'https://image.test', api_key: 'key', model: 'agnes' },
+    tts: {
+      provider: 'doubao',
+      enabled_providers: ['doubao'],
+      auth_method: 'api_key',
+      api_url: 'https://doubao.test',
+      api_key: 'doubao-key',
+      cluster: 'volcano_tts',
+      default_voice: 'zh_male_jieshuoxiaoming_moon_bigtts',
+    },
+  })
+  const deepseek = {
+    id: 'deepseek',
+    credential_fields: [{ id: 'api_key', label: 'API Key', required: true }],
+  }
+
+  assert.equal(validateConfig(configured, deepseek), '')
+  assert.equal(validateConfig(configured), '请输入生文 Base URL')
+  assert.equal(validateConfig(configured, { id: 'custom' }), '请输入生文 Base URL')
 })

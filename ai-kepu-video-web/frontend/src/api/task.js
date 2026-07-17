@@ -115,6 +115,19 @@ export function fetchConfigModels(data) {
   })
 }
 
+export const getLlmProviders = () => request({
+  url: '/ai/native/video/kepu/config/llm-providers', method: 'get'
+})
+
+export const getLlmProviderModels = providerId => request({
+  url: `/ai/native/video/kepu/config/llm-providers/${providerId}/models`, method: 'get'
+})
+
+export const refreshLlmProviderModels = (providerId, data) => request({
+  url: `/ai/native/video/kepu/config/llm-providers/${providerId}/models/refresh`,
+  method: 'post', data, timeout: 30000
+})
+
 export function testTtsConfig(data) {
   return request({
     url: '/ai/native/video/kepu/config/test-tts',

@@ -1,3 +1,5 @@
+import { isLlmProviderReady } from './llmProviderCatalog.js'
+
 export const MIMO_PRESET = {
   base_url: 'https://token-plan-sgp.xiaomimimo.com/v1',
   model: 'mimo-v2.5-tts',
@@ -48,6 +50,14 @@ function normalizeSpeedLevel(value) {
 
 export function normalizeConfig(config = {}) {
   const source = config || {}
+  const llmProvider = typeof source.llm?.provider === 'string' && source.llm.provider.trim()
+    ? source.llm.provider.trim()
+    : 'custom'
+  const llmProviderOptions = source.llm?.provider_options
+    && typeof source.llm.provider_options === 'object'
+    && !Array.isArray(source.llm.provider_options)
+    ? { ...source.llm.provider_options }
+    : {}
   const enabledProviders = normalizeEnabledProviders(source.tts?.enabled_providers)
   const requestedProvider = source.tts?.provider === 'mimo' ? 'mimo' : 'doubao'
   const provider = enabledProviders.includes(requestedProvider) ? requestedProvider : enabledProviders[0]
@@ -56,10 +66,12 @@ export function normalizeConfig(config = {}) {
     ...source,
     llm: {
       ...(source.llm || {}),
+      provider: llmProvider,
       base_url: source.llm?.base_url || '',
       api_key: source.llm?.api_key || '',
       model: source.llm?.model || '',
       protocol: source.llm?.protocol === 'anthropic' ? 'anthropic' : 'openai',
+      provider_options: llmProviderOptions,
     },
     image: {
       ...(source.image || {}),
@@ -110,9 +122,26 @@ export function buildModelPayload(type, config) {
   }
 }
 
-export function validateConfig(config) {
-  if (!config.llm.base_url.trim()) return '请输入生文 Base URL'
-  if (!config.llm.api_key.trim()) return '请输入生文 API Key'
+export function validateConfig(config, llmProvider = null) {
+  const usesProviderMetadata = llmProvider?.id && llmProvider.id !== 'custom'
+  if (usesProviderMetadata) {
+    if (!isLlmProviderReady(config.llm, llmProvider)) {
+      const providerOptions = config.llm.provider_options || {}
+      const missingField = (llmProvider.credential_fields || []).find(field => {
+        if (field?.required === false) return false
+        const value = ['api_key', 'base_url'].includes(field?.id)
+          ? config.llm[field.id]
+          : providerOptions[field?.id]
+        return typeof value === 'string' ? !value.trim() : !value
+      })
+      return missingField?.label
+        ? `请输入生文 ${missingField.label}`
+        : '请补齐生文服务商必填凭证'
+    }
+  } else {
+    if (!config.llm.base_url.trim()) return '请输入生文 Base URL'
+    if (!config.llm.api_key.trim()) return '请输入生文 API Key'
+  }
   if (!config.llm.model.trim()) return '请输入生文模型'
   if (!config.image.api_url.trim()) return '请输入生图 API URL'
   if (!config.image.api_key.trim()) return '请输入生图 API Key'
