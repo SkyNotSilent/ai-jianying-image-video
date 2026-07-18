@@ -59,7 +59,9 @@ InsightCut 是一个本地优先的 AI 图片视频工作台，面向科普、�
 | --- | --- |
 | ![InsightCut 9:16 预览](design-qa-artifacts/qa-preview-9x16.png) | ![InsightCut 3:4 预览](design-qa-artifacts/qa-preview-3x4.png) |
 
-模型配置和配音配置的新截图会在本次发布中随 README 一起更新。
+| 模型配置 | 配音、试听与声音克隆 |
+| --- | --- |
+| ![InsightCut 模型配置](design-qa-artifacts/current-settings.png) | ![InsightCut 配音与声音克隆](design-qa-artifacts/current-settings-tts.png) |
 
 ## 真实生成效果
 
