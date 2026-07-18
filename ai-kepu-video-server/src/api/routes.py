@@ -9,7 +9,6 @@ import logging
 import hashlib
 import os
 import platform
-import requests
 import shutil
 import subprocess
 import tempfile
@@ -17,19 +16,38 @@ import time
 import uuid
 import zipfile
 import xml.etree.ElementTree as ET
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
 from threading import Thread, Lock
-from urllib.parse import quote, urlparse, urlunparse
-from fastapi import APIRouter, HTTPException, Query, Body, UploadFile, File, Form, Request
+from urllib.parse import quote
+from fastapi import APIRouter, HTTPException, Query, Body, UploadFile, File, Form, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
-from .models import CreateTaskRequest, CreateTaskResponse, TaskResponse
+from .models import (
+    CreateTaskRequest,
+    CreateTaskResponse,
+    RegenerateAudioRequest,
+    TaskResponse,
+)
 from .task_manager import task_manager, TaskStatus
 from .task_executor import task_executor
 from src.config import Config
 from src.database import mysql_client
-from src.draft.voiceover import MIMO_TTS_VOICES, VoiceOverGenerator
+from src.draft.voice_catalog import (
+    build_voice_key,
+    normalize_tts_options,
+    parse_voice_key,
+)
+from src.draft.voice_clone import VoiceCloneStore
+from src.draft.voice_preview import VoicePreviewService
+from src.draft.voiceover import VoiceOverGenerator
+from src.text.provider_catalog import (
+    get_provider,
+    list_llm_providers,
+    list_provider_models,
+)
+from src.text.provider_models import ProviderModelSyncError, refresh_provider_models
 from src.utils.path_fixer import (
     apply_content_info,
     apply_extract_path,
@@ -52,6 +70,88 @@ EXPORT_JOBS = {}
 EXPORT_JOBS_LOCK = Lock()
 ALLOWED_DOCUMENT_EXTENSIONS = {".txt", ".md", ".markdown", ".docx", ".pdf"}
 MAX_DOCUMENT_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_VOICE_REFERENCE_UPLOAD_BYTES = 20 * 1024 * 1024
+
+
+def _voice_clone_store() -> VoiceCloneStore:
+    return VoiceCloneStore(Config.BASE_DIR, mysql_client)
+
+
+def _model_dict(model, exclude_none: bool = False) -> dict:
+    if model is None:
+        return {}
+    if hasattr(model, "model_dump"):
+        return model.model_dump(exclude_none=exclude_none)
+    return model.dict(exclude_none=exclude_none)
+
+
+def _snapshot_tts_options(voice_type: str, options: Optional[dict] = None) -> dict:
+    config = Config.tts_config()
+    selection = parse_voice_key(voice_type, default_provider=config.get("provider"))
+    provider_config = config if selection.provider == "doubao" else config.get("mimo") or {}
+    normalized = normalize_tts_options(options, provider_config, selection.provider)
+    snapshot = {"speed_level": normalized["speed_level"]}
+    if selection.provider == "doubao":
+        snapshot["volume_ratio"] = normalized["volume_ratio"]
+    else:
+        snapshot["style_prompt"] = normalized["style_prompt"]
+    return snapshot
+
+
+def _resolve_new_task_voice(voice_type: Optional[str]) -> str:
+    config = Config.tts_config()
+    default_provider = (config.get("provider") or "doubao").lower()
+    if voice_type:
+        selection = parse_voice_key(voice_type, default_provider=default_provider)
+    elif default_provider == "mimo":
+        default_voice = (config.get("mimo") or {}).get("default_voice") or "冰糖"
+        selection = parse_voice_key(
+            default_voice if str(default_voice).startswith("mimo-clone:")
+            else build_voice_key("mimo", default_voice)
+        )
+    else:
+        selection = parse_voice_key(
+            build_voice_key(
+                "doubao",
+                config.get("default_voice") or "zh_male_jieshuoxiaoming_moon_bigtts",
+            )
+        )
+
+    enabled_providers = config.get("enabled_providers") or ["doubao", "mimo"]
+    if selection.provider not in enabled_providers:
+        raise HTTPException(status_code=400, detail=f"{selection.provider} TTS 当前未启用")
+    if selection.kind == "clone":
+        clone = _voice_clone_store().get(selection.voice_id)
+        if not clone:
+            raise HTTPException(status_code=400, detail="克隆音色不存在")
+        if clone.get("status") != "ready" or not clone.get("is_enabled"):
+            raise HTTPException(status_code=400, detail="克隆音色需先试听成功并启用")
+        return selection.key
+
+    record = mysql_client.find_tts_voice(selection.provider, selection.voice_id)
+    if record and record.get("is_enabled"):
+        return selection.key
+    if voice_type:
+        raise HTTPException(status_code=400, detail="音色不存在或未对新任务开放")
+
+    fallback = mysql_client.list_tts_voices(provider=selection.provider)
+    if not fallback:
+        fallback = mysql_client.list_tts_voices()
+    if not fallback:
+        raise HTTPException(status_code=400, detail="当前没有可用音色")
+    return fallback[0]["id"]
+
+
+def _parse_options_json(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _safe_draft_name(name: str, task_id: str) -> str:
@@ -201,63 +301,6 @@ def _local_media_url_from_path(path: Optional[str], request: Request) -> Optiona
             continue
         return str(request.url_for("media", file_path=str(rel).replace(os.sep, "/")))
     return None
-
-
-def _build_models_url(base_url: str) -> str:
-    base_url = (base_url or "").strip()
-    if not base_url:
-        raise ValueError("请先填写 Base URL")
-
-    parsed = urlparse(base_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("Base URL 必须是 http:// 或 https:// 开头的完整地址")
-
-    path = (parsed.path or "").rstrip("/")
-    known_suffixes = (
-        "/chat/completions",
-        "/responses",
-        "/messages",
-        "/images/generations",
-        "/completions",
-    )
-    for suffix in known_suffixes:
-        if path.endswith(suffix):
-            path = path[: -len(suffix)].rstrip("/")
-            break
-
-    if not path.endswith("/models"):
-        path = f"{path}/models" if path else "/models"
-
-    return urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
-
-
-def _extract_model_options(payload) -> List[dict]:
-    if isinstance(payload, dict):
-        raw_items = payload.get("data") or payload.get("models") or payload.get("model_list") or []
-    elif isinstance(payload, list):
-        raw_items = payload
-    else:
-        raw_items = []
-
-    seen = set()
-    models = []
-    for item in raw_items:
-        if isinstance(item, str):
-            model_id = item
-            label = item
-        elif isinstance(item, dict):
-            model_id = item.get("id") or item.get("model") or item.get("name") or item.get("model_name")
-            label = item.get("display_name") or item.get("label") or item.get("name") or model_id
-        else:
-            continue
-
-        if not model_id or model_id in seen:
-            continue
-        seen.add(model_id)
-        models.append({"id": model_id, "label": label or model_id})
-
-    models.sort(key=lambda value: value["id"])
-    return models
 
 
 def _task_ratio(task) -> str:
@@ -1187,42 +1230,65 @@ async def test_tts_config(request: Request, payload: dict = Body(...)):
 async def fetch_config_models(config: dict = Body(...)):
     """根据当前填写的 Base URL 和 API Key 拉取可选模型列表。"""
     protocol = (config.get("protocol") or "openai").lower()
-    base_url = config.get("base_url") or config.get("api_url") or ""
-    api_key = config.get("api_key") or config.get("token") or ""
-    if not api_key:
-        raise HTTPException(status_code=400, detail="请先填写 API Key")
-
+    result = None
+    error_status = None
+    error_detail = None
     try:
-        models_url = _build_models_url(base_url)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        result = refresh_provider_models("custom", config)
+    except ProviderModelSyncError as exc:
+        error_status = exc.status_code
+        error_detail = exc.public_message
+    config = None
+    if error_status is not None:
+        result = None
+        raise HTTPException(
+            status_code=error_status, detail=error_detail
+        ) from None
 
-    headers = {"Accept": "application/json"}
-    if protocol == "anthropic":
-        headers["x-api-key"] = api_key
-        headers["anthropic-version"] = "2023-06-01"
-    else:
-        headers["Authorization"] = f"Bearer {api_key}"
+    prefix = f"{protocol}/"
+    models = []
+    for model in result["models"]:
+        model_id = str(model.get("id") or "")
+        if model_id.startswith(prefix):
+            model_id = model_id[len(prefix):]
+        models.append({"id": model_id, "label": model.get("label") or model_id})
+    return {"models_url": result["models_url"], "models": models}
 
+
+@router.get("/config/llm-providers")
+async def get_llm_providers():
+    return {"providers": list_llm_providers()}
+
+
+@router.get("/config/llm-providers/{provider_id}/models")
+async def get_llm_provider_models(provider_id: str):
+    if not get_provider(provider_id):
+        raise HTTPException(status_code=404, detail="生文服务商不存在")
+    return {
+        "provider": provider_id,
+        "models": list_provider_models(provider_id),
+    }
+
+
+@router.post("/config/llm-providers/{provider_id}/models/refresh")
+async def refresh_llm_provider_models(
+    provider_id: str, payload: dict = Body(...)
+):
+    result = None
+    error_status = None
+    error_detail = None
     try:
-        response = requests.get(models_url, headers=headers, timeout=20)
-    except requests.RequestException as e:
-        raise HTTPException(status_code=502, detail=f"模型列表请求失败: {e}")
-
-    if response.status_code >= 400:
-        message = response.text[:300] if response.text else response.reason
-        raise HTTPException(status_code=502, detail=f"模型列表请求失败 ({response.status_code}): {message}")
-
-    try:
-        payload = response.json()
-    except ValueError:
-        raise HTTPException(status_code=502, detail="模型列表接口没有返回 JSON")
-
-    models = _extract_model_options(payload)
-    if not models:
-        raise HTTPException(status_code=502, detail="没有从响应中解析到模型列表")
-
-    return {"models_url": models_url, "models": models}
+        result = refresh_provider_models(provider_id, payload)
+    except ProviderModelSyncError as exc:
+        error_status = exc.status_code
+        error_detail = exc.public_message
+    payload = None
+    if error_status is not None:
+        result = None
+        raise HTTPException(
+            status_code=error_status, detail=error_detail
+        ) from None
+    return result
 
 
 @router.get("/render-config")
@@ -1234,32 +1300,193 @@ async def get_render_config():
 
 
 @router.get("/voices")
-async def get_voices():
-    """
-    获取当前 TTS provider 可用的音色列表。
-
-    豆包模式从数据库读取；小米 MiMo 模式返回官方预置音色。
-    """
-    tts_config = Config.tts_config()
-    if (tts_config.get("provider") or "doubao").lower() == "mimo":
-        return MIMO_TTS_VOICES
-
-    voices = mysql_client.get_enabled_voices()
-
-    if not voices:
-        raise HTTPException(status_code=500, detail="音色数据不可用，请检查数据库连接")
-
-    # 统一返回格式
-    return [
+async def get_voices(
+    provider: Optional[str] = Query(None),
+    include_disabled: bool = Query(False),
+):
+    """返回双 provider 预置音色与 MiMo 本地克隆音色。"""
+    normalized_provider = (provider or "").strip().lower() or None
+    if normalized_provider not in {None, "doubao", "mimo"}:
+        raise HTTPException(status_code=400, detail="provider 只支持 doubao 或 mimo")
+    presets = mysql_client.list_tts_voices(
+        provider=normalized_provider,
+        include_disabled=include_disabled,
+    )
+    result = [
         {
-            "id": v["voice_id"],
-            "name": v["name"],
-            "gender": v["gender"],
-            "description": v.get("description", ""),
-            "provider": "doubao",
+            "id": voice["id"],
+            "voice_id": voice["voice_id"],
+            "name": voice["name"],
+            "gender": voice.get("gender") or "unknown",
+            "language": voice.get("language") or "zh",
+            "description": voice.get("description") or "",
+            "provider": voice["provider"],
+            "kind": "preset",
+            "source": voice.get("source") or "builtin",
+            "is_enabled": bool(voice.get("is_enabled")),
+            "status": "ready",
+            "preview_url": voice.get("preview_url"),
+            "capabilities": voice.get("capabilities") or {},
         }
-        for v in voices
+        for voice in presets
     ]
+    if normalized_provider in {None, "mimo"}:
+        for clone in _voice_clone_store().list(include_hidden=include_disabled):
+            if not include_disabled and not (
+                clone.get("status") == "ready" and clone.get("is_enabled")
+            ):
+                continue
+            result.append({
+                "id": clone["voice_type"],
+                "voice_id": clone["clone_id"],
+                "name": clone["name"],
+                "gender": "custom",
+                "language": "auto",
+                "description": "MiMo 本地参考音频克隆音色",
+                "provider": "mimo",
+                "kind": "clone",
+                "source": "local-clone",
+                "is_enabled": bool(clone.get("is_enabled")),
+                "status": clone.get("status"),
+                "preview_url": clone.get("preview_url"),
+                "capabilities": {"style_prompt": True, "speed_level": True},
+            })
+    return result
+
+
+@router.put("/voices/availability")
+async def update_voice_availability(payload: dict = Body(...)):
+    voice_keys = payload.get("voice_keys")
+    if not isinstance(voice_keys, list) or not all(isinstance(key, str) for key in voice_keys):
+        raise HTTPException(status_code=400, detail="voice_keys 必须是音色 ID 数组")
+    try:
+        mysql_client.set_voice_availability(voice_keys)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    enabled = mysql_client.list_tts_voices()
+    return {"enabled_voice_keys": [voice["id"] for voice in enabled]}
+
+
+@router.post("/voices/preview")
+async def preview_voice(payload: dict = Body(...)):
+    voice_type = str(payload.get("voice_type") or "").strip()
+    if not voice_type:
+        raise HTTPException(status_code=400, detail="请选择试听音色")
+    text = str(payload.get("text") or Config.tts_config().get("preview_text") or "这是音色试听。")[:120]
+    store = _voice_clone_store()
+    try:
+        service = VoicePreviewService(
+            base_dir=Config.BASE_DIR,
+            tts_config=Config.tts_config(),
+            clone_store=store,
+        )
+        return service.generate(
+            voice_type,
+            text,
+            payload.get("tts_options") or {},
+            config_override=payload.get("config_override"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("TTS 音色试听失败")
+        raise HTTPException(status_code=502, detail=f"音色试听失败: {exc}") from exc
+
+
+@router.get("/voice-clones")
+async def list_voice_clones(include_hidden: bool = Query(False)):
+    return _voice_clone_store().list(include_hidden=include_hidden)
+
+
+@router.post("/voice-clones")
+async def create_voice_clone(
+    name: str = Form(...),
+    consent_confirmed: bool = Form(...),
+    file: UploadFile = File(...),
+):
+    suffix = Path(file.filename or "reference.wav").suffix.lower() or ".wav"
+    if suffix not in {".mp3", ".wav", ".webm", ".ogg"}:
+        raise HTTPException(status_code=400, detail="只支持 MP3、WAV 或浏览器录音")
+    content = await file.read(MAX_VOICE_REFERENCE_UPLOAD_BYTES + 1)
+    if not content:
+        raise HTTPException(status_code=400, detail="参考音频为空")
+    if len(content) > MAX_VOICE_REFERENCE_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="参考音频不能超过 20 MB")
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as staged:
+            staged.write(content)
+            temporary = Path(staged.name)
+        return _voice_clone_store().create(name, temporary, consent_confirmed)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        if temporary and temporary.exists():
+            temporary.unlink()
+
+
+@router.patch("/voice-clones/{clone_id}")
+async def update_voice_clone(clone_id: str, payload: dict = Body(...)):
+    try:
+        return _voice_clone_store().update(clone_id, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/voice-clones/{clone_id}/reference")
+async def replace_voice_clone_reference(
+    clone_id: str,
+    file: UploadFile = File(...),
+):
+    suffix = Path(file.filename or "reference.wav").suffix.lower() or ".wav"
+    content = await file.read(MAX_VOICE_REFERENCE_UPLOAD_BYTES + 1)
+    if not content or len(content) > MAX_VOICE_REFERENCE_UPLOAD_BYTES:
+        raise HTTPException(status_code=400, detail="参考音频为空或过大")
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as staged:
+            staged.write(content)
+            temporary = Path(staged.name)
+        return _voice_clone_store().replace_reference(clone_id, temporary)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        if temporary and temporary.exists():
+            temporary.unlink()
+
+
+@router.post("/voice-clones/{clone_id}/preview")
+async def preview_voice_clone(clone_id: str, payload: dict = Body(default={})):
+    store = _voice_clone_store()
+    clone = store.get(clone_id)
+    if not clone:
+        raise HTTPException(status_code=404, detail="克隆音色不存在")
+    text = str(payload.get("text") or Config.tts_config().get("preview_text") or "这是我的声音试听。")[:120]
+    try:
+        preview = VoicePreviewService(
+            base_dir=Config.BASE_DIR,
+            tts_config=Config.tts_config(),
+            clone_store=store,
+        ).generate(
+            clone["voice_type"],
+            text,
+            payload.get("tts_options") or {},
+            config_override=payload.get("config_override"),
+        )
+        ready = store.mark_ready(clone_id, Path(preview["path"]))
+        return {"clone": ready, "preview": preview}
+    except Exception as exc:
+        store.mark_failed(clone_id, str(exc))
+        logger.exception("MiMo 克隆音色试听失败")
+        raise HTTPException(status_code=502, detail=f"克隆音色试听失败: {exc}") from exc
+
+
+@router.delete("/voice-clones/{clone_id}")
+async def delete_voice_clone(clone_id: str):
+    try:
+        return _voice_clone_store().delete_or_hide(clone_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/documents/extract-text")
@@ -1304,14 +1531,21 @@ async def create_task(request: CreateTaskRequest):
     if input_mode == "theme" and len(theme_text) > 100:
         raise HTTPException(status_code=400, detail="主题模式最多输入 100 字")
 
+    voice_type = _resolve_new_task_voice(request.voice_type)
+    tts_options = _snapshot_tts_options(
+        voice_type,
+        _model_dict(request.tts_options, exclude_none=True),
+    )
+
     # 创建任务
     task_id = task_manager.create_task(
         theme=theme_text,
         name=request.name,
         style=request.style,
         length=request.length,
-        voice_type=request.voice_type,
+        voice_type=voice_type,
         ratio=normalize_ratio(request.ratio),
+        tts_options=tts_options,
     )
 
     # 启动异步执行
@@ -1320,7 +1554,7 @@ async def create_task(request: CreateTaskRequest):
         theme=theme_text,
         style=request.style,
         length=request.length,
-        voice_type=request.voice_type,
+        voice_type=voice_type,
         ratio=normalize_ratio(request.ratio),
         input_mode=input_mode,
     )
@@ -1337,6 +1571,7 @@ async def create_task_from_images(
     style: str = Form("温暖感人"),
     ratio: str = Form("16:9"),
     voice_type: Optional[str] = Form(None),
+    tts_options: Optional[str] = Form(None),
     name: Optional[str] = Form(None),
 ):
     """
@@ -1357,14 +1592,19 @@ async def create_task_from_images(
     for file in images:
         _validate_upload_image(file)
 
+    canonical_voice = _resolve_new_task_voice(voice_type)
+    raw_options = _parse_options_json(tts_options)
+    option_snapshot = _snapshot_tts_options(canonical_voice, raw_options)
+
     theme = (name or "").strip() or "本地上传图片"
     task_id = task_manager.create_task(
         theme=theme,
         name=name or theme,
         style=style or "温暖感人",
         length=300,
-        voice_type=voice_type or None,
+        voice_type=canonical_voice,
         ratio=normalize_ratio(ratio),
+        tts_options=option_snapshot,
     )
 
     try:
@@ -1446,14 +1686,50 @@ async def get_task(task_id: str):
     return task.to_response()
 
 
-@router.delete("/tasks/{task_id}")
-async def delete_task(task_id: str):
-    """删除任务及其关联数据"""
+@router.post("/tasks/{task_id}/resume")
+async def resume_task(task_id: str, response: Response):
+    """恢复存在可用检查点的中断任务。"""
     task = task_manager.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
-    task_manager.delete_task(task_id)
-    return {"message": "任务已删除"}
+
+    outcome = task_executor.resume_task(task_id)
+    if outcome == "started":
+        response.status_code = 202
+        status = TaskStatus.PROCESSING.value
+    elif outcome == "already_running":
+        response.status_code = 200
+        status = TaskStatus.PROCESSING.value
+    elif outcome == "already_completed":
+        response.status_code = 200
+        status = TaskStatus.COMPLETED.value
+    else:
+        response.status_code = 409
+        status = task.status.value if isinstance(task.status, TaskStatus) else str(task.status)
+    return {"task_id": task_id, "status": status, "outcome": outcome}
+
+
+@router.delete("/tasks/{task_id}")
+async def delete_task(
+    task_id: str,
+    response: Response,
+    delete_files: bool = Query(False, description="同时删除本地任务文件"),
+):
+    """删除任务记录，并可安全删除本地任务文件。"""
+    outcome = task_manager.request_delete(task_id, delete_files=delete_files)
+    if outcome == "missing":
+        raise HTTPException(status_code=404, detail="任务不存在")
+    response.status_code = 202 if outcome == "deleting" else 200
+    result = {
+        "task_id": task_id,
+        "status": outcome,
+        "outcome": outcome,
+        "message": "任务已删除" if outcome == "deleted" else "任务正在停止并删除",
+    }
+    report = task_manager.get_deletion_report(task_id)
+    if report is not None:
+        result["deletion_report"] = asdict(report)
+    return result
 
 
 @router.get("/tasks/{task_id}/download")
@@ -1631,6 +1907,8 @@ async def get_segments(task_id: str, request: Request):
             'image_error': seg.get('image_error'),
             'audio_status': seg.get('audio_status') or 'completed',
             'audio_error': seg.get('audio_error'),
+            'audio_voice_type': seg.get('audio_voice_type'),
+            'audio_tts_options_json': seg.get('audio_tts_options_json'),
             'duration': seg.get('duration'),
             'created_at': seg.get('created_at'),
             'updated_at': seg.get('updated_at'),
@@ -2160,7 +2438,8 @@ async def regenerate_image(task_id: str, segment_index: int):
 async def regenerate_audio(
     task_id: str,
     segment_index: int,
-    voice_type: Optional[str] = None
+    payload: Optional[RegenerateAudioRequest] = Body(None),
+    voice_type: Optional[str] = Query(None),
 ):
     """
     重新生成段落音频
@@ -2179,11 +2458,26 @@ async def regenerate_audio(
 
     segment = segments[segment_index]
 
-    # 如果没有指定 voice_type，使用任务创建时的音色
-    if voice_type is None:
-        voice_type = task.voice_type
+    body_voice = payload.voice_type if payload else None
+    requested_voice = body_voice or voice_type
+    if requested_voice:
+        effective_voice = _resolve_new_task_voice(requested_voice)
+    else:
+        effective_voice = segment.get("audio_voice_type") or task.voice_type
+    if not effective_voice:
+        effective_voice = _resolve_new_task_voice(None)
 
-    logger.info(f"[{task_id}] 使用音色: {voice_type}")
+    inherited_options = (
+        _parse_options_json(segment.get("audio_tts_options_json"))
+        or dict(getattr(task, "tts_options", {}) or {})
+    )
+    body_options = _model_dict(payload.tts_options, exclude_none=True) if payload else {}
+    effective_options = _snapshot_tts_options(
+        effective_voice,
+        body_options or inherited_options,
+    )
+
+    logger.info(f"[{task_id}] 使用音色: {effective_voice}")
 
     # 重新生成音频
     from src.core.pipeline import VideoEditorPipeline
@@ -2196,7 +2490,10 @@ async def regenerate_audio(
     audio_path = pipeline.voiceover_generator.generate(
         segment['text'],
         filename=f"seg_{segment_index:03d}_regen_{timestamp}",
-        voice_type=voice_type
+        voice_type=effective_voice,
+        speed_level=effective_options.get("speed_level"),
+        volume_ratio=effective_options.get("volume_ratio"),
+        style_prompt=effective_options.get("style_prompt"),
     )
     logger.info(f"[{task_id}] 音频生成完成: {audio_path}")
 
@@ -2218,7 +2515,9 @@ async def regenerate_audio(
     # 更新数据库
     mysql_client.update_segment(task_id, segment_index, {
         'audio_path': audio_path,
-        'audio_url': audio_url
+        'audio_url': audio_url,
+        'audio_voice_type': effective_voice,
+        'audio_tts_options_json': json.dumps(effective_options, ensure_ascii=False),
     })
     _record_asset(
         task_id,
@@ -2228,10 +2527,17 @@ async def regenerate_audio(
         url=audio_url,
         segment_index=segment_index,
         text=segment.get("text"),
-        voice_type=voice_type,
+        voice_type=effective_voice,
+        metadata={"tts_options": effective_options},
     )
 
-    return {"message": "音频重新生成成功", "audio_path": audio_path, "audio_url": audio_url}
+    return {
+        "message": "音频重新生成成功",
+        "audio_path": audio_path,
+        "audio_url": audio_url,
+        "voice_type": effective_voice,
+        "tts_options": effective_options,
+    }
 
 
 @router.post("/tasks/{task_id}/segments/{segment_index}/upload-image")

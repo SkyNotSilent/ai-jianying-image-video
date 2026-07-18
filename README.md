@@ -1,241 +1,300 @@
-# InsightCut - AI Jianying Image Video Workbench
+# InsightCut
 
-> All in one, 但不是画布；生成效果远胜剪映的一键成片。
+> 把文稿真正做成可修改、可恢复、还能继续精修的视频项目。
 
-InsightCut is a local-first AI image video and cognition-video production workbench for explainer, knowledge, commentary, and short-form education videos. It turns a topic or manuscript into a structured video project: script, storyboard, AI images, TTS voiceover, subtitles, preview editing, MP4 export, and Jianying / CapCut draft export.
+InsightCut 是一个本地优先的 AI 图片视频工作台，面向科普、认知、知识解说、观点表达和短视频创作。你可以从一个主题或一篇完整文稿开始，依次完成脚本整理、分镜拆分、图片生成、配音、字幕、预览和导出。
 
-InsightCut 的核心价值不是“给你一个复杂画布再从零剪辑”，而是把 AI 图片视频、AI 认知视频和知识解说视频里最重复、最耗时、最容易断链的生产流程收成一条可恢复、可修改、可导出的工作流。它追求的不是模板化的一键拼接，而是让默认生成出来的画面、分镜、配音、字幕和导出结果，整体效果远胜剪映的一键成片。
+我们没有把它做成另一块需要从零搭建的复杂画布。InsightCut 更在意的是：一条经常断掉的视频生产链路，能不能顺畅地跑完；默认结果不满意时，能不能只修改其中一个分镜；中途失败后，已经生成的图片和配音还在不在。
 
-This project is not affiliated with Jianying, CapCut, or ByteDance.
+项目与剪映、CapCut、字节跳动没有隶属或合作关系。
 
-![InsightCut manuscript workspace](design-qa-artifacts/current-home-manuscript.png)
+![InsightCut 文稿工作台](design-qa-artifacts/current-home-manuscript.png)
 
-## Keywords
+## InsightCut 是什么
 
-`AI video generation` · `AI image video` · `image-to-video` · `batch image video` · `batch AI video generation` · `AI explainer video` · `AI cognition video` · `batch cognition video` · `local-first video workflow` · `storyboard editor` · `image generation` · `TTS voiceover` · `subtitle generation` · `MP4 export` · `Jianying draft` · `Jianying caogao` · `Jianying draft export` · `CapCut draft` · `FastAPI` · `Vue 3` · `Vite` · `FFmpeg`
-
-中文关键词：`AI 视频生成`、`AI 图片视频`、`批量图片视频生成`、`AI 认知视频`、`批量认知视频生成`、`AI 解说视频`、`知识视频工作台`、`科普视频生成`、`文稿转视频`、`分镜编辑`、`剪映草稿`、`剪映草稿导出`、`CapCut 草稿导出`、`本地优先素材管理`。
-
-## Why
-
-很多创作者有观点、有文稿、有表达欲，但视频生产链路很长：
+一条完整的视频生产流程通常比想象中长：
 
 ```text
-选题 / 文稿
-  -> 脚本整理
-  -> 分镜拆解
-  -> 图片生成
-  -> 配音
-  -> 字幕
-  -> 预览检查
-  -> MP4 / 剪映草稿导出
+主题 / 文稿
+  → 脚本整理
+  → 分镜与画面提示词
+  → AI 图片
+  → 配音与字幕
+  → 预览和逐段修正
+  → MP4 / 剪映草稿
 ```
 
-普通“一键成片”经常只给一个结果文件，失败后素材消失，想修改也只能重来；剪映的一键成片虽然足够快，但默认结果容易模板化、素材不可控、二次修改链路短。InsightCut 的目标是让默认生成效果远胜剪映的一键成片，同时保留完整中间资产。它的设计原则是：
+普通“一键成片”很适合快速看到结果，但当画面不对、某句配音需要重来，或者生成进行到一半发生错误时，往往只能重新开始。InsightCut 把脚本、分镜、图片、音频、字幕和导出文件都保留下来，让一次生成变成一个可以继续工作的项目，而不是一个用完即走的结果文件。
 
-- Every intermediate asset is visible.
-- Every generated segment can be edited.
-- Failed tasks must preserve generated assets.
-- MP4 is not the only output; editable Jianying / CapCut drafts matter.
+## 为什么不是普通的一键成片
 
-也就是说，InsightCut 不是一次性生成器，而是一个可以继续判断、替换、重生成和导出的 AI 视频生产工作台。
+- **不只交付一个成片。** 每个分镜都有自己的旁白、画面提示词、图片、配音、状态和历史记录。
+- **默认生成以后还能改。** 可以逐段替换图片、修改提示词、重新生成图片或配音，不需要为了一个细节从头跑完整条链路。
+- **失败不会清空已经完成的内容。** 任务中断或后续步骤失败时，已经生成的脚本、图片、音频和草稿仍会进入素材库与预览页。
+- **数据默认留在本机。** SQLite 数据库、媒体、配置和声音克隆参考音频都使用本地存储，适合个人创作、实验和排查问题。
+- **成片和可编辑草稿都重要。** MP4 方便快速查看和发布；剪映 / CapCut 草稿适合继续调整节奏、字幕和包装。
 
-## Product Screenshots
+## 现在可以做什么
 
-| Manuscript | Assets |
+1. 用一句主题生成文稿，或粘贴、导入自己的完整文稿。
+2. 选择画面比例、视觉风格、文案风格、配音音色和语速。
+3. 自动整理脚本，拆分分镜，并为每段生成图片提示词。
+4. 生成 AI 图片、TTS 配音、字幕和基础动态效果。
+5. 在素材库和预览页逐段检查，替换图片或重新生成配音。
+6. 导出 MP4、字幕、分镜素材和剪映 / CapCut 草稿。
+7. 在 API 配置页选择生文服务商与模型，管理 Agnes 生图、豆包 TTS 和小米 MiMo TTS。
+8. 试听项目内置音色，或在确认声音授权后创建 MiMo 克隆音色。
+
+## 产品截图
+
+| 文稿工作台 | 项目素材库 |
 | --- | --- |
-| ![Manuscript editor](design-qa-artifacts/current-home-manuscript.png) | ![Project assets](design-qa-artifacts/current-assets.png) |
+| ![InsightCut 文稿编辑器](design-qa-artifacts/current-home-manuscript.png) | ![InsightCut 项目素材库](design-qa-artifacts/current-assets.png) |
 
-| Production Setup | Preview Editor |
+| 生产配置 | 预览编辑器 |
 | --- | --- |
-| ![Production setup](design-qa-artifacts/current-production.png) | ![Preview editor](design-qa-artifacts/current-preview.png) |
+| ![InsightCut 生产配置](design-qa-artifacts/current-production.png) | ![InsightCut 预览编辑器](design-qa-artifacts/current-preview.png) |
 
-| 9:16 Preview | 3:4 Preview |
+| 9:16 预览 | 3:4 预览 |
 | --- | --- |
-| ![9:16 preview](design-qa-artifacts/qa-preview-9x16.png) | ![3:4 preview](design-qa-artifacts/qa-preview-3x4.png) |
+| ![InsightCut 9:16 预览](design-qa-artifacts/qa-preview-9x16.png) | ![InsightCut 3:4 预览](design-qa-artifacts/qa-preview-3x4.png) |
 
-## Generated Results / 生成效果展示
+| 模型配置 | 配音、试听与声音克隆 |
+| --- | --- |
+| ![InsightCut 模型配置](design-qa-artifacts/current-settings.png) | ![InsightCut 配音与声音克隆](design-qa-artifacts/current-settings-tts.png) |
 
-These are compressed README showcase exports from real local generation results. The original full-resolution MP4 files remain in the local output directory; the online preview page uses native video players for direct playback.
+## 真实生成效果
 
-[Open the video showcase / 在线预览全部生成效果](https://skynotsilent.github.io/ai-jianying-image-video/showcase/)
+下面四个例子来自本地真实生成结果。仓库中保存的是适合 README 浏览的压缩版本；在线展示页使用原生播放器，可以直接查看不同输入方式和画面比例的效果。
 
-| Sample | Mode | Format | Duration | Online Preview |
+[打开在线生成效果展示](https://skynotsilent.github.io/ai-jianying-image-video/showcase/)
+
+| 示例 | 输入方式 | 比例 | 时长 | 在线预览 |
 | --- | --- | --- | --- | --- |
-| 书 | Input mode | 16:9 | 01:02 | [![Book generated video](docs/showcase/thumbs/book-16x9.jpg)](https://skynotsilent.github.io/ai-jianying-image-video/showcase/#book-16x9) |
-| 0623 | Long-form generation | 16:9 | 01:03 | [![Long generated video 16x9](docs/showcase/thumbs/long-0623-16x9.jpg)](https://skynotsilent.github.io/ai-jianying-image-video/showcase/#long-0623-16x9) |
-| 主题模式一分钟测试 | Theme mode | 9:16 | 00:55 | [![Theme mode vertical generated video](docs/showcase/thumbs/theme-vertical-9x16.jpg)](https://skynotsilent.github.io/ai-jianying-image-video/showcase/#theme-vertical-9x16) |
-| 文稿模式 3:4 测试 | Input mode | 3:4 | 00:52 | [![Script mode portrait generated video](docs/showcase/thumbs/script-portrait-3x4.jpg)](https://skynotsilent.github.io/ai-jianying-image-video/showcase/#script-portrait-3x4) |
+| 书 | 文稿模式 | 16:9 | 01:02 | [![“书”生成视频](docs/showcase/thumbs/book-16x9.jpg)](https://skynotsilent.github.io/ai-jianying-image-video/showcase/#book-16x9) |
+| 0623 | 长文生成 | 16:9 | 01:03 | [![长文生成视频](docs/showcase/thumbs/long-0623-16x9.jpg)](https://skynotsilent.github.io/ai-jianying-image-video/showcase/#long-0623-16x9) |
+| 主题模式一分钟测试 | 主题模式 | 9:16 | 00:55 | [![主题模式竖屏视频](docs/showcase/thumbs/theme-vertical-9x16.jpg)](https://skynotsilent.github.io/ai-jianying-image-video/showcase/#theme-vertical-9x16) |
+| 文稿模式 3:4 测试 | 文稿模式 | 3:4 | 00:52 | [![文稿模式 3:4 视频](docs/showcase/thumbs/script-portrait-3x4.jpg)](https://skynotsilent.github.io/ai-jianying-image-video/showcase/#script-portrait-3x4) |
 
-Fallback MP4 files: [书](docs/showcase/videos/book-16x9.mp4) · [0623](docs/showcase/videos/long-0623-16x9.mp4) · [主题模式 9:16](docs/showcase/videos/theme-vertical-9x16.mp4) · [文稿模式 3:4](docs/showcase/videos/script-portrait-3x4.mp4)
+仓库内备用 MP4：[书](docs/showcase/videos/book-16x9.mp4) · [0623](docs/showcase/videos/long-0623-16x9.mp4) · [主题模式 9:16](docs/showcase/videos/theme-vertical-9x16.mp4) · [文稿模式 3:4](docs/showcase/videos/script-portrait-3x4.mp4)
 
-The point is not just that the tool can export a playable file. The generated results keep the storyboard, images, voiceover, subtitles, and Jianying / CapCut draft path available for later correction. This is the practical reason InsightCut can produce results that are far stronger than Jianying's default one-click video flow.
+这些例子不只是为了证明“可以导出视频”。生成结束以后，对应的分镜、图片、配音、字幕和草稿路径仍然存在，后续还可以继续检查和修改——这才是这条工作流真正有用的地方。
 
-## Core Workflow
+## 从零开始使用
 
-1. **Write or import manuscript**
-   - Theme mode: enter a short topic and expand it during production.
-   - Input mode: paste or import a complete manuscript.
+### 1. 准备环境
 
-2. **Configure production**
-   - Visual style, aspect ratio, writing style, and TTS voice.
-   - API readiness checks for LLM, image generation, and TTS.
+当前后端使用 Python 3.9，前端使用 React 19、React Router 7 和 Vite 4。还需要 Node.js、npm，以及可用的 FFmpeg；项目安装的 `imageio-ffmpeg` 可以提供内置二进制，系统 PATH 中已有 FFmpeg 时会优先使用系统版本。
 
-3. **Generate video assets**
-   - Script processing.
-   - Storyboard segmentation.
-   - Image prompt generation.
-   - AI image generation.
-   - TTS voiceover.
-   - Subtitles and basic motion.
-
-4. **Preview and recover**
-   - Inspect every segment.
-   - Edit subtitle text and image prompts.
-   - Regenerate image or voiceover per segment.
-   - Upload replacement image.
-   - Recover usable assets even when a task partially fails.
-
-5. **Export**
-   - MP4 for quick review, publishing, or internal delivery.
-   - Jianying / CapCut draft ZIP for further editing.
-
-## Key Features
-
-### Manuscript-first homepage
-
-The homepage is the manuscript workspace, not a project library. The product starts where the creator starts: the idea, topic, or draft.
-
-### Editable storyboard assets
-
-Each generated segment keeps its own text, image prompt, image, audio, status, and history. This makes the generated video auditable and repairable.
-
-### Recoverable failures
-
-Generation failure is not treated as a dead end. Already generated scripts, images, audio, subtitles, and draft files are still shown in the asset and preview flows.
-
-### Real export center
-
-The export page is the single delivery center. It separates MP4 availability from Jianying / CapCut draft availability, so users do not see fake “ready” states.
-
-### Local-first storage
-
-Data, media, config, and logs are stored locally by default. This makes the system practical for experimentation, debugging, and private creator workflows.
-
-## Outputs
-
-- MP4 video with image, voiceover, subtitles, and basic motion.
-- Jianying / CapCut draft ZIP.
-- Storyboard segment table.
-- Generated images.
-- TTS audio files.
-- Subtitle SRT.
-- Project and asset records for recovery and reuse.
-
-## Tech Stack
-
-| Layer | Stack |
-| --- | --- |
-| Frontend | Vue 3, Vite, Element Plus |
-| Backend | FastAPI, Python |
-| Database | Local SQLite |
-| Text generation | LiteLLM-compatible LLM providers |
-| Image generation | Agnes Image 2.1 Flash / OpenAI-compatible image API |
-| TTS | Doubao TTS, Xiaomi MiMo TTS |
-| Video export | FFmpeg |
-| Editable draft export | pyJianYingDraft |
-| Storage | Local media directories |
-
-## Repository Structure
-
-```text
-Auto-jianji/
-├── ai-kepu-video-server/          # FastAPI backend
-│   ├── api_server.py              # API entry
-│   ├── src/                       # pipeline, media, draft, export, API modules
-│   ├── data/                      # local SQLite and media, ignored by git
-│   └── output/                    # generated project output, ignored by git
-├── ai-kepu-video-web/frontend/    # Vue 3 + Vite frontend
-├── docs/                          # PRD and functional audit
-├── design-qa-artifacts/           # current product screenshots
-└── scripts/                       # QA capture scripts
+```bash
+git clone https://github.com/SkyNotSilent/ai-jianying-image-video.git
+cd ai-jianying-image-video
 ```
 
-## Local Development
-
-Default ports:
-
-- Frontend: `http://localhost:2001`
-- Backend: `http://localhost:2002`
-- API docs: `http://localhost:2002/docs`
-
-### Start Backend
+准备后端：
 
 ```bash
 cd ai-kepu-video-server
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+准备前端：
+
+```bash
+cd ../ai-kepu-video-web/frontend
+npm install
+```
+
+### 2. 启动后端
+
+在 `ai-kepu-video-server/` 中运行：
+
+```bash
 source venv/bin/activate
 python -m uvicorn api_server:app --host 0.0.0.0 --port 2002 --reload
 ```
 
-### Start Frontend
+- 后端：<http://localhost:2002>
+- API 文档：<http://localhost:2002/docs>
+- 健康检查：<http://localhost:2002/health>
+
+### 3. 启动前端
+
+另开一个终端，在 `ai-kepu-video-web/frontend/` 中运行：
 
 ```bash
-cd ai-kepu-video-web/frontend
-npm install
 npm run dev
 ```
 
-### Build / Check
+前端默认打开 <http://localhost:2001>。前端在没有额外环境变量时会连接 `http://localhost:2002`；如需覆盖，可设置 `VITE_API_BASE_URL`。
+
+### 4. 配置模型
+
+打开 <http://localhost:2001/settings>：
+
+1. 在“生文模型”里选择服务商，填写该服务商要求的凭证。
+2. 选择内置模型，或点击“验证并同步”读取当前账号可用的生文模型。
+3. 填写 Agnes 生图 API Key，并检查图片尺寸。
+4. 启用豆包、MiMo 或两者，选择新任务默认使用的配音 Provider。
+5. 选择开放音色并试听；需要克隆音色时，进入 MiMo 配置完成授权确认和参考音频上传。
+6. 点击“保存配置”。密钥保存在本机配置中，不要把 `data/config.json`、`.env` 或截图中的凭证提交到 Git。
+
+### 5. 完成第一次生成
+
+回到文稿页，输入一个主题，或者切换到文稿模式粘贴完整内容。完成画面比例、视觉风格、配音和字幕设置后开始生产。生成过程中可以在项目素材库查看已经完成的部分；生成结束后进入预览页逐段检查，再按需要导出 MP4 或剪映草稿。
+
+## 生文模型怎么配置
+
+生文调用由 LiteLLM 统一管理。普通配置不再要求先理解协议、Base URL 和模型 ID：先选择服务商，再选择模型即可。
+
+- 服务商和模型都是可搜索选择器。
+- 选择已知服务商后，项目会给出相应的连接字段、默认地址和推荐模型。
+- “验证并同步”会把账号实际可用模型合并到同一个模型选择器，不会再出现第二个需要手工抄写的输入框。
+- 同步结果只保留生文模型；图片、ASR、TTS、VoiceClone 和 VoiceDesign 等模型不会混进生文列表。
+- 已保存但暂时不在目录中的历史模型仍会保留，目录更新不会偷偷替换现有配置。
+- OpenAI-compatible 和 Anthropic-compatible 的自定义接口仍然可用，Base URL、协议和模型 ID 放在高级配置中。
+
+API Key 只用于当前本地服务连接。请不要把密钥写进 README、Issue、截图或任何会被推送到远端的文件。
+
+## 配音、试听与声音克隆
+
+豆包和 MiMo 可以同时开放。`tts.provider` 只表示新任务默认选择哪一端，不会关闭另一端；任务与分段会保存当时的 Provider、音色和语速快照，所以以后修改全局设置不会悄悄改变旧项目。
+
+### 豆包 TTS
+
+豆包支持 App ID / Access Token 和 API Key 两种认证方式。项目内置 10 个预置音色，默认开放当前账号常用的“爽快思思”和“讲解小明”，默认音色为“讲解小明”。
+
+豆包任务可以设置统一语速和 `volume_ratio`。只有账号真实有权限的音色才能正常生成；试听失败时，先检查认证方式、Cluster 和音色授权范围。
+
+### 小米 MiMo TTS
+
+MiMo 通过 OpenAI 兼容的 Chat Completions 形式返回音频，不使用常见的 `/v1/audio/speech` 路径。项目内置 9 个音色：`mimo_default`、冰糖、茉莉、苏打、白桦、Mia、Chloe、Milo 和 Dean。
+
+除了统一语速，MiMo 还支持风格提示词，例如更克制、更有活力或更像知识讲解。预置音色可以在配置页按 Provider 全选、部分选择或关闭，所有已开放音色都可以先试听再决定。
+
+### MiMo 声音克隆
+
+第一版完整支持 MiMo VoiceClone。你可以上传 MP3 / WAV，也可以直接使用浏览器录音。后端会把参考音频统一转换成 24 kHz、单声道 WAV，并保存在本地：
+
+1. 新建克隆音色并填写名称。
+2. 明确确认已经获得声音本人授权。
+3. 上传参考音频或完成录音。
+4. 输入试听文本，生成试听音频。
+5. 试听成功后再启用该克隆音色，并在生产配置中选择它。
+
+参考音频转成 Base64 后不能超过 10 MB。小米当前没有为这条链路提供远端持久化 `voice_id`，因此每次克隆合成都从本地参考音频临时组装请求；音频 Data URL 不会写入数据库、配置或日志。已经被任务引用的克隆音色删除时只会隐藏，不会破坏旧任务。
+
+## 失败以后，已经生成的内容怎么办
+
+任务状态为 `failed` 只表示后续流程停止，不代表清空已经完成的内容。InsightCut 会尽量保存当前脚本、分镜、图片提示词、图片、音频和草稿文件，并继续在素材库或预览页展示。
+
+你可以在已有内容上继续做三件事：
+
+- 替换或重新生成失败的单段图片、配音；
+- 修改分镜文字和画面提示词；
+- 在有恢复点时继续生成，或者直接使用已有素材完成后续编辑。
+
+## 输出内容
+
+- 带图片、配音、字幕和基础动态的 MP4。
+- 可继续编辑的剪映 / CapCut 草稿 ZIP。
+- 分镜文字、图片提示词和项目记录。
+- 每段生成图片与替换历史。
+- TTS 音频和字幕 SRT。
+- 可用于恢复、重配音和重新生成的本地素材记录。
+
+## 技术栈
+
+| 层 | 技术 |
+| --- | --- |
+| 前端 | React 19、React Router 7、Vite 4、Axios、Lucide |
+| 后端 | FastAPI、Python 3.9 |
+| 数据库 | 本地 SQLite |
+| 生文 | LiteLLM Provider Registry，兼容 OpenAI / Anthropic 协议 |
+| 生图 | Agnes Image 2.1 Flash，OpenAI-compatible Images API |
+| 配音 | 豆包 TTS、小米 MiMo TTS、MiMo VoiceClone |
+| 视频 | FFmpeg、imageio-ffmpeg |
+| 剪映草稿 | pyJianYingDraft |
+| 存储 | 本地 `data/media/` 与 `output/` |
+
+## 项目结构
+
+```text
+ai-jianying-image-video/
+├── ai-kepu-video-server/          # FastAPI 后端
+│   ├── api_server.py              # Web API 入口
+│   ├── src/                       # 生文、生图、配音、任务和导出逻辑
+│   ├── data/                      # 本地 SQLite、媒体和配置（不提交）
+│   └── output/                    # 新任务生成结果（不提交）
+├── ai-kepu-video-web/frontend/    # React 19 + Vite 前端
+├── assets/                        # 内置视觉风格预览
+├── design-qa-artifacts/           # 当前产品界面截图
+├── docs/                          # 产品、设计和工程文档
+└── scripts/                       # 本地 QA 工具
+```
+
+## 测试与构建
+
+后端：
 
 ```bash
 cd ai-kepu-video-server
 source venv/bin/activate
-python -m compileall src api_server.py
+python -m pytest -q
+```
 
-cd ../ai-kepu-video-web/frontend
+前端：
+
+```bash
+cd ai-kepu-video-web/frontend
+npm test
 npm run build
 ```
 
-## Configuration
+只做本地维护巡检时，可以在后端目录运行：
 
-Runtime model configuration is managed locally. The frontend API settings page can configure:
+```bash
+python scripts/maintenance_report.py --dry-run
+```
 
-- LLM protocol, base URL, API key, and model.
-- Image generation API URL, API key, and model.
-- TTS provider and voice settings.
+只有显式改为 `--apply` 才会删除数据库未引用的媒体文件。
 
-Local runtime files are intentionally ignored:
+## 本地数据与安全
 
-- `.env`
-- `data/`
-- `output/`
-- `logs/`
-- generated media and real API keys
+下面这些内容不应该进入版本库：
 
-## Documentation
+- `.env` 和真实 API Key、Access Token、App ID；
+- `ai-kepu-video-server/data/local.db`；
+- `data/media/`、`output/` 和生成日志；
+- MiMo 声音克隆参考音频与试听文件；
+- 含有账号信息、密钥或本地绝对路径的截图。
 
-- [Product Redesign PRD](docs/insightcut-redesign-prd.md)
-- [Functional Audit](docs/insightcut-functional-audit.md)
-- [Design QA Notes](design-qa.md)
-- [Engineering Workflow](docs/engineering-workflow.md)
-- [Repository Hygiene](docs/repo-hygiene.md)
-- [GitHub Settings](docs/github-settings.md)
+媒体服务统一通过 `/media/{file_path}` 访问，先查找 `output/`，再回退到 `data/media/`。项目当前只使用本地 SQLite 和本地文件存储，不会自动把密钥或克隆音频上传到 InsightCut 自有服务。
 
-## Status
+## 更多文档
 
-InsightCut is an active local-first product prototype. The current version focuses on a complete single-user workflow:
+- [产品重构 PRD](docs/insightcut-redesign-prd.md)
+- [功能审计](docs/insightcut-functional-audit.md)
+- [设计 QA 记录](design-qa.md)
+- [工程协作流程](docs/engineering-workflow.md)
+- [仓库维护约定](docs/repo-hygiene.md)
+- [GitHub 设置](docs/github-settings.md)
 
-- manuscript preparation
-- project assets
-- API configuration
-- production setup
-- generation progress
-- preview editing
-- export center
-- failure recovery
+## 当前阶段
 
-Not included in v1 scope: collaboration, cloud billing, multi-tenant user management, template marketplace, and hosted media storage.
+InsightCut 仍是一个持续迭代的、本地优先的单用户产品原型。当前重点是把个人创作者最常用的一条链路做完整：文稿、模型配置、分镜、素材、配音、预览、失败恢复和导出。
+
+多人协作、云端计费、多租户账号、模板市场和托管媒体存储不在当前版本范围内。
+
+## Keywords
+
+`AI video generation` · `AI image video` · `image-to-video` · `AI explainer video` · `AI cognition video` · `local-first video workflow` · `storyboard editor` · `TTS voiceover` · `voice cloning` · `MP4 export` · `Jianying draft` · `CapCut draft` · `FastAPI` · `React` · `Vite` · `FFmpeg`
+
+中文关键词：`AI 视频生成`、`AI 图片视频`、`AI 认知视频`、`AI 解说视频`、`文稿转视频`、`分镜编辑`、`音色试听`、`声音克隆`、`剪映草稿导出`、`本地优先素材管理`。
 
 ## License
 
-No license has been declared yet. Treat this repository as source-available unless a license is added.
+项目目前尚未声明开源许可证。在新增许可证前，请将本仓库视为 source-available 项目。

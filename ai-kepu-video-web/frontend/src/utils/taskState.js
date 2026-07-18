@@ -2,6 +2,7 @@ export function deriveTaskState({ task = {}, segments = [], exportState = null }
   const rawStatus = task?.status || exportState?.status || 'completed'
   const segmentList = Array.isArray(segments) ? segments : []
   const hasSegmentEvidence = segmentList.length > 0
+  const hasCheckpointEvidence = Boolean(task?.can_resume) || hasSegmentEvidence || Boolean(task?.script_text?.trim?.())
   const hasError = Boolean(task?.error)
   const hasFailedSegment = segmentList.some((segment) => segment.image_status === 'failed' || segment.audio_status === 'failed')
   const hasMissingAsset = segmentList.some((segment) => !segment.image_url || !segment.audio_url)
@@ -17,6 +18,18 @@ export function deriveTaskState({ task = {}, segments = [], exportState = null }
       tone: 'info',
       actionLabel: '查看进度',
       canPreview: false,
+      canExport: false,
+      canRecover: true,
+    }
+  }
+
+  if (rawStatus === 'interrupted' || (rawStatus === 'failed' && hasCheckpointEvidence)) {
+    return {
+      key: 'interrupted',
+      label: rawStatus === 'failed' ? '失败可继续' : '生成已中断',
+      tone: 'warning',
+      actionLabel: '继续生成',
+      canPreview: hasSegmentEvidence,
       canExport: false,
       canRecover: true,
     }

@@ -1,6 +1,6 @@
 # InsightCut Frontend
 
-基于 Vue 3 + Vite + Vant 4 的前端工作台，用于创建、预览、编辑和导出 AI 解释型视频。
+基于 React 19 + React Router 7 + Vite 4 的前端工作台，用于创建、预览、编辑和导出图片视频项目。
 
 ## 功能
 
@@ -23,6 +23,7 @@ npm run dev -- --host 127.0.0.1 --port 2001
 ## 构建
 
 ```bash
+npm test
 npm run build
 ```
 
@@ -30,8 +31,11 @@ npm run build
 
 ## 主要路由
 
-- `/#/`：创建任务 / 资产记录
-- `/#/settings`：模型配置
-- `/#/process/:taskId`：生成进度
-- `/#/preview/:taskId`：预览与编辑
-- `/#/result/:taskId`：结果导出
+- `/`、`/manuscript/:draftId?`：文稿准备
+- `/production/:draftId`：生产设置
+- `/process/:taskId`：生成进度
+- `/preview/:taskId`：预览与编辑
+- `/export/:taskId`：结果导出
+- `/assets`：项目资产
+- `/settings`：模型配置
+- `/result/:taskId`：兼容旧链接并重定向到导出页

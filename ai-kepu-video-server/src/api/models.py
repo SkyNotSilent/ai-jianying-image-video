@@ -3,7 +3,7 @@ API 数据模型
 定义请求和响应的数据结构
 """
 
-from typing import Optional, List
+from typing import Literal, Optional, List
 from pydantic import BaseModel, Field
 from enum import Enum
 
@@ -12,8 +12,10 @@ class TaskStatus(str, Enum):
     """任务状态枚举"""
     PENDING = "pending"
     PROCESSING = "processing"
+    INTERRUPTED = "interrupted"
     COMPLETED = "completed"
     FAILED = "failed"
+    DELETING = "deleting"
 
 
 class StepStatus(str, Enum):
@@ -22,6 +24,21 @@ class StepStatus(str, Enum):
     PROCESSING = "processing"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+class TTSOptions(BaseModel):
+    """可按任务或分段固化的 TTS 参数。"""
+
+    speed_level: Literal["very_slow", "slow", "normal", "fast", "very_fast"] = "normal"
+    volume_ratio: Optional[float] = Field(None, ge=0.5, le=2.0)
+    style_prompt: Optional[str] = Field(None, max_length=300)
+
+
+class RegenerateAudioRequest(BaseModel):
+    """单段重配音的 JSON 请求；查询参数仍保留兼容。"""
+
+    voice_type: Optional[str] = Field(None, description="统一音色 ID")
+    tts_options: Optional[TTSOptions] = None
 
 
 class CreateTaskRequest(BaseModel):
@@ -33,6 +50,7 @@ class CreateTaskRequest(BaseModel):
     ratio: str = Field(default="16:9", description="视频比例：16:9/9:16/3:4")
     length: int = Field(default=300, ge=0, le=2000, description="主题模式下的目标脚本字数；0 表示自动")
     voice_type: Optional[str] = Field(None, description="TTS 音色 ID")
+    tts_options: Optional[TTSOptions] = None
 
 
 class CreateTaskFromImagesRequest(BaseModel):
@@ -41,6 +59,7 @@ class CreateTaskFromImagesRequest(BaseModel):
     ratio: Optional[str] = Field(default="16:9", description="视频比例：16:9/9:16/1:1")
     voice_type: Optional[str] = Field(None, description="TTS 音色 ID")
     name: Optional[str] = Field(None, max_length=100, description="项目名称")
+    tts_options: Optional[TTSOptions] = None
 
 
 class StepProgress(BaseModel):
@@ -74,10 +93,12 @@ class TaskResponse(BaseModel):
     task_id: str = Field(..., description="任务ID")
     status: TaskStatus = Field(..., description="任务状态")
     voice_type: Optional[str] = Field(None, description="任务创建时使用的 TTS 音色 ID")
+    tts_options: Optional[TTSOptions] = Field(None, description="任务创建时固化的 TTS 参数")
     progress: Optional[TaskProgress] = Field(None, description="任务进度")
     result: Optional[TaskResult] = Field(None, description="任务结果")
     extract_path: Optional[str] = Field(None, description="用户上次使用的解压路径")
     error: Optional[str] = Field(None, description="错误信息")
+    can_resume: bool = Field(False, description="是否存在可继续生成的检查点")
 
 
 class CreateTaskResponse(BaseModel):

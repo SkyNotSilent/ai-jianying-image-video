@@ -9,10 +9,86 @@ import request from './request'
  * 获取可用的 TTS 音色列表
  * @returns {Promise<Array>} 音色列表
  */
-export function getVoices() {
+export function getVoices(params = {}) {
   return request({
     url: '/ai/native/video/kepu/voices',
-    method: 'get'
+    method: 'get',
+    params
+  })
+}
+
+export function updateVoiceAvailability(voiceKeys) {
+  return request({
+    url: '/ai/native/video/kepu/voices/availability',
+    method: 'put',
+    data: { voice_keys: voiceKeys }
+  })
+}
+
+export function previewVoice(data) {
+  return request({
+    url: '/ai/native/video/kepu/voices/preview',
+    method: 'post',
+    data,
+    timeout: 120000
+  })
+}
+
+export function getVoiceClones(params = {}) {
+  return request({
+    url: '/ai/native/video/kepu/voice-clones',
+    method: 'get',
+    params
+  })
+}
+
+export function createVoiceClone({ name, consentConfirmed, file }) {
+  const formData = new FormData()
+  formData.append('name', name)
+  formData.append('consent_confirmed', String(Boolean(consentConfirmed)))
+  formData.append('file', file)
+  return request({
+    url: '/ai/native/video/kepu/voice-clones',
+    method: 'post',
+    data: formData,
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 120000
+  })
+}
+
+export function updateVoiceClone(cloneId, data) {
+  return request({
+    url: `/ai/native/video/kepu/voice-clones/${cloneId}`,
+    method: 'patch',
+    data
+  })
+}
+
+export function replaceVoiceCloneReference(cloneId, file) {
+  const formData = new FormData()
+  formData.append('file', file)
+  return request({
+    url: `/ai/native/video/kepu/voice-clones/${cloneId}/reference`,
+    method: 'put',
+    data: formData,
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 120000
+  })
+}
+
+export function previewVoiceClone(cloneId, data = {}) {
+  return request({
+    url: `/ai/native/video/kepu/voice-clones/${cloneId}/preview`,
+    method: 'post',
+    data,
+    timeout: 120000
+  })
+}
+
+export function deleteVoiceClone(cloneId) {
+  return request({
+    url: `/ai/native/video/kepu/voice-clones/${cloneId}`,
+    method: 'delete'
   })
 }
 
@@ -38,6 +114,19 @@ export function fetchConfigModels(data) {
     data
   })
 }
+
+export const getLlmProviders = () => request({
+  url: '/ai/native/video/kepu/config/llm-providers', method: 'get'
+})
+
+export const getLlmProviderModels = providerId => request({
+  url: `/ai/native/video/kepu/config/llm-providers/${providerId}/models`, method: 'get'
+})
+
+export const refreshLlmProviderModels = (providerId, data) => request({
+  url: `/ai/native/video/kepu/config/llm-providers/${providerId}/models/refresh`,
+  method: 'post', data, timeout: 30000
+})
 
 export function testTtsConfig(data) {
   return request({
@@ -116,15 +205,23 @@ export function getTaskStatus(taskId) {
   })
 }
 
+export function resumeTask(taskId) {
+  return request({
+    url: `/ai/native/video/kepu/tasks/${taskId}/resume`,
+    method: 'post'
+  })
+}
+
 /**
  * 删除任务
  * @param {string} taskId - 任务ID
  * @returns {Promise<{message: string}>}
  */
-export function deleteTask(taskId) {
+export function deleteTask(taskId, { deleteFiles = true } = {}) {
   return request({
     url: `/ai/native/video/kepu/tasks/${taskId}`,
-    method: 'delete'
+    method: 'delete',
+    params: { delete_files: deleteFiles }
   })
 }
 
@@ -278,11 +375,16 @@ export function uploadImage(taskId, segmentIndex, file) {
  * @param {string} voiceType - TTS 音色 ID（可选）
  * @returns {Promise<{message: string, audio_path: string}>}
  */
-export function regenerateAudio(taskId, segmentIndex, voiceType = null) {
+export function regenerateAudio(taskId, segmentIndex, voiceOrPayload = null, ttsOptions = null) {
+  const data = typeof voiceOrPayload === 'object' && voiceOrPayload !== null
+    ? voiceOrPayload
+    : (voiceOrPayload || ttsOptions)
+      ? { voice_type: voiceOrPayload || null, tts_options: ttsOptions || null }
+      : undefined
   return request({
     url: `/ai/native/video/kepu/tasks/${taskId}/segments/${segmentIndex}/regenerate-audio`,
     method: 'post',
-    params: voiceType ? { voice_type: voiceType } : {},
+    data,
     timeout: 120000  // 2分钟超时
   })
 }

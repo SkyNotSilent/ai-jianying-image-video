@@ -8,6 +8,7 @@ import uuid
 import time
 import logging
 import os
+import json
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Callable
 from threading import Thread, Lock
@@ -16,6 +17,9 @@ from .models import (
     StepProgress, TaskResult, TaskResponse
 )
 from src.database import db_client, redis_client
+from src.config import Config
+from .task_cleanup import DeletionReport, collect_task_paths, delete_task_files
+from .task_runtime import task_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +63,17 @@ def _parse_task_datetime(value) -> Optional[datetime]:
 class Task:
     """任务对象"""
 
-    def __init__(self, task_id: str, theme: str, style: str, length: int, voice_type: Optional[str] = None, name: Optional[str] = None, ratio: str = "16:9"):
+    def __init__(
+        self,
+        task_id: str,
+        theme: str,
+        style: str,
+        length: int,
+        voice_type: Optional[str] = None,
+        name: Optional[str] = None,
+        ratio: str = "16:9",
+        tts_options: Optional[Dict] = None,
+    ):
         self.task_id = task_id
         self.theme = theme
         self.name = name or theme[:20]
@@ -67,9 +81,11 @@ class Task:
         self.ratio = ratio or "16:9"
         self.length = length
         self.voice_type = voice_type
+        self.tts_options = dict(tts_options or {})
         self.status = TaskStatus.PENDING
         self.created_at = datetime.now().isoformat()
         self.error: Optional[str] = None
+        self.can_resume = False
         self.result: Optional[TaskResult] = None
         self.extract_path: Optional[str] = None
 
@@ -181,10 +197,16 @@ class Task:
             task_id=self.task_id,
             status=self.status,
             voice_type=self.voice_type,
-            progress=progress if self.status in [TaskStatus.PENDING, TaskStatus.PROCESSING] else None,
+            tts_options=self.tts_options or None,
+            progress=progress if self.status in [
+                TaskStatus.PENDING,
+                TaskStatus.PROCESSING,
+                TaskStatus.INTERRUPTED,
+            ] else None,
             result=self.result,
             extract_path=self.extract_path,
-            error=self.error
+            error=self.error,
+            can_resume=self.can_resume,
         )
 
 
@@ -194,16 +216,32 @@ class TaskManager:
     def __init__(self):
         self.tasks: Dict[str, Task] = {}
         self.lock = Lock()
+        self.deletion_lock = Lock()
+        self.deletion_claims = set()
+        self.deleted_task_ids = set()
+        self.deletion_reports: Dict[str, DeletionReport] = {}
 
-    def create_task(self, theme: str, style: str, length: int, voice_type: Optional[str] = None, name: Optional[str] = None, ratio: str = "16:9") -> str:
+    def create_task(
+        self,
+        theme: str,
+        style: str,
+        length: int,
+        voice_type: Optional[str] = None,
+        name: Optional[str] = None,
+        ratio: str = "16:9",
+        tts_options: Optional[Dict] = None,
+    ) -> str:
         """创建新任务"""
         task_id = uuid.uuid4().hex
-        task = Task(task_id, theme, style, length, voice_type, name, ratio)
+        task = Task(task_id, theme, style, length, voice_type, name, ratio, tts_options)
 
         with self.lock:
             self.tasks[task_id] = task
 
-        db_client.create_task(task_id, theme, style, length, name, ratio, voice_type)
+        db_client.create_task(
+            task_id, theme, style, length, name, ratio, voice_type,
+            tts_options=task.tts_options,
+        )
 
         # 缓存到内存
         task_data = {
@@ -213,6 +251,7 @@ class TaskManager:
             "ratio": ratio,
             "length": length,
             "voice_type": voice_type,
+            "tts_options": task.tts_options,
             "status": "pending",
             "created_at": task.created_at,
         }
@@ -225,17 +264,27 @@ class TaskManager:
         """获取任务（优先从运行时内存，然后缓存，最后本地数据库）"""
         # 1. 从内存获取
         with self.lock:
-            if task_id in self.tasks:
-                db_data = db_client.get_task(task_id)
-                if db_data and self.fail_stale_task_data(db_data):
-                    self.tasks.pop(task_id, None)
-                    return self._rebuild_task_from_db(db_data)
-                return self.tasks[task_id]
+            memory_task = self.tasks.get(task_id)
+        if memory_task:
+            db_data = db_client.get_task(task_id)
+            if db_data and self.fail_stale_task_data(db_data):
+                rebuilt = self._rebuild_task_from_db(db_data)
+                with self.lock:
+                    if rebuilt:
+                        self.tasks[task_id] = rebuilt
+                    else:
+                        self.tasks.pop(task_id, None)
+                return rebuilt
+            if db_data:
+                memory_task.can_resume = self._has_recovery_checkpoint(db_data)
+            return memory_task
 
         # 2. 从缓存获取
         cached_data = redis_client.get_task(task_id)
         if cached_data:
-            if cached_data.get("status") in {"pending", "processing"}:
+            if cached_data.get("status") in {
+                "pending", "processing", "failed", "interrupted"
+            }:
                 db_data = db_client.get_task(task_id)
                 if db_data:
                     self.fail_stale_task_data(db_data)
@@ -266,6 +315,16 @@ class TaskManager:
 
         return None
 
+    def _has_recovery_checkpoint(self, data: dict) -> bool:
+        if not data or data.get("status") not in {
+            TaskStatus.FAILED.value,
+            TaskStatus.INTERRUPTED.value,
+        }:
+            return False
+        return bool(
+            data.get("script_text") or db_client.get_segments(data["task_id"])
+        )
+
     def _rebuild_task_from_cache(self, data: dict) -> Optional[Task]:
         """从缓存数据重建 Task 对象"""
         try:
@@ -276,6 +335,7 @@ class TaskManager:
                 data["length"],
                 voice_type=data.get("voice_type"),
                 ratio=data.get("ratio", "16:9"),
+                tts_options=data.get("tts_options"),
             )
             task.status = TaskStatus(data["status"])
             task.created_at = data["created_at"]
@@ -283,6 +343,7 @@ class TaskManager:
                 task.error = data["error"]
             if "extract_path" in data:
                 task.extract_path = data["extract_path"]
+            task.can_resume = bool(data.get("can_resume"))
             if "result" in data and data["result"]:
                 task.result = TaskResult(**data["result"])
 
@@ -305,6 +366,12 @@ class TaskManager:
     def _rebuild_task_from_db(self, data: dict) -> Optional[Task]:
         """从数据库数据重建 Task 对象"""
         try:
+            raw_tts_options = data.get("tts_options_json")
+            if isinstance(raw_tts_options, str):
+                try:
+                    raw_tts_options = json.loads(raw_tts_options)
+                except (TypeError, ValueError):
+                    raw_tts_options = {}
             task = Task(
                 data["task_id"],
                 data["theme"],
@@ -312,12 +379,14 @@ class TaskManager:
                 data["length"],
                 voice_type=data.get("voice_type"),
                 ratio=data.get("ratio", "16:9"),
+                tts_options=raw_tts_options,
             )
             task.status = TaskStatus(data["status"])
             task.created_at = data["created_at"].isoformat() if hasattr(data["created_at"], "isoformat") else str(data["created_at"])
             task.current_step = data.get("current_step", "pending")
             task.error = data.get("error")
             task.extract_path = data.get("extract_path")
+            task.can_resume = self._has_recovery_checkpoint(data)
 
             # 重建结果
             if data.get("result"):
@@ -356,9 +425,11 @@ class TaskManager:
             "ratio": task.ratio,
             "length": task.length,
             "voice_type": task.voice_type,
+            "tts_options": task.tts_options,
             "status": task.status,
             "created_at": task.created_at,
             "error": task.error,
+            "can_resume": task.can_resume,
             "extract_path": task.extract_path,
             "result": task.result.dict() if task.result else None,
         }
@@ -371,11 +442,18 @@ class TaskManager:
             changed = self.fail_stale_task_data(row) or changed
         if changed:
             rows = db_client.list_tasks(status=status, limit=limit, offset=offset)
-        return rows
+        return [
+            row for row in rows
+            if row.get("status") != TaskStatus.DELETING.value
+        ]
 
     def fail_stale_task_data(self, data: dict) -> bool:
-        """将长时间无更新的 pending/processing 任务标记为失败"""
+        """Mark an orphaned stale task interrupted without touching live work."""
         if not data or data.get("status") not in {"pending", "processing"}:
+            return False
+
+        task_id = data["task_id"]
+        if task_runtime.is_running(task_id):
             return False
 
         step_name = data.get("current_step") or "pending"
@@ -388,26 +466,60 @@ class TaskManager:
         if elapsed_seconds < timeout_seconds:
             return False
 
-        error = f"任务在 {step_name} 阶段超过 {timeout_seconds // 60} 分钟无进度更新，已自动判定失败"
-        task_id = data["task_id"]
+        error = (
+            f"任务在 {step_name} 阶段超过 {timeout_seconds // 60} 分钟无进度更新，"
+            "已保存现有内容，可继续生成"
+        )
         logger.warning("[%s] %s", task_id, error)
-        db_client.update_task_status(task_id, "failed", step_name, error)
-        db_client.update_step(task_id, step_name, "failed")
+        if not db_client.mark_task_interrupted(task_id, step_name, error):
+            return False
+        with self.lock:
+            task = self.tasks.get(task_id)
+            if task:
+                task.status = TaskStatus.INTERRUPTED
+                task.error = error
         redis_client.delete_task(task_id)
-        data["status"] = "failed"
+        data["status"] = TaskStatus.INTERRUPTED.value
         data["error"] = error
         return True
 
     def mark_stale_tasks_failed(self, limit: int = 200) -> int:
-        rows = db_client.list_tasks(status="pending", limit=limit, offset=0)
-        rows.extend(db_client.list_tasks(status="processing", limit=limit, offset=0))
-        return sum(1 for row in rows if self.fail_stale_task_data(row))
+        """兼容旧启动调用，遗留任务现在标记为可恢复的中断状态。"""
+        return self.mark_orphaned_tasks_interrupted(limit=limit)
+
+    def mark_orphaned_tasks_interrupted(self, limit: int = 200) -> int:
+        """将上一个进程遗留的运行任务标记为可恢复的中断状态。"""
+        pending_rows = db_client.list_tasks(status="pending", limit=limit, offset=0)
+        remaining = max(0, limit - len(pending_rows))
+        processing_rows = db_client.list_tasks(
+            status="processing", limit=remaining, offset=0
+        ) if remaining else []
+        interrupted_count = 0
+        error = "服务重启导致任务中断，可继续生成"
+
+        for row in pending_rows + processing_rows:
+            task_id = row["task_id"]
+            if not db_client.update_task_status(
+                task_id,
+                TaskStatus.INTERRUPTED.value,
+                row.get("current_step"),
+                error,
+            ):
+                continue
+            with self.lock:
+                self.tasks.pop(task_id, None)
+            redis_client.delete_task(task_id)
+            interrupted_count += 1
+
+        return interrupted_count
 
     def update_task_status(self, task_id: str, status: TaskStatus):
         """更新任务状态"""
         task = self.get_task(task_id)
         if task:
             task.status = status
+            if status == TaskStatus.PROCESSING:
+                task.error = None
             logger.info(f"[{task_id}] 状态更新: {status}")
 
             # 更新到本地数据库
@@ -415,6 +527,18 @@ class TaskManager:
 
             # 更新到内存缓存
             redis_client.cache_task(task_id, self._task_to_dict(task))
+
+    def mark_task_interrupted(self, task_id: str, error: str) -> bool:
+        """Preserve checkpoints and expose the task as resumable."""
+        task = self.get_task(task_id)
+        current_step = task.current_step if task else None
+        if not db_client.mark_task_interrupted(task_id, current_step, error):
+            return False
+        if task:
+            task.status = TaskStatus.INTERRUPTED
+            task.error = error
+            redis_client.cache_task(task_id, self._task_to_dict(task))
+        return True
 
     def set_task_result(self, task_id: str, draft_path: str, segments_count: int, draft_url: str = None, video_url: str = None):
         """设置任务结果"""
@@ -465,12 +589,148 @@ class TaskManager:
 
     def delete_task(self, task_id: str) -> bool:
         """删除任务及其所有关联数据"""
+        deleted = db_client.delete_task(task_id)
+        if not deleted:
+            return False
         with self.lock:
             self.tasks.pop(task_id, None)
         redis_client.delete_task(task_id)
-        db_client.delete_task(task_id)
         logger.info(f"任务已删除: {task_id}")
         return True
+
+    def _allowed_storage_roots(self):
+        return [Config.BASE_DIR / "output", Config.BASE_DIR / "data" / "media"]
+
+    def _snapshot_task_paths(self, task_id: str):
+        task_row = db_client.get_task(task_id)
+        if not task_row:
+            return None, set()
+        segments = db_client.get_segments(task_id)
+        assets = db_client.list_task_assets(task_id)
+        return task_row, collect_task_paths(task_row, segments, assets)
+
+    def _finish_delete(self, task_id: str, delete_files: bool, initial_paths) -> bool:
+        task_row, latest_paths = self._snapshot_task_paths(task_id)
+        paths = set(initial_paths) | latest_paths
+        if task_row and not self.delete_task(task_id):
+            raise RuntimeError(f"[{task_id}] 删除任务数据库记录失败")
+
+        report = DeletionReport(0, 0, [], [])
+        if delete_files:
+            try:
+                report = delete_task_files(paths, self._allowed_storage_roots())
+            except Exception as exc:
+                logger.exception("[%s] 任务记录已删除，但文件清理异常", task_id)
+                report = DeletionReport(0, 0, [], [str(exc)])
+            else:
+                if report.skipped_paths:
+                    logger.warning(
+                        "[%s] 跳过存储根目录外的任务路径: %s",
+                        task_id,
+                        report.skipped_paths,
+                    )
+                if report.failed_paths:
+                    logger.error(
+                        "[%s] 任务记录已删除，但文件清理失败: %s",
+                        task_id,
+                        report.failed_paths,
+                    )
+                logger.info(
+                    "[%s] 文件清理完成: files=%s directories=%s",
+                    task_id,
+                    report.deleted_files,
+                    report.deleted_directories,
+                )
+
+        with self.deletion_lock:
+            self.deleted_task_ids.add(task_id)
+            self.deletion_reports[task_id] = report
+        return True
+
+    def get_deletion_report(self, task_id: str):
+        with self.deletion_lock:
+            return self.deletion_reports.get(task_id)
+
+    def _run_deferred_delete(self, task_id: str, delete_files: bool, initial_paths):
+        try:
+            while not task_runtime.wait_until_stopped(task_id, timeout=30):
+                logger.info("[%s] 等待运行任务停止后继续删除", task_id)
+            self._finish_delete(task_id, delete_files, initial_paths)
+        except Exception:
+            logger.exception("[%s] 延迟删除任务失败", task_id)
+        finally:
+            with self.deletion_lock:
+                self.deletion_claims.discard(task_id)
+            task_runtime.finish_delete(task_id)
+
+    def request_delete(self, task_id: str, delete_files: bool = False) -> str:
+        """Claim one full deletion and defer it while execution is active."""
+        with self.deletion_lock:
+            if task_id in self.deleted_task_ids:
+                return "deleted"
+            if task_id in self.deletion_claims:
+                return "deleting"
+            if not task_runtime.claim_delete(task_id):
+                return "deleting"
+            task_row, initial_paths = self._snapshot_task_paths(task_id)
+            if not task_row:
+                task_runtime.finish_delete(task_id)
+                return "missing"
+            self.deletion_claims.add(task_id)
+
+        try:
+            if not db_client.set_task_deletion_intent(task_id, delete_files):
+                raise RuntimeError(f"[{task_id}] 保存文件删除意图失败")
+            if not db_client.update_task_status(
+                task_id,
+                TaskStatus.DELETING.value,
+                task_row.get("current_step"),
+                task_row.get("error"),
+            ):
+                raise RuntimeError(f"[{task_id}] 标记任务删除中失败")
+            with self.lock:
+                task = self.tasks.get(task_id)
+                if task:
+                    task.status = TaskStatus.DELETING
+            redis_client.delete_task(task_id)
+
+            if task_runtime.is_running(task_id):
+                task_runtime.request_cancel(task_id)
+                thread = Thread(
+                    target=self._run_deferred_delete,
+                    args=(task_id, delete_files, initial_paths),
+                )
+                thread.daemon = True
+                thread.start()
+                return "deleting"
+
+            self._finish_delete(task_id, delete_files, initial_paths)
+            return "deleted"
+        except Exception:
+            with self.deletion_lock:
+                self.deletion_claims.discard(task_id)
+            task_runtime.finish_delete(task_id)
+            raise
+        finally:
+            if not task_runtime.is_running(task_id):
+                with self.deletion_lock:
+                    if task_id in self.deleted_task_ids:
+                        self.deletion_claims.discard(task_id)
+                        task_runtime.finish_delete(task_id)
+
+    def complete_deleting_tasks(self, limit: int = 200) -> int:
+        """Finish deletions persisted by a previous server process."""
+        completed = 0
+        rows = db_client.list_tasks(
+            status=TaskStatus.DELETING.value,
+            limit=limit,
+            offset=0,
+        )
+        for row in rows:
+            delete_files = bool(row.get("delete_files_on_delete"))
+            if self.request_delete(row["task_id"], delete_files=delete_files) == "deleted":
+                completed += 1
+        return completed
 
 
 # 全局任务管理器实例

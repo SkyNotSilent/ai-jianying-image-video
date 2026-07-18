@@ -1,0 +1,320 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+
+import {
+  applyProviderPreset,
+  buildProviderRefreshPayload,
+  chooseProviderModel,
+  fallbackProviders,
+  isLlmProviderReady,
+  isCurrentProviderRequest,
+  mergeProviderModels,
+  modelGroups,
+  normalizeProviders,
+  providerGroups,
+  switchProviderDraft,
+} from '../src/lib/llmProviderCatalog.js'
+
+test('provider group output exposes stable listbox option keys', () => {
+  const groups = providerGroups(normalizeProviders({ providers: [
+    { id: 'mimo', name: '小米 MiMo', group: 'project', config_status: 'ready' },
+    { id: 'bedrock', name: 'Amazon Bedrock', group: 'all', config_status: 'advanced' },
+  ] }), '')
+
+  assert.deepEqual(groups.flatMap(group => group.items).map(item => item.optionKey), [
+    'provider:mimo', 'provider:bedrock',
+  ])
+  assert.equal(groups[1].items[0].statusLabel, '需要高级配置')
+})
+
+test('Azure stays advanced and cannot report ready without runtime deployment mapping', () => {
+  const [azure] = normalizeProviders({ providers: [{
+    id: 'azure',
+    name: 'Azure OpenAI',
+    group: 'all',
+    config_status: 'advanced',
+    credential_fields: [
+      { id: 'api_key', required: true },
+      { id: 'api_version', required: true },
+    ],
+  }] })
+
+  assert.equal(azure.statusLabel, '需要高级配置')
+  assert.equal(isLlmProviderReady({
+    api_key: 'key',
+    provider_options: { api_version: '2025-01-01' },
+  }, azure), false)
+})
+
+test('model groups put account availability before catalog-only models', () => {
+  const grouped = modelGroups([
+    { id: 'one', label: 'One', sources: ['catalog'] },
+    { id: 'two', label: 'Two', sources: ['catalog', 'account'] },
+  ], '')
+
+  assert.deepEqual(grouped.map(group => group.key), ['account', 'catalog'])
+})
+
+test('provider fallback keeps the current connection and custom escape hatch', () => {
+  const providers = fallbackProviders({
+    provider: 'legacy-gateway',
+    protocol: 'anthropic',
+    base_url: 'https://legacy.test',
+    model: 'legacy-model',
+  })
+
+  assert.deepEqual(providers.map(provider => provider.id), ['legacy-gateway', 'custom'])
+  assert.equal(providers[0].recommended_model, 'legacy-model')
+  assert.equal(providers[0].default_base_url, 'https://legacy.test')
+})
+
+test('model initialization preserves drafts and only falls back to an available option', () => {
+  const provider = { recommended_model: 'provider/recommended' }
+  const models = [{ id: 'provider/first' }, { id: 'provider/recommended' }]
+
+  assert.equal(chooseProviderModel('saved/model', provider, models), 'saved/model')
+  assert.equal(chooseProviderModel('', provider, models), 'provider/recommended')
+  assert.equal(chooseProviderModel('', provider, models.slice(0, 1)), 'provider/first')
+  assert.equal(chooseProviderModel('', provider, []), '')
+})
+
+test('first-use presets fall back only while the untouched preset is still selected', () => {
+  const provider = { recommended_model: 'provider/missing' }
+  const models = [{ id: 'provider/first' }]
+  const firstUse = { firstUse: true, presetModel: 'provider/missing' }
+
+  assert.equal(
+    chooseProviderModel('provider/missing', provider, models, firstUse),
+    'provider/first',
+  )
+  assert.equal(
+    chooseProviderModel('provider/manual', provider, models, firstUse),
+    'provider/manual',
+  )
+  assert.equal(
+    chooseProviderModel('provider/missing', provider, models, { ...firstUse, firstUse: false }),
+    'provider/missing',
+  )
+})
+
+test('groups and searches recommended, project, and complete providers', () => {
+  const providers = normalizeProviders({ providers: [
+    { id: 'deepseek', name: 'DeepSeek', group: 'recommended' },
+    { id: 'mimo', name: '小米 MiMo', group: 'project' },
+    { id: 'bedrock', name: 'Amazon Bedrock', group: 'all' },
+  ] })
+
+  assert.deepEqual(providerGroups(providers, '').map(group => group.key), ['recommended', 'project', 'all'])
+  assert.deepEqual(providerGroups(providers, 'mimo')[0].items.map(item => item.id), ['mimo'])
+  assert.deepEqual(providerGroups(providers, 'BEDROCK')[0].items.map(item => item.id), ['bedrock'])
+})
+
+test('merges catalog, account, and current models without losing history', () => {
+  const models = mergeProviderModels(
+    [{ id: 'deepseek/deepseek-chat', label: 'DeepSeek Chat', sources: ['catalog'] }],
+    [{ id: 'deepseek/deepseek-chat', label: 'chat', sources: ['account'] }],
+    'deepseek/legacy-model',
+  )
+
+  assert.deepEqual(models.map(model => model.id), [
+    'deepseek/deepseek-chat', 'deepseek/legacy-model',
+  ])
+  assert.equal(models[0].label, 'DeepSeek Chat')
+  assert.deepEqual(models[0].sources.toSorted(), ['account', 'catalog'])
+  assert.equal(models[1].historical, true)
+})
+
+test('orders models as recommended, account, catalog, then historical', () => {
+  const models = mergeProviderModels(
+    [
+      { id: 'catalog', label: 'Catalog', sources: ['catalog'] },
+      { id: 'recommended', label: 'Recommended', sources: ['catalog'], recommended: true },
+    ],
+    [{ id: 'account', label: 'Account', sources: ['account'] }],
+    'legacy',
+  )
+
+  assert.deepEqual(models.map(model => model.id), ['recommended', 'account', 'catalog', 'legacy'])
+})
+
+test('marks the selected provider recommendation as the recommended group', () => {
+  const models = mergeProviderModels(
+    [
+      { id: 'provider/one', sources: ['catalog'] },
+      { id: 'provider/two', sources: ['catalog'] },
+    ],
+    [],
+    '',
+    'provider/two',
+  )
+
+  assert.equal(models[0].id, 'provider/two')
+  assert.equal(models[0].recommended, true)
+  assert.deepEqual(modelGroups(models).map(group => group.key), ['recommended', 'catalog'])
+})
+
+test('switching providers caches unsaved drafts and applies a first-use preset', () => {
+  const current = { provider: 'mimo', api_key: 'mimo-key', model: 'openai/mimo-v2.5-pro' }
+  const deepseek = {
+    id: 'deepseek',
+    default_base_url: 'https://api.deepseek.com',
+    recommended_model: 'deepseek/deepseek-chat',
+    compatibility_protocol: 'openai',
+  }
+  const result = switchProviderDraft({}, current, deepseek)
+
+  assert.equal(result.drafts.mimo.api_key, 'mimo-key')
+  assert.equal(result.llm.provider, 'deepseek')
+  assert.equal(result.llm.api_key, '')
+  assert.equal(result.llm.model, 'deepseek/deepseek-chat')
+  assert.equal(result.firstUse, true)
+  assert.equal(result.presetModel, 'deepseek/deepseek-chat')
+})
+
+test('restores only the selected provider draft without leaking provider options', () => {
+  const drafts = {
+    deepseek: {
+      provider: 'deepseek',
+      protocol: 'openai',
+      base_url: 'https://api.deepseek.com',
+      api_key: 'deepseek-key',
+      model: 'deepseek/deepseek-chat',
+      provider_options: { api_version: 'deepseek-only' },
+    },
+  }
+  const current = {
+    provider: 'bedrock',
+    model: 'bedrock/claude',
+    provider_options: { aws_region_name: 'us-east-1' },
+  }
+  const deepseek = { id: 'deepseek', recommended_model: 'deepseek/deepseek-chat' }
+  const mimo = { id: 'mimo', recommended_model: 'openai/mimo-v2.5-pro' }
+
+  const restored = switchProviderDraft(drafts, current, deepseek)
+  assert.deepEqual(restored.llm.provider_options, { api_version: 'deepseek-only' })
+  assert.deepEqual(restored.drafts.bedrock.provider_options, { aws_region_name: 'us-east-1' })
+  assert.equal(restored.firstUse, false)
+
+  const firstUse = switchProviderDraft(restored.drafts, restored.llm, mimo)
+  assert.deepEqual(firstUse.llm.provider_options, {})
+  assert.equal(drafts.bedrock, undefined)
+})
+
+test('applies a provider preset as a fresh isolated LLM config', () => {
+  const preset = applyProviderPreset(
+    { provider: 'bedrock', api_key: 'secret', provider_options: { aws_region_name: 'us-east-1' } },
+    {
+      id: 'anthropic',
+      compatibility_protocol: 'anthropic',
+      default_base_url: 'https://api.anthropic.com',
+      recommended_model: 'anthropic/claude-sonnet-4-5',
+    },
+  )
+
+  assert.deepEqual(preset, {
+    provider: 'anthropic',
+    protocol: 'anthropic',
+    base_url: 'https://api.anthropic.com',
+    api_key: '',
+    model: 'anthropic/claude-sonnet-4-5',
+    provider_options: {},
+  })
+})
+
+test('builds a provider refresh payload from the unsaved draft and allowed options', () => {
+  const payload = buildProviderRefreshPayload({
+    provider: 'azure',
+    protocol: '',
+    base_url: '',
+    api_key: 'azure-key',
+    model: 'azure/deployment',
+    provider_options: { api_version: '2025-01-01', unrelated: 'drop-me' },
+  }, {
+    id: 'azure',
+    compatibility_protocol: 'openai',
+    default_base_url: 'https://azure.test',
+    allowed_provider_options: ['api_version'],
+    credential_fields: [
+      { id: 'api_key', required: true },
+      { id: 'api_version', required: true },
+    ],
+  })
+
+  assert.deepEqual(payload, {
+    provider: 'azure',
+    protocol: 'openai',
+    base_url: 'https://azure.test',
+    api_key: 'azure-key',
+    model: 'azure/deployment',
+    provider_options: { api_version: '2025-01-01' },
+  })
+})
+
+test('does not promote custom credential fields into provider options', () => {
+  const payload = buildProviderRefreshPayload({
+    provider: 'custom',
+    protocol: 'anthropic',
+    base_url: 'https://custom.test',
+    api_key: 'custom-key',
+    model: 'custom-model',
+    provider_options: { model: 'must-not-leak', stale: 'drop-me' },
+  }, {
+    id: 'custom',
+    compatibility_protocol: 'openai',
+    allowed_provider_options: [],
+    credential_fields: [
+      { id: 'base_url', required: true },
+      { id: 'api_key', required: true },
+      { id: 'model', required: true },
+    ],
+  })
+
+  assert.equal(payload.model, 'custom-model')
+  assert.deepEqual(payload.provider_options, {})
+})
+
+test('checks registry credential fields across top-level and provider options', () => {
+  const provider = {
+    credential_fields: [
+      { id: 'api_key', required: true },
+      { id: 'base_url', required: true },
+      { id: 'aws_region_name', required: true },
+      { id: 'profile', required: false },
+    ],
+  }
+  const ready = {
+    api_key: 'key',
+    base_url: 'https://provider.test',
+    provider_options: { aws_region_name: 'us-east-1' },
+  }
+
+  assert.equal(isLlmProviderReady(ready, provider), true)
+  assert.equal(isLlmProviderReady({ ...ready, provider_options: {} }, provider), false)
+})
+
+test('reads the custom model credential from the top-level LLM draft', () => {
+  const custom = {
+    credential_fields: [
+      { id: 'base_url', required: true },
+      { id: 'api_key', required: true },
+      { id: 'model', required: true },
+    ],
+  }
+
+  assert.equal(isLlmProviderReady({
+    base_url: 'https://custom.test',
+    api_key: 'key',
+    model: 'custom-model',
+    provider_options: {},
+  }, custom), true)
+})
+
+test('provider responses apply only to the current load, request, and provider', () => {
+  const request = { loadGeneration: 3, requestId: 8, providerId: 'mimo' }
+
+  assert.equal(isCurrentProviderRequest({}, {}), false)
+  assert.equal(isCurrentProviderRequest(request, { ...request }), true)
+  assert.equal(isCurrentProviderRequest(request, { ...request, loadGeneration: 4 }), false)
+  assert.equal(isCurrentProviderRequest(request, { ...request, requestId: 9 }), false)
+  assert.equal(isCurrentProviderRequest(request, { ...request, providerId: 'deepseek' }), false)
+})
