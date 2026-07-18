@@ -139,7 +139,7 @@ Expected: the page is fully loaded, secrets remain masked, and no complete real 
 
 - [ ] **Step 2: Capture the model settings overview**
 
-Capture a desktop-width image at approximately 1536 px wide showing:
+Capture a `1600 × 900` 16:9 desktop landscape image showing:
 
 - the API configuration header and readiness summary;
 - LLM provider and model selectors with visible dropdown affordances;
@@ -165,7 +165,7 @@ sips -g pixelWidth -g pixelHeight design-qa-artifacts/current-settings.png desig
 ls -lh design-qa-artifacts/current-settings.png design-qa-artifacts/current-settings-tts.png
 ```
 
-Expected: both are non-empty PNG images, wide enough to remain readable in GitHub, and neither is an empty/loading/error capture.
+Expected: both are non-empty `1600 × 900` PNG images, readable in GitHub's two-column layout, and neither is an empty/loading/error capture.
 
 - [ ] **Step 5: Add the screenshots to the README**
 
