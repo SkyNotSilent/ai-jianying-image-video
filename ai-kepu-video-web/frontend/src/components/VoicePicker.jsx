@@ -22,14 +22,15 @@ export function VoicePicker({
   previewError = '',
   showAdvanced = true,
   includeUnavailable = false,
-  allowAvailabilityToggle = false,
+  manageAvailability = false,
+  optionsProvider = '',
   onAvailabilityChange,
   compact = false,
 }) {
   const normalized = normalizeVoiceCatalog(voices)
   const groups = groupVisibleVoices(normalized, { includeUnavailable })
   const selected = normalized.find(voice => voice.id === value)
-  const provider = selected?.provider || (String(value).startsWith('doubao:') ? 'doubao' : 'mimo')
+  const provider = selected?.provider || optionsProvider || (String(value).startsWith('doubao:') ? 'doubao' : 'mimo')
   const options = mergeTtsOptions({}, ttsOptions, provider)
 
   const updateOptions = patch => {
@@ -47,18 +48,25 @@ export function VoicePicker({
         <div className="voice-card-grid">
           {group.voices.map(voice => {
             const selectedVoice = voice.id === value
+            const checkedVoice = manageAvailability ? voice.is_enabled : selectedVoice
             const previewing = voice.id === playingVoice
-            return <article className={`voice-card${selectedVoice ? ' is-selected' : ''}${voice.selectable ? '' : ' is-unavailable'}`} key={voice.id}>
+            const cardSelectable = manageAvailability
+              ? voice.kind === 'preset' && voice.status === 'ready'
+              : voice.selectable
+            return <article className={`voice-card${checkedVoice ? ' is-selected' : ''}${cardSelectable ? '' : ' is-unavailable'}`} key={voice.id}>
               <button
                 type="button"
                 className="voice-card-select"
-                disabled={!voice.selectable}
-                aria-pressed={selectedVoice}
-                onClick={() => onChange?.(voice.id, voice)}
+                disabled={!cardSelectable}
+                aria-pressed={checkedVoice}
+                aria-label={manageAvailability ? `${checkedVoice ? '从生成列表移除' : '加入生成列表'}${voice.name}` : undefined}
+                onClick={() => manageAvailability
+                  ? onAvailabilityChange?.(voice.id, !voice.is_enabled)
+                  : onChange?.(voice.id, voice)}
               >
                 <span className="voice-avatar" aria-hidden="true">{voice.kind === 'clone' ? <Sparkles size={16} /> : voice.name.slice(0, 1)}</span>
                 <span className="voice-card-copy"><strong>{voice.name}</strong><small>{voice.kind === 'clone' ? '克隆音色' : voice.description || (voice.gender === 'male' ? '男声' : voice.gender === 'female' ? '女声' : '预置音色')}</small></span>
-                {selectedVoice ? <span className="voice-selected-mark"><Check size={13} /></span> : null}
+                {checkedVoice ? <span className="voice-selected-mark"><Check size={13} /></span> : null}
               </button>
               <button
                 type="button"
@@ -70,8 +78,7 @@ export function VoicePicker({
                 {previewing && previewLoading ? <LoaderCircle className="spin" size={15} /> : previewing ? <Pause size={15} /> : <Play size={15} />}
                 <span>{previewing ? '停止' : '试听'}</span>
               </button>
-              {!voice.selectable ? <span className="voice-status-label">{voice.status === 'draft' ? '待试听' : voice.status === 'failed' ? '试听失败' : '未开放'}</span> : null}
-              {allowAvailabilityToggle && voice.kind === 'preset' ? <label className="voice-availability-toggle"><input type="checkbox" checked={voice.is_enabled} onChange={event => onAvailabilityChange?.(voice.id, event.target.checked)} /><span>{voice.is_enabled ? '已开放' : '未开放'}</span></label> : null}
+              {!cardSelectable ? <span className="voice-status-label">{voice.status === 'draft' ? '待试听' : voice.status === 'failed' ? '试听失败' : '不可用'}</span> : null}
             </article>
           })}
         </div>
@@ -80,7 +87,7 @@ export function VoicePicker({
 
     {previewError ? <p className="voice-preview-error" role="alert"><CircleAlert size={15} />{previewError}</p> : null}
 
-    {showAdvanced && selected ? <section className="voice-advanced" aria-label="配音参数">
+    {showAdvanced && (selected || manageAvailability) ? <section className="voice-advanced" aria-label="配音参数">
       <label><span>语速</span><select value={options.speed_level} onChange={event => updateOptions({ speed_level: event.target.value })}>{SPEED_OPTIONS.map(([key, label]) => <option value={key} key={key}>{label}</option>)}</select></label>
       {provider === 'doubao'
         ? <label><span>音量 <strong>{options.volume_ratio.toFixed(1)}x</strong></span><input type="range" min="0.5" max="2" step="0.1" value={options.volume_ratio} onChange={event => updateOptions({ volume_ratio: Number(event.target.value) })} /></label>

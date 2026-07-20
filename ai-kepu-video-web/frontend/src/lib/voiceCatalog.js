@@ -46,6 +46,75 @@ export function groupVisibleVoices(voices, { includeUnavailable = false } = {}) 
   })).filter(group => group.voices.length)
 }
 
+export function togglePresetVoiceAvailability(input, voiceId) {
+  const voices = normalizeVoiceCatalog(input)
+  return voices.map(voice => {
+    if (voice.id !== voiceId || voice.kind !== 'preset' || voice.status !== 'ready') return voice
+    const isEnabled = !voice.is_enabled
+    return { ...voice, is_enabled: isEnabled, selectable: isEnabled }
+  })
+}
+
+export function resolveEnabledVoiceDefaults(input, defaults = {}, requestedProvider = 'doubao') {
+  const enabled = normalizeVoiceCatalog(input).filter(voice => voice.is_enabled && voice.status === 'ready')
+  const byProvider = {
+    doubao: enabled.filter(voice => voice.provider === 'doubao'),
+    mimo: enabled.filter(voice => voice.provider === 'mimo'),
+  }
+  const canonicalDefault = (provider, value) => {
+    const raw = String(value || '').trim()
+    if (!raw) return ''
+    if (raw.startsWith('mimo-clone:') || raw.startsWith(`${provider}:`)) return raw
+    return `${provider}:${raw}`
+  }
+  const nextDefaults = Object.fromEntries(['doubao', 'mimo'].map(provider => {
+    const current = canonicalDefault(provider, defaults[provider])
+    const next = byProvider[provider].some(voice => voice.id === current)
+      ? current
+      : byProvider[provider][0]?.id || ''
+    return [provider, next]
+  }))
+  const availableProviders = ['doubao', 'mimo'].filter(provider => byProvider[provider].length)
+  return {
+    provider: availableProviders.includes(requestedProvider) ? requestedProvider : availableProviders[0] || '',
+    availableProviders,
+    defaults: nextDefaults,
+  }
+}
+
+export function reconcileTtsVoiceConfig(tts = {}, input, activatedProvider = '') {
+  const resolved = resolveEnabledVoiceDefaults(input, {
+    doubao: tts.default_voice,
+    mimo: tts.mimo?.default_voice,
+  }, tts.provider)
+  let enabledProviders = (Array.isArray(tts.enabled_providers) ? tts.enabled_providers : [])
+    .filter(provider => resolved.availableProviders.includes(provider))
+  if (activatedProvider && resolved.availableProviders.includes(activatedProvider) && !enabledProviders.includes(activatedProvider)) {
+    enabledProviders = [...enabledProviders, activatedProvider]
+  }
+  if (!enabledProviders.length && resolved.provider) enabledProviders = [resolved.provider]
+  const provider = enabledProviders.includes(tts.provider)
+    ? tts.provider
+    : enabledProviders[0] || tts.provider || 'doubao'
+  const mimoDefault = resolved.defaults.mimo.startsWith('mimo-clone:')
+    ? resolved.defaults.mimo
+    : resolved.defaults.mimo.replace(/^mimo:/, '')
+  return {
+    ...tts,
+    provider,
+    enabled_providers: enabledProviders,
+    default_voice: resolved.defaults.doubao.replace(/^doubao:/, ''),
+    mimo: { ...(tts.mimo || {}), default_voice: mimoDefault },
+  }
+}
+
+export function hasUsableVoice(input, enabledProviders = []) {
+  const providers = new Set(enabledProviders)
+  return normalizeVoiceCatalog(input).some(voice => (
+    voice.is_enabled && voice.status === 'ready' && providers.has(voice.provider)
+  ))
+}
+
 export function mergeTtsOptions(base = {}, override = {}, provider = 'mimo') {
   const merged = { ...(base || {}), ...(override || {}) }
   const speedLevel = SPEED_LEVELS.has(merged.speed_level) ? merged.speed_level : 'normal'

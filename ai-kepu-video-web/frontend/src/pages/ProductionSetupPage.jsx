@@ -76,6 +76,7 @@ export function ProductionSetupPage() {
   const apiReady = Boolean(config) && missingApiItems.length === 0
 
   useEffect(() => {
+    let active = true
     const loaded = getDraft(draftId)
     if (!loaded) {
       toast.warning('未找到文稿草稿，请重新创建项目')
@@ -84,8 +85,19 @@ export function ProductionSetupPage() {
     }
     setDraft(loaded)
     Promise.all([getVoices(), getConfig()])
-      .then(([voiceList, runtimeConfig]) => { setVoices(normalizeVoiceCatalog(voiceList)); setConfig(runtimeConfig) })
-      .catch(() => toast.warning('未能读取完整配置，请确认后端服务在线'))
+      .then(([voiceList, runtimeConfig]) => {
+        if (!active) return
+        const available = normalizeVoiceCatalog(voiceList)
+        setVoices(available)
+        setConfig(runtimeConfig)
+        if (loaded.voice_type && !available.some(voice => voice.id === loaded.voice_type)) {
+          const fallback = available.find(voice => voice.id === defaultVoiceKey(runtimeConfig)) || available[0]
+          const next = saveDraft({ ...loaded, voice_type: fallback?.id || '', voice_name: fallback?.name || '' })
+          setDraft(next)
+        }
+      })
+      .catch(() => { if (active) toast.warning('未能读取完整配置，请确认后端服务在线') })
+    return () => { active = false }
   }, [draftId, navigate])
 
   const stopVoicePreview = useCallback(() => {
