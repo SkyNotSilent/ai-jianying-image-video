@@ -58,7 +58,7 @@ import {
   switchProviderDraft,
 } from '../lib/llmProviderCatalog'
 import { toast } from '../lib/toast'
-import { nextPreviewState, normalizeVoiceCatalog } from '../lib/voiceCatalog'
+import { hasUsableVoice, nextPreviewState, normalizeVoiceCatalog, reconcileTtsVoiceConfig, togglePresetVoiceAvailability } from '../lib/voiceCatalog'
 import { normalizeMediaUrl } from '../utils/mediaUrl'
 import './delivery-pages.css'
 
@@ -118,7 +118,12 @@ export function SettingsPage() {
           .catch(error => ({ data: null, error })),
       ])
       if (loadGeneration !== loadGenerationRef.current) return
-      const normalized = normalizeConfig(config)
+      const normalizedVoices = normalizeVoiceCatalog(catalog)
+      const normalizedConfig = normalizeConfig(config)
+      const normalized = {
+        ...normalizedConfig,
+        tts: reconcileTtsVoiceConfig(normalizedConfig.tts, normalizedVoices),
+      }
       let providers = normalizeProviders(providerResult.data)
       if (!providers.length) {
         if (providerResult.error) console.warn('生文服务商目录加载失败，使用当前配置回退', providerResult.error)
@@ -166,7 +171,7 @@ export function SettingsPage() {
         ? { [initialized.llm.provider]: { ...initialized.llm, provider_options: { ...(initialized.llm.provider_options || {}) } } }
         : {}
       setProviderTab(normalized.tts.provider)
-      setVoices(normalizeVoiceCatalog(catalog))
+      setVoices(normalizedVoices)
       setClones(Array.isArray(cloneList) ? cloneList : [])
     } catch (error) {
       if (loadGeneration !== loadGenerationRef.current) return
@@ -338,34 +343,55 @@ export function SettingsPage() {
       getVoices({ include_disabled: true }),
       getVoiceClones({ include_hidden: true }),
     ])
-    setVoices(normalizeVoiceCatalog(catalog))
+    const normalizedVoices = normalizeVoiceCatalog(catalog)
+    setVoices(normalizedVoices)
+    setForm(current => ({
+      ...current,
+      tts: reconcileTtsVoiceConfig(current.tts, normalizedVoices),
+    }))
     setClones(Array.isArray(cloneList) ? cloneList : [])
   }, [])
 
   const setProviderEnabled = (provider, enabled) => {
+    const providerHasVoice = voices.some(voice => (
+      voice.provider === provider && voice.is_enabled && voice.status === 'ready'
+    ))
+    if (enabled && !providerHasVoice) {
+      toast.warning('请先在该服务商音色库中勾选至少一个音色')
+      return
+    }
+    const existing = form.tts.enabled_providers || []
+    let next = enabled
+      ? [...new Set([...existing, provider])]
+      : existing.filter(item => item !== provider)
+    if (!next.length) {
+      const fallback = ['doubao', 'mimo'].find(item => (
+        item !== provider && voices.some(voice => voice.provider === item && voice.is_enabled && voice.status === 'ready')
+      ))
+      if (!fallback) {
+        toast.warning('至少保留一个含可用音色的 TTS 服务商')
+        return
+      }
+      next = [fallback]
+    }
     setForm(current => {
-      const existing = current.tts.enabled_providers || []
-      let next = enabled
-        ? [...new Set([...existing, provider])]
-        : existing.filter(item => item !== provider)
-      if (!next.length) next = [provider === 'mimo' ? 'doubao' : 'mimo']
-      const defaultProvider = next.includes(current.tts.provider) ? current.tts.provider : next[0]
-      return { ...current, tts: { ...current.tts, enabled_providers: next, provider: defaultProvider } }
+      const tts = reconcileTtsVoiceConfig({ ...current.tts, enabled_providers: next }, voices)
+      return { ...current, tts }
     })
   }
 
-  const handleAvailabilityChange = (voiceId, enabled) => {
-    setVoices(current => current.map(voice => voice.id === voiceId
-      ? { ...voice, is_enabled: enabled, selectable: enabled && voice.status === 'ready' }
-      : voice))
-  }
-
-  const setAllProviderVoices = enabled => {
-    setVoices(current => current.map(voice => (
-      voice.provider === providerTab && voice.kind === 'preset'
-        ? { ...voice, is_enabled: enabled, selectable: enabled && voice.status === 'ready' }
-        : voice
-    )))
+  const handleAvailabilityChange = voiceId => {
+    const nextVoices = togglePresetVoiceAvailability(voices, voiceId)
+    const toggledVoice = nextVoices.find(voice => voice.id === voiceId)
+    setVoices(nextVoices)
+    setForm(current => ({
+      ...current,
+      tts: reconcileTtsVoiceConfig(
+        current.tts,
+        nextVoices,
+        toggledVoice?.is_enabled ? toggledVoice.provider : '',
+      ),
+    }))
   }
 
   const defaultVoiceKey = providerTab === 'mimo'
@@ -376,7 +402,7 @@ export function SettingsPage() {
       ? form.tts.default_voice
       : `doubao:${form.tts.default_voice}`
 
-  const providerVoices = voices.filter(voice => voice.provider === providerTab)
+  const providerVoices = voices.filter(voice => voice.provider === providerTab && voice.kind === 'preset')
   const providerOptions = providerTab === 'mimo'
     ? { speed_level: form.tts.mimo.speed_level, style_prompt: form.tts.mimo.style_prompt }
     : { speed_level: form.tts.speed_level, volume_ratio: form.tts.volume_ratio }
@@ -537,7 +563,12 @@ export function SettingsPage() {
   }
 
   const saveConfig = async () => {
-    const normalized = normalizeConfig(form)
+    const reconciledTts = reconcileTtsVoiceConfig(form.tts, voices)
+    if (!hasUsableVoice(voices, reconciledTts.enabled_providers)) {
+      toast.warning('至少保留一个可用音色')
+      return
+    }
+    const normalized = normalizeConfig({ ...form, tts: reconciledTts })
     const issue = validateConfig(normalized, selectedLlmProvider)
     if (issue) {
       toast.warning(issue)
@@ -648,8 +679,8 @@ export function SettingsPage() {
               : <MimoFields form={form} updateMimo={updateMimo} onRestore={() => setForm(current => restoreMimoTechnicalPreset(current))} />}
             <Field label="通用试听文本" wide><input value={form.tts.preview_text} maxLength="80" onChange={event => updateTts('preview_text', event.target.value)} placeholder="这是当前音色的试听。" /></Field>
             <div className="settings-voice-library">
-              <header><div><strong>{providerTab === 'mimo' ? 'MiMo' : '豆包'} 音色库</strong><small>勾选后才会在生产页和预览页出现。</small></div><span><button type="button" onClick={() => setAllProviderVoices(true)}>全选</button><button type="button" onClick={() => setAllProviderVoices(false)}>清空</button></span></header>
-              <VoicePicker voices={providerVoices} value={defaultVoiceKey} ttsOptions={providerOptions} onChange={selectDefaultVoice} onOptionsChange={updateProviderOptions} onPreview={handleVoicePreview} playingVoice={previewState.playingVoice} previewLoading={previewState.loading} previewError={previewState.error} includeUnavailable allowAvailabilityToggle onAvailabilityChange={handleAvailabilityChange} />
+              <header><div><strong>{providerTab === 'mimo' ? 'MiMo' : '豆包'} 音色库</strong><small>点击音色卡片切换对号；有对号的音色会出现在生成和预览页。</small></div></header>
+              <VoicePicker voices={providerVoices} value={defaultVoiceKey} ttsOptions={providerOptions} onChange={selectDefaultVoice} onOptionsChange={updateProviderOptions} onPreview={handleVoicePreview} playingVoice={previewState.playingVoice} previewLoading={previewState.loading} previewError={previewState.error} includeUnavailable manageAvailability optionsProvider={providerTab} onAvailabilityChange={handleAvailabilityChange} />
             </div>
             {providerTab === 'mimo' ? <div className="settings-clone-library">
               <header><div><strong>MiMo 声音克隆</strong><small>参考音频只保存在本地，试听成功后才能启用。</small></div></header>

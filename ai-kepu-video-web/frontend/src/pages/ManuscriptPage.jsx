@@ -60,7 +60,17 @@ export function ManuscriptPage() {
   }, [draftId, navigate])
 
   useEffect(() => {
-    getVoices().then(result => setVoices(Array.isArray(result) ? result : [])).catch(() => setVoices([]))
+    getVoices().then(result => {
+      const available = Array.isArray(result) ? result : []
+      setVoices(available)
+      const current = draftRef.current
+      if (current.voice_type && !available.some(voice => voice.id === current.voice_type)) {
+        const next = { ...current, voice_type: '', voice_name: '' }
+        draftRef.current = next
+        setDraft(next)
+        saveDraft(next)
+      }
+    }).catch(() => setVoices([]))
   }, [])
 
   useEffect(() => {

@@ -4,9 +4,13 @@ import test from 'node:test'
 import {
   buildVoiceTaskPayload,
   groupVisibleVoices,
+  hasUsableVoice,
   mergeTtsOptions,
   nextPreviewState,
   normalizeVoiceCatalog,
+  reconcileTtsVoiceConfig,
+  resolveEnabledVoiceDefaults,
+  togglePresetVoiceAvailability,
 } from '../src/lib/voiceCatalog.js'
 
 const catalog = [
@@ -38,6 +42,57 @@ test('groups only enabled ready voices for task pickers and retains all for sett
   const settings = groupVisibleVoices(normalized, { includeUnavailable: true })
   assert.equal(settings[0].voices.length, 4)
   assert.equal(settings[0].voices.find(voice => voice.name === '待试听').selectable, false)
+})
+
+test('toggles preset availability from the card and keeps unavailable clones unchanged', () => {
+  const enabled = togglePresetVoiceAvailability(catalog, 'mimo:茉莉')
+  assert.equal(enabled.find(voice => voice.id === 'mimo:茉莉').is_enabled, true)
+  assert.equal(enabled.find(voice => voice.id === 'mimo:茉莉').selectable, true)
+
+  const clones = togglePresetVoiceAvailability(enabled, 'mimo-clone:clone-draft')
+  assert.equal(clones.find(voice => voice.id === 'mimo-clone:clone-draft').is_enabled, false)
+})
+
+test('moves defaults to the first checked voice when the current default is removed', () => {
+  const voices = togglePresetVoiceAvailability(catalog, 'mimo:冰糖')
+  const resolved = resolveEnabledVoiceDefaults(voices, {
+    mimo: '冰糖',
+    doubao: 'zh_missing_voice',
+  }, 'mimo')
+
+  assert.equal(resolved.defaults.mimo, 'mimo-clone:clone-1')
+  assert.equal(resolved.defaults.doubao, 'doubao:zh_male_jieshuoxiaoming_moon_bigtts')
+  assert.equal(resolved.provider, 'mimo')
+})
+
+test('switches provider when a provider has no checked voices', () => {
+  const voices = togglePresetVoiceAvailability(catalog, 'doubao:zh_male_jieshuoxiaoming_moon_bigtts')
+  const resolved = resolveEnabledVoiceDefaults(voices, { doubao: 'zh_male_jieshuoxiaoming_moon_bigtts' }, 'doubao')
+
+  assert.equal(resolved.defaults.doubao, '')
+  assert.equal(resolved.provider, 'mimo')
+  assert.deepEqual(resolved.availableProviders, ['mimo'])
+})
+
+test('reconciles stale clone defaults and validates only enabled providers', () => {
+  const config = reconcileTtsVoiceConfig({
+    provider: 'mimo',
+    enabled_providers: ['mimo'],
+    default_voice: 'zh_male_jieshuoxiaoming_moon_bigtts',
+    mimo: { default_voice: 'mimo-clone:missing-clone' },
+  }, catalog)
+
+  assert.equal(config.mimo.default_voice, '冰糖')
+  assert.equal(config.provider, 'mimo')
+  assert.equal(hasUsableVoice(catalog, config.enabled_providers), true)
+  assert.equal(hasUsableVoice(catalog, ['missing-provider']), false)
+
+  const disabledCatalog = catalog.map(voice => ({ ...voice, is_enabled: false }))
+  const disabledConfig = reconcileTtsVoiceConfig(config, disabledCatalog)
+  assert.deepEqual(disabledConfig.enabled_providers, [])
+  assert.equal(disabledConfig.default_voice, '')
+  assert.equal(disabledConfig.mimo.default_voice, '')
+  assert.equal(hasUsableVoice(disabledCatalog, disabledConfig.enabled_providers), false)
 })
 
 test('merges inherited options and emits only provider-relevant task fields', () => {
