@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { CheckCircle2, ClipboardPaste, FileUp, Sparkles } from 'lucide-react'
 import { useNavigate, useParams } from 'react-router'
-import { extractDocumentText } from '../api/task'
+import { createTask, extractDocumentText } from '../api/task'
 import { toast } from '../lib/toast'
 import { createDraft, estimateDuration, estimateSegments, getDraft, getLatestDraft, ratioOptions, saveDraft, textStyles, visualStyles } from '../utils/projectDrafts'
 import './creation-flow.css'
@@ -43,6 +43,7 @@ export function ManuscriptPage() {
   const [saveState, setSaveState] = useState('saved')
   const [savedAt, setSavedAt] = useState(() => new Date())
   const [rotatorIndex, setRotatorIndex] = useState(0)
+  const [starting, setStarting] = useState(false)
 
   useEffect(() => {
     if (!draftId) {
@@ -101,7 +102,7 @@ export function ManuscriptPage() {
     return result
   }
 
-  const continueToProduction = () => {
+  const continueToProduction = async () => {
     let next = draftRef.current
     if (next.input_mode !== 'theme' && !String(next.manuscript || '').trim()) next = insertExample()
     const currentText = next.input_mode === 'theme' ? next.theme : next.manuscript
@@ -113,7 +114,32 @@ export function ManuscriptPage() {
     const prepared = { ...next, name, length: next.input_mode === 'theme' ? normalizeLength(next.length) : next.length }
     draftRef.current = prepared
     persistDraft(prepared, setDraft, setSaveState, setSavedAt)
-    navigate(`/production/${prepared.draft_id}`)
+    setStarting(true)
+    try {
+      const inputMode = prepared.input_mode === 'theme' ? 'theme' : 'script'
+      const result = await createTask({
+        name: prepared.name,
+        theme: String(currentText).slice(0, 5000),
+        input_mode: inputMode,
+        style: `${prepared.text_style || '知识科普'}|${prepared.visual_style || '吉卜力'}`,
+        ratio: prepared.ratio || '16:9',
+        length: inputMode === 'theme' ? normalizeLength(prepared.length) : 0,
+        voice_type: localStorage.getItem('insightcut:last-voice') || undefined,
+        execution_mode: 'review_first',
+        script_policy: 'verbatim',
+      })
+      const saved = { ...prepared, created_task_id: result.task_id }
+      draftRef.current = saved
+      persistDraft(saved, setDraft, setSaveState, setSavedAt)
+      localStorage.setItem('insightcut:last-workspace', JSON.stringify({ taskId: result.task_id, name: prepared.name, path: `/workspace/${result.task_id}` }))
+      window.dispatchEvent(new Event('insightcut:workspace'))
+      toast.success('正在生成内容预案')
+      navigate(`/workspace/${result.task_id}`)
+    } catch (error) {
+      toast.error(error?.response?.data?.detail || '创建生产预案失败')
+    } finally {
+      setStarting(false)
+    }
   }
 
   const importDocument = async event => {
@@ -210,7 +236,7 @@ export function ManuscriptPage() {
           <fieldset className="control-group"><legend>画面风格</legend><div className="style-thumbnail-grid">{visualStyles.map(style => <button type="button" key={style.value} className={draft.visual_style === style.value ? 'is-selected' : ''} onClick={() => patchDraft({ visual_style: style.value })}><img src={style.image} alt="" /><span>{style.label}</span></button>)}</div></fieldset>
           <fieldset className="control-group"><legend>视频比例</legend><div className="segmented-control">{ratioOptions.map(ratio => <button type="button" key={ratio} className={draft.ratio === ratio ? 'is-selected' : ''} onClick={() => patchDraft({ ratio })}>{ratio}</button>)}</div></fieldset>
           <label className="field-label">创作风格<select value={draft.text_style || '知识科普'} onChange={event => patchDraft({ text_style: event.target.value })}>{textStyles.map(style => <option key={style}>{style}</option>)}</select></label>
-          <button type="button" className="button button-primary continue-button" onClick={continueToProduction}>{!isTheme && !String(draft.manuscript || '').trim() ? '插入示例并继续' : '继续配置画面与配音'}</button>
+          <button type="button" className="button button-primary continue-button" disabled={starting} onClick={continueToProduction}>{starting ? '正在创建预案…' : !isTheme && !String(draft.manuscript || '').trim() ? '插入示例并继续' : '生成内容预案'}</button>
         </aside>
       </section>
     </main>

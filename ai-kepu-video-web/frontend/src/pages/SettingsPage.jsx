@@ -69,7 +69,7 @@ const SECTION_LINKS = [
   { id: 'settings-runtime', label: '生成并发', icon: Cpu },
 ]
 
-export function SettingsPage() {
+export function SettingsPage({ embedded = false, onClose }) {
   const navigate = useNavigate()
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
@@ -606,10 +606,10 @@ export function SettingsPage() {
   if (loadError) return <main className="delivery-loading"><EmptyState title="API 配置不可用" description={loadError} action={<button className="button button-primary" type="button" onClick={loadConfig}>重试</button>} /></main>
 
   return (
-    <main className="settings-page">
+    <main className={`settings-page${embedded ? ' is-embedded' : ''}`}>
       <header className="settings-heading">
         <div><p className="eyebrow">配置控制台</p><h1>API 配置</h1><p>维护生文、生图和配音服务连接，配置会原样提交给本地后端。</p></div>
-        <button className="button button-secondary" type="button" onClick={() => navigate(-1)}><ArrowLeft size={16} aria-hidden="true" />返回生产</button>
+        <button className="button button-secondary" type="button" onClick={() => embedded ? onClose?.() : navigate(-1)}><ArrowLeft size={16} aria-hidden="true" />{embedded ? '关闭配置' : '返回生产'}</button>
       </header>
 
       <section className="settings-readiness" aria-label="配置状态">
@@ -681,6 +681,7 @@ export function SettingsPage() {
           </ConfigSection>
 
           <ConfigSection id="settings-runtime" icon={Cpu} title="生成并发" badge="Runtime" description="并发值会在保存前按后端约束归一化。">
+            <Field label="提示词并发" help="范围 1-8，默认 4；每段仍独立生成，过高可能触发模型限流。"><input type="number" min="1" max="8" step="1" value={form.generation.prompt_concurrency} onChange={event => updateSection('generation', 'prompt_concurrency', event.target.value)} onBlur={() => updateSection('generation', 'prompt_concurrency', normalizeConcurrency(form.generation.prompt_concurrency, 4))} /></Field>
             <Field label="配音并发" help="范围 1-8；调高更快，也更容易触发 provider 限流。"><input type="number" min="1" max="8" step="1" value={form.generation.tts_concurrency} onChange={event => updateSection('generation', 'tts_concurrency', event.target.value)} onBlur={() => updateSection('generation', 'tts_concurrency', normalizeConcurrency(form.generation.tts_concurrency))} /></Field>
             <Field label="生图并发" help="Agnes 免费限速下固定为 1。"><input type="number" value="1" min="1" max="1" disabled readOnly /></Field>
           </ConfigSection>

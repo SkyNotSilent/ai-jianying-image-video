@@ -138,6 +138,7 @@ class Config:
                 },
             },
             "generation": {
+                "prompt_concurrency": 4,
                 "tts_concurrency": _clamp_int(_env("TTS_CONCURRENCY", "1"), 1, 1, 8),
                 "image_concurrency": _clamp_int(_env("IMAGE_CONCURRENCY", "1"), 1, 1, 8),
             },
@@ -235,6 +236,9 @@ class Config:
     @classmethod
     def _normalize_generation_config(cls, config: dict) -> None:
         generation = config.setdefault("generation", {})
+        generation["prompt_concurrency"] = _clamp_int(
+            generation.get("prompt_concurrency"), 4, 1, 8
+        )
         generation["tts_concurrency"] = _clamp_int(
             generation.get("tts_concurrency"), 1, 1, 8
         )

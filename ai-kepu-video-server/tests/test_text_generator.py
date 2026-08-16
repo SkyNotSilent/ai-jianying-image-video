@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.config import Config
+from src.text import generator as generator_module
 from src.text.generator import ArticleGenerator
 
 
@@ -145,6 +146,36 @@ def test_allowlisted_cloud_options_reach_litellm(monkeypatch, tmp_path):
         generator._build_completion_kwargs([], 100)["aws_region_name"]
         == "us-east-1"
     )
+
+
+def test_rate_limit_retry_uses_retry_after_and_shared_throttle(monkeypatch):
+    attempts = 0
+    pauses = []
+    waits = []
+
+    def completion(**_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            error = RuntimeError("rate limited")
+            error.response = SimpleNamespace(
+                status_code=429, headers={"Retry-After": "7"}
+            )
+            raise error
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
+        )
+
+    monkeypatch.setattr(generator_module, "_pause_llm_requests", pauses.append)
+    monkeypatch.setattr(generator_module, "_wait_for_llm_throttle", lambda: waits.append(True))
+
+    content, failure = generator_module._run_completion_with_retries(completion, {})
+
+    assert content == "ok"
+    assert failure is None
+    assert attempts == 2
+    assert pauses == [7.0]
+    assert len(waits) == 3
 
 
 @pytest.mark.parametrize(

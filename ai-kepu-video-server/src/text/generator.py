@@ -5,8 +5,12 @@
 
 import json
 import logging
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
+from threading import Lock
 import time
+from typing import Optional
 
 from src.config import Config
 from src.text.provider_catalog import (
@@ -23,26 +27,76 @@ class _SafeLlmFailure:
 
 
 _SAFE_LLM_FAILURE = _SafeLlmFailure()
+_LLM_THROTTLE_LOCK = Lock()
+_LLM_NOT_BEFORE = 0.0
+
+
+def _error_status_code(error: Exception) -> Optional[int]:
+    status = getattr(error, "status_code", None)
+    if status is None:
+        status = getattr(getattr(error, "response", None), "status_code", None)
+    try:
+        return int(status) if status is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _retry_after_seconds(error: Exception) -> Optional[float]:
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None) or getattr(error, "headers", None) or {}
+    value = headers.get("retry-after") or headers.get("Retry-After")
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        try:
+            retry_at = parsedate_to_datetime(str(value))
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+
+def _pause_llm_requests(seconds: float) -> None:
+    global _LLM_NOT_BEFORE
+    with _LLM_THROTTLE_LOCK:
+        _LLM_NOT_BEFORE = max(_LLM_NOT_BEFORE, time.monotonic() + max(0.0, seconds))
+
+
+def _wait_for_llm_throttle() -> None:
+    while True:
+        with _LLM_THROTTLE_LOCK:
+            remaining = _LLM_NOT_BEFORE - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(remaining)
 
 
 def _run_completion_with_retries(completion, kwargs):
     """Use sensitive request state internally and return only safe values."""
 
     for attempt in range(3):
+        _wait_for_llm_throttle()
         try:
             response = completion(**kwargs)
             return response.choices[0].message.content, None
-        except Exception:
+        except Exception as error:
+            is_rate_limited = _error_status_code(error) == 429
+            wait_time = (attempt + 1) * 5
+            if is_rate_limited:
+                wait_time = max(wait_time, _retry_after_seconds(error) or 0)
+                _pause_llm_requests(wait_time)
             if attempt == 2:
                 logger.error("API 调用失败，已重试 3 次")
                 return None, _SAFE_LLM_FAILURE
-            wait_time = (attempt + 1) * 5
             logger.warning(
                 "API 调用失败（第 %s 次），%s 秒后重试",
                 attempt + 1,
                 wait_time,
             )
-            time.sleep(wait_time)
+            _wait_for_llm_throttle() if is_rate_limited else time.sleep(wait_time)
 
 
 def _raise_safe_llm_failure():

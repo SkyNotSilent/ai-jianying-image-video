@@ -12,6 +12,7 @@ class TaskStatus(str, Enum):
     """任务状态枚举"""
     PENDING = "pending"
     PROCESSING = "processing"
+    AWAITING_CONFIRMATION = "awaiting_confirmation"
     INTERRUPTED = "interrupted"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -51,6 +52,12 @@ class CreateTaskRequest(BaseModel):
     length: int = Field(default=300, ge=0, le=2000, description="主题模式下的目标脚本字数；0 表示自动")
     voice_type: Optional[str] = Field(None, description="TTS 音色 ID")
     tts_options: Optional[TTSOptions] = None
+    execution_mode: Literal["full", "review_first"] = Field(
+        default="full", description="执行模式：full=兼容旧流程，review_first=先生成预案等待确认"
+    )
+    script_policy: Literal["rewrite", "verbatim"] = Field(
+        default="rewrite", description="文稿处理：rewrite=改写，verbatim=脚本模式保留原文"
+    )
 
 
 class CreateTaskFromImagesRequest(BaseModel):
@@ -99,6 +106,10 @@ class TaskResponse(BaseModel):
     extract_path: Optional[str] = Field(None, description="用户上次使用的解压路径")
     error: Optional[str] = Field(None, description="错误信息")
     can_resume: bool = Field(False, description="是否存在可继续生成的检查点")
+    workflow_phase: Optional[str] = Field(None, description="工作台阶段")
+    plan_version: int = Field(0, description="预案版本")
+    execution_mode: str = Field("full", description="任务执行模式")
+    voice_confirmed: bool = Field(False, description="是否已确认全片音色")
 
 
 class CreateTaskResponse(BaseModel):

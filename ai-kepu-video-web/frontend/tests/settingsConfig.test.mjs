@@ -35,7 +35,7 @@ test('normalizes a partial config without dropping provider fields', () => {
       default_voice: 'voice',
       mimo: { api_key: 'mimo-key', default_voice: 'Mia' },
     },
-    generation: { tts_concurrency: 99, image_concurrency: 5 },
+    generation: { prompt_concurrency: 7, tts_concurrency: 99, image_concurrency: 5 },
   })
 
   assert.equal(config.llm.provider, 'anthropic')
@@ -50,6 +50,7 @@ test('normalizes a partial config without dropping provider fields', () => {
   assert.equal(config.tts.volume_ratio, 1)
   assert.equal(config.tts.mimo.speed_level, 'normal')
   assert.equal(config.tts.mimo.clone_model, 'mimo-v2.5-tts-voiceclone')
+  assert.equal(config.generation.prompt_concurrency, 7)
   assert.equal(config.generation.tts_concurrency, 8)
   assert.equal(config.generation.image_concurrency, 1)
 })
@@ -59,11 +60,14 @@ test('normalizes missing or invalid LLM provider state to custom defaults', () =
   assert.deepEqual(normalizeConfig({ llm: { provider_options: [] } }).llm.provider_options, {})
 })
 
-test('clamps TTS concurrency to 1-8 and always fixes image concurrency to one', () => {
+test('normalizes prompt concurrency to four by default and clamps runtime concurrency', () => {
   assert.equal(normalizeConcurrency('0'), 1)
   assert.equal(normalizeConcurrency('4.8'), 4)
   assert.equal(normalizeConcurrency('12'), 8)
   assert.equal(normalizeConcurrency('bad'), 1)
+  assert.equal(normalizeConfig({}).generation.prompt_concurrency, 4)
+  assert.equal(normalizeConfig({ generation: { prompt_concurrency: 0 } }).generation.prompt_concurrency, 1)
+  assert.equal(normalizeConfig({ generation: { prompt_concurrency: 12 } }).generation.prompt_concurrency, 8)
   assert.equal(normalizeConfig({ generation: { image_concurrency: 8 } }).generation.image_concurrency, 1)
   assert.equal(normalizeConfig(null).generation.image_concurrency, 1)
 })

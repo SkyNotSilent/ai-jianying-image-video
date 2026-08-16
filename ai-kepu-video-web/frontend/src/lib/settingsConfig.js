@@ -27,9 +27,9 @@ export const MIMO_VOICES = [
   { id: 'Dean', name: 'Dean · English Male' },
 ]
 
-export function normalizeConcurrency(value) {
+export function normalizeConcurrency(value, fallback = 1) {
   const parsed = Number.parseInt(value, 10)
-  if (!Number.isFinite(parsed)) return 1
+  if (!Number.isFinite(parsed)) return fallback
   return Math.min(8, Math.max(1, parsed))
 }
 
@@ -106,6 +106,7 @@ export function normalizeConfig(config = {}) {
     },
     generation: {
       ...(source.generation || {}),
+      prompt_concurrency: normalizeConcurrency(source.generation?.prompt_concurrency, 4),
       tts_concurrency: normalizeConcurrency(source.generation?.tts_concurrency),
       image_concurrency: 1,
     },

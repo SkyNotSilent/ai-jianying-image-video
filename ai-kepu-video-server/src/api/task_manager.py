@@ -72,6 +72,10 @@ class Task:
         name: Optional[str] = None,
         ratio: str = "16:9",
         tts_options: Optional[Dict] = None,
+        execution_mode: str = "full",
+        workflow_phase: str = "pending",
+        plan_version: int = 0,
+        voice_confirmed: bool = False,
     ):
         self.task_id = task_id
         self.theme = theme
@@ -81,6 +85,10 @@ class Task:
         self.length = length
         self.voice_type = voice_type
         self.tts_options = dict(tts_options or {})
+        self.execution_mode = execution_mode or "full"
+        self.workflow_phase = workflow_phase or "pending"
+        self.plan_version = int(plan_version or 0)
+        self.voice_confirmed = bool(voice_confirmed)
         self.status = TaskStatus.PENDING
         self.created_at = datetime.now().isoformat()
         self.error: Optional[str] = None
@@ -196,12 +204,17 @@ class Task:
             progress=progress if self.status in [
                 TaskStatus.PENDING,
                 TaskStatus.PROCESSING,
+                TaskStatus.AWAITING_CONFIRMATION,
                 TaskStatus.INTERRUPTED,
             ] else None,
             result=self.result,
             extract_path=self.extract_path,
             error=self.error,
             can_resume=self.can_resume,
+            workflow_phase=self.workflow_phase,
+            plan_version=self.plan_version,
+            execution_mode=self.execution_mode,
+            voice_confirmed=self.voice_confirmed,
         )
 
 
@@ -225,10 +238,16 @@ class TaskManager:
         name: Optional[str] = None,
         ratio: str = "16:9",
         tts_options: Optional[Dict] = None,
+        execution_mode: str = "full",
+        script_policy: str = "rewrite",
     ) -> str:
         """创建新任务"""
         task_id = uuid.uuid4().hex
-        task = Task(task_id, theme, style, length, voice_type, name, ratio, tts_options)
+        workflow_phase = "planning" if execution_mode == "review_first" else "pending"
+        task = Task(
+            task_id, theme, style, length, voice_type, name, ratio, tts_options,
+            execution_mode=execution_mode, workflow_phase=workflow_phase,
+        )
 
         with self.lock:
             self.tasks[task_id] = task
@@ -236,6 +255,8 @@ class TaskManager:
         db_client.create_task(
             task_id, theme, style, length, name, ratio, voice_type,
             tts_options=task.tts_options,
+            execution_mode=execution_mode,
+            script_policy=script_policy,
         )
 
         # 缓存到内存
@@ -249,6 +270,10 @@ class TaskManager:
             "tts_options": task.tts_options,
             "status": "pending",
             "created_at": task.created_at,
+            "execution_mode": execution_mode,
+            "workflow_phase": workflow_phase,
+            "plan_version": 0,
+            "voice_confirmed": False,
         }
         redis_client.cache_task(task_id, task_data)
 
@@ -331,6 +356,10 @@ class TaskManager:
                 voice_type=data.get("voice_type"),
                 ratio=data.get("ratio", "16:9"),
                 tts_options=data.get("tts_options"),
+                execution_mode=data.get("execution_mode", "full"),
+                workflow_phase=data.get("workflow_phase", "pending"),
+                plan_version=data.get("plan_version", 0),
+                voice_confirmed=data.get("voice_confirmed", False),
             )
             task.status = TaskStatus(data["status"])
             task.created_at = data["created_at"]
@@ -375,6 +404,10 @@ class TaskManager:
                 voice_type=data.get("voice_type"),
                 ratio=data.get("ratio", "16:9"),
                 tts_options=raw_tts_options,
+                execution_mode=data.get("execution_mode", "full"),
+                workflow_phase=data.get("workflow_phase", "pending"),
+                plan_version=data.get("plan_version", 0),
+                voice_confirmed=data.get("voice_confirmed", False),
             )
             task.status = TaskStatus(data["status"])
             task.created_at = data["created_at"].isoformat() if hasattr(data["created_at"], "isoformat") else str(data["created_at"])
@@ -426,8 +459,18 @@ class TaskManager:
             "error": task.error,
             "can_resume": task.can_resume,
             "extract_path": task.extract_path,
+            "execution_mode": task.execution_mode,
+            "workflow_phase": task.workflow_phase,
+            "plan_version": task.plan_version,
+            "voice_confirmed": task.voice_confirmed,
             "result": task.result.dict() if task.result else None,
         }
+
+    def invalidate_task_cache(self, task_id: str) -> None:
+        """Force the next read to rebuild the task from SQLite."""
+        with self.lock:
+            self.tasks.pop(task_id, None)
+        redis_client.delete_task(task_id)
 
     def list_tasks(self, status: str = None, limit: int = 100, offset: int = 0):
         """获取任务列表，并清理已超时的非终态任务"""
