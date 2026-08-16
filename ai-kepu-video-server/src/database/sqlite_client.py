@@ -461,7 +461,6 @@ class SQLiteClient:
                 "voiceover_generation",
                 "image_generation",
                 "draft_building",
-                "video_synthesis",
             ]
             for step in steps:
                 cur.execute(

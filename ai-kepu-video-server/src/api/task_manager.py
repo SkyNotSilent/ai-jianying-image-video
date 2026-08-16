@@ -31,7 +31,6 @@ STEP_STALE_TASK_TIMEOUT_SECONDS = {
     "voiceover_generation": 30 * 60,
     "image_generation": 45 * 60,
     "draft_building": 5 * 60,
-    "video_synthesis": 10 * 60,
 }
 
 
@@ -110,10 +109,6 @@ class Task:
             ),
             "draft_building": StepProgress(
                 name="draft_building",
-                status=StepStatus.PENDING
-            ),
-            "video_synthesis": StepProgress(
-                name="video_synthesis",
                 status=StepStatus.PENDING
             )
         }

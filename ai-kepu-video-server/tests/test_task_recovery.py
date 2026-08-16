@@ -1118,7 +1118,7 @@ def test_final_segments_save_false_prevents_result_and_completion(
     pipeline = FakePipeline(output_dir=str(tmp_path / "generated"))
     monkeypatch.setattr(executor_db, "save_segments", lambda *a, **k: False)
     monkeypatch.setattr(task_executor_module, "LocalUploader", FakeUploader)
-    monkeypatch.setattr(task_executor_module, "FFmpegExporter", FakeFFmpegExporter)
+    monkeypatch.setattr(task_executor_module, "FFmpegExporter", FakeFFmpegExporter, raising=False)
 
     TaskExecutor(pipeline_factory=lambda **kwargs: pipeline).run_inline(
         "task-1", cancellation=TaskCancellation()
@@ -1128,6 +1128,30 @@ def test_final_segments_save_false_prevents_result_and_completion(
     assert pipeline.draft_builder.calls == 1
     assert task["status"] == "interrupted"
     assert task.get("result") is None
+
+
+def test_default_task_completes_without_instantiating_ffmpeg(
+    executor_db, tmp_path, monkeypatch
+):
+    create_task(executor_db)
+    pipeline = FakePipeline(output_dir=str(tmp_path / "generated"))
+
+    class ForbiddenFFmpegExporter:
+        def __init__(self, **kwargs):
+            raise AssertionError("默认任务不应初始化 FFmpeg")
+
+    monkeypatch.setattr(task_executor_module, "LocalUploader", FakeUploader)
+    monkeypatch.setattr(task_executor_module, "FFmpegExporter", ForbiddenFFmpegExporter, raising=False)
+
+    TaskExecutor(pipeline_factory=lambda **kwargs: pipeline).run_inline(
+        "task-1", cancellation=TaskCancellation()
+    )
+
+    task = executor_db.get_task("task-1")
+    assert task["status"] == "completed"
+    assert task["result"]["video_url"] is None
+    assert "video_synthesis" not in {step["step_name"] for step in task["steps"]}
+    assert list(tmp_path.rglob("*.mp4")) == []
 
 
 def test_reused_valid_assets_clear_stale_segment_and_asset_errors(

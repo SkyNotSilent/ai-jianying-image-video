@@ -315,6 +315,10 @@ export function getAssetsDownloadUrl(taskId, type = 'all') {
   return `/ai/native/video/kepu/tasks/${taskId}/assets/download?type=${encodeURIComponent(type)}`
 }
 
+export function getMaterialsDownloadUrl(taskId, snapshotKey) {
+  return `/ai/native/video/kepu/tasks/${taskId}/download-materials?snapshot_key=${encodeURIComponent(snapshotKey || '')}`
+}
+
 /**
  * 更新段落内容
  * @param {string} taskId - 任务ID

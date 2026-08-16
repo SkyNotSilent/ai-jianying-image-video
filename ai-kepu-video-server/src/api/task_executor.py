@@ -19,7 +19,6 @@ from .task_runtime import TaskCancellation, TaskCancelled, task_runtime
 from src.core.pipeline import VideoEditorPipeline
 from src.database import db_client
 from src.utils.local_uploader import LocalUploader
-from src.export.ffmpeg_exporter import FFmpegExporter
 from src.utils.rendering import canvas_for_ratio, normalize_ratio
 from src.config import Config
 
@@ -315,7 +314,7 @@ class TaskExecutor:
             )
 
             # 步骤 1: 文案改写 / 主题生成
-            logger.info(f"[{task_id}] [1/7] 开始生成/改写脚本...")
+            logger.info(f"[{task_id}] [1/6] 开始生成/改写脚本...")
             task.start_step("text_generation")
             if task_row.get("script_text"):
                 pipeline.article = task_row["script_text"]
@@ -352,14 +351,14 @@ class TaskExecutor:
                     ),
                     "脚本检查点",
                 )
-            logger.info(f"[{task_id}] [1/7] 脚本生成完成，共 {len(pipeline.article)} 字")
+            logger.info(f"[{task_id}] [1/6] 脚本生成完成，共 {len(pipeline.article)} 字")
             logger.info(f"[{task_id}] 内容总结: {pipeline.summary}")
             task.complete_step("text_generation")
             if cancellation:
                 cancellation.raise_if_cancelled()
 
             # 步骤 2: 短节奏分段，约 20 字一段，对应更密的画面切换
-            logger.info(f"[{task_id}] [2/7] 开始短节奏分段...")
+            logger.info(f"[{task_id}] [2/6] 开始短节奏分段...")
             if persisted_segments:
                 pipeline.segments = [row["text"] for row in persisted_segments]
             else:
@@ -383,7 +382,7 @@ class TaskExecutor:
                 row["segment_index"] for row in persisted_segments
             ]
             segments_count = len(pipeline.segments)
-            logger.info(f"[{task_id}] [2/7] 分段完成，共 {segments_count} 段")
+            logger.info(f"[{task_id}] [2/6] 分段完成，共 {segments_count} 段")
             generation_config = Config.generation_config()
             tts_concurrency = _bounded_concurrency(
                 generation_config.get("tts_concurrency", 1), segments_count
@@ -398,7 +397,7 @@ class TaskExecutor:
                 cancellation.raise_if_cancelled()
 
             # 步骤 3: 逐段生成图像 prompts
-            logger.info(f"[{task_id}] [3/7] 开始逐段生成图像描述...")
+            logger.info(f"[{task_id}] [3/6] 开始逐段生成图像描述...")
             task.start_step("image_prompt_generation")
             resume_work = build_resume_work(persisted_segments)
             image_prompts = [row.get("image_prompt") or "" for row in persisted_segments]
@@ -514,13 +513,13 @@ class TaskExecutor:
                             f"分镜 {segment_index} 已有{asset_type}资产检查点保存失败"
                         )
             logger.info(f"[{task_id}] 已保存分镜和图片提示词，共 {len(persisted_segments)} 段")
-            logger.info(f"[{task_id}] [3/7] 图像描述生成完成")
+            logger.info(f"[{task_id}] [3/6] 图像描述生成完成")
             task.complete_step("image_prompt_generation")
             if cancellation:
                 cancellation.raise_if_cancelled()
 
             # 步骤 4-5: 配音和生图互不依赖，并行执行；内部并发由模型配置页控制。
-            logger.info(f"[{task_id}] [4-5/7] 开始并行生成配音和图像（共 {segments_count} 段）...")
+            logger.info(f"[{task_id}] [4-5/6] 开始并行生成配音和图像（共 {segments_count} 段）...")
             pipeline.voiceover_files = resume_work.voiceover_files
             pipeline.media_paths = resume_work.media_paths
 
@@ -730,12 +729,12 @@ class TaskExecutor:
                     f"资源生成中断，共 {len(all_failures)} 项失败"
                 )
 
-            logger.info(f"[{task_id}] [4-5/7] 配音和图像生成完成")
+            logger.info(f"[{task_id}] [4-5/6] 配音和图像生成完成")
             if cancellation:
                 cancellation.raise_if_cancelled()
 
             # 步骤 6: 草稿构建
-            logger.info(f"[{task_id}] [6/7] 开始构建剪映草稿...")
+            logger.info(f"[{task_id}] [6/6] 开始构建剪映草稿...")
             task.start_step("draft_building")
             draft_path = pipeline.draft_builder.build(
                 segments=pipeline.segments,
@@ -744,7 +743,7 @@ class TaskExecutor:
                 voiceover_files=pipeline.voiceover_files,
                 output_dir=str(draft_dir),
             )
-            logger.info(f"[{task_id}] [6/7] 草稿构建完成")
+            logger.info(f"[{task_id}] [6/6] 草稿构建完成")
             task.complete_step("draft_building")
             if cancellation:
                 cancellation.raise_if_cancelled()
@@ -759,7 +758,7 @@ class TaskExecutor:
                     logger.debug(f"[{task_id}]   目录: {item.relative_to(draft_dir)}/")
 
             # 步骤 6: 打包并保存到本地媒体目录
-            logger.info(f"[{task_id}] [6/7] 开始打包并保存到本地媒体目录...")
+            logger.info(f"[{task_id}] [6/6] 开始打包并保存到本地媒体目录...")
             zip_path = None
             draft_url = None
 
@@ -810,43 +809,9 @@ class TaskExecutor:
             if cancellation:
                 cancellation.raise_if_cancelled()
 
-            # 步骤 7: 视频合成并保存到本地媒体目录
-            logger.info(f"[{task_id}] [7/7] 开始视频合成...")
-            task.start_step("video_synthesis")
+            # 完整 MP4 改为用户按需异步渲染，不再阻塞默认任务完成。
             video_path = None
             video_url = None
-
-            try:
-                ffmpeg_exporter = FFmpegExporter(canvas=canvas)
-                video_path = draft_dir / f"{draft_name}.mp4"
-
-                logger.info(f"[{task_id}] 使用 FFmpeg 生成视频...")
-                ffmpeg_exporter.export(
-                    segments=pipeline.segments,
-                    media_paths=pipeline.media_paths,
-                    voiceover_files=pipeline.voiceover_files,
-                    output_path=str(video_path),
-                )
-
-                video_size = video_path.stat().st_size / 1024 / 1024
-                logger.info(f"[{task_id}] 视频生成完成，大小: {video_size:.2f} MB")
-
-                # 保存视频到本地媒体目录
-                try:
-                    video_url = LocalUploader().upload(str(video_path))
-                    logger.info(f"[{task_id}] 视频保存成功: {video_url}")
-                except Exception as e:
-                    logger.warning(f"[{task_id}] 视频保存失败（不影响本地视频）: {e}")
-
-                task.complete_step("video_synthesis")
-
-            except Exception as e:
-                logger.warning(f"[{task_id}] 视频合成失败（不影响草稿）: {e}")
-                logger.exception(f"[{task_id}] 视频合成错误详情:")
-                task.fail_step("video_synthesis", str(e))
-
-            if cancellation:
-                cancellation.raise_if_cancelled()
 
             # 保存段落数据到数据库
             logger.info(f"[{task_id}] 保存段落数据到数据库...")
@@ -946,7 +911,7 @@ class TaskExecutor:
             logger.info(f"[{task_id}] ========== 任务完成 ==========")
             logger.info(
                 f"[{task_id}] 摘要: 段落={segments_count}, 图片={image_ok}成功/{image_failed}失败, "
-                f"音频={audio_ok}成功/{audio_failed}失败, 草稿={draft_path}, 视频={video_path}, 耗时={elapsed:.1f}s"
+                f"音频={audio_ok}成功/{audio_failed}失败, 草稿={draft_path}, 视频=按需渲染, 耗时={elapsed:.1f}s"
             )
 
         except TaskCancelled as error:

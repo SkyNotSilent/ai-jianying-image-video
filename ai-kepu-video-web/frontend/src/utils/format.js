@@ -47,8 +47,7 @@ const STEP_WEIGHTS = {
   image_prompt_generation: 15,
   voiceover_generation: 20,
   image_generation: 25,
-  draft_building: 20,
-  video_synthesis: 10
+  draft_building: 30
 }
 
 /**
@@ -83,8 +82,7 @@ const STEP_LABELS = {
   image_prompt_generation: '生成画面描述',
   voiceover_generation: '配音生成',
   image_generation: '图像生成',
-  draft_building: '草稿构建',
-  video_synthesis: '视频合成'
+  draft_building: '草稿构建'
 }
 
 /**

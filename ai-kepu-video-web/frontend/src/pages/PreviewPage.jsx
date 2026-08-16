@@ -18,7 +18,9 @@ import {
 } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router'
 import {
+  createExport,
   getExportState,
+  getExportJob,
   getSegments,
   getTaskAssets,
   getTaskStatus,
@@ -26,7 +28,6 @@ import {
   previewVoice,
   regenerateAudio,
   regenerateImage,
-  renderPreview,
   selectSegmentImage,
   updateSegment,
   uploadImage,
@@ -43,6 +44,7 @@ import {
   getSegmentDraftSnapshot,
   getSegmentAssetState,
   isTaskLoadPending,
+  nextPlaybackIndex,
   normalizeSubtitleText,
   secondsToLabel,
   segmentDuration,
@@ -74,7 +76,8 @@ export function PreviewPage() {
   const { taskId } = useParams()
   const navigate = useNavigate()
   const uploadRef = useRef(null)
-  const playTimer = useRef(null)
+  const audioRef = useRef(null)
+  const previewTimerRef = useRef(null)
   const voicePreviewAudioRef = useRef(null)
   const voicePreviewTokenRef = useRef(0)
   const loadRequestRef = useRef(0)
@@ -96,7 +99,8 @@ export function PreviewPage() {
   const [imageSize, setImageSize] = useState(null)
   const [playing, setPlaying] = useState(false)
   const [busyAction, setBusyAction] = useState('')
-  const [renderingPreview, setRenderingPreview] = useState(false)
+  const [previewJob, setPreviewJob] = useState(null)
+  const [previewMode, setPreviewMode] = useState('content')
   const [loadedTaskId, setLoadedTaskId] = useState(null)
 
   const orderedSegments = useMemo(() => sortSegmentsByIndex(segments), [segments])
@@ -112,6 +116,9 @@ export function PreviewPage() {
   )
   const ratio = exportState?.ratio || task?.ratio || task?.result?.ratio || '16:9'
   const imageUrl = normalizeMediaUrl(currentSegment?.image_url)
+  const audioUrl = normalizeMediaUrl(currentSegment?.audio_url)
+  const highFidelityUrl = normalizeMediaUrl(exportState?.render?.video_url || exportState?.preview?.manifest?.preview_url || exportState?.outputs?.mp4?.url)
+  const renderingPreview = ['pending', 'processing'].includes(previewJob?.status)
   const subtitle = normalizeSubtitleText(currentSegment?.text || '暂无字幕文案')
   const totalSeconds = useMemo(
     () => orderedSegments.reduce((total, segment) => total + segmentDuration(segment), 0),
@@ -160,6 +167,7 @@ export function PreviewPage() {
       setTask(taskData || null)
       setSegments(sortSegmentsByIndex(segmentData))
       setExportState(exportData)
+      setPreviewJob((exportData?.jobs || []).find(job => job.target === 'mp4' && ['pending', 'processing'].includes(job.status)) || null)
       setVoices(normalizeVoiceCatalog(voiceData))
       setAssets(Array.isArray(assetData) ? assetData : [])
       setLoadedTaskId(taskId)
@@ -176,11 +184,12 @@ export function PreviewPage() {
   useEffect(() => { loadPage() }, [loadPage])
 
   useEffect(() => {
-    window.clearTimeout(playTimer.current)
+    audioRef.current?.pause()
     setSelectedIndex(0)
     setPlaying(false)
     setBusyAction('')
-    setRenderingPreview(false)
+    setPreviewJob(null)
+    setPreviewMode('content')
     setTextDraft('')
     setImagePromptDraft('')
     setSelectedVoiceType('')
@@ -226,15 +235,101 @@ export function PreviewPage() {
   }, [imageUrl])
 
   useEffect(() => {
-    window.clearTimeout(playTimer.current)
-    if (!playing || !currentSegment) return undefined
-    if (selectedIndex >= orderedSegments.length - 1) {
-      setPlaying(false)
-      return undefined
+    if (exportState?.preview?.valid) return
+    setPreviewMode('content')
+  }, [exportState?.preview?.valid])
+
+  useEffect(() => {
+    if (!previewJob || !['pending', 'processing'].includes(previewJob.status)) return undefined
+    let cancelled = false
+    let polling = false
+    const poll = async () => {
+      if (polling) return
+      polling = true
+      try {
+        const nextJob = await getExportJob(taskId, previewJob.job_id)
+        if (cancelled) return
+        if (nextJob.status === 'completed') {
+          const nextState = await getExportState(taskId)
+          if (cancelled) return
+          setPreviewJob(nextJob)
+          setExportState(nextState)
+          setPreviewMode('high')
+          toast.success('高保真预览已生成，可直接下载同一份 MP4')
+        } else if (nextJob.status === 'failed') {
+          setPreviewJob(nextJob)
+          toast.error(nextJob.error || '高保真预览生成失败')
+        } else {
+          setPreviewJob(nextJob)
+        }
+      } catch (error) {
+        if (!cancelled) console.error('轮询高保真预览失败', error)
+      } finally {
+        polling = false
+      }
     }
-    playTimer.current = window.setTimeout(() => setSelectedIndex(index => index + 1), Math.min(segmentDuration(currentSegment) * 1000, 2000))
-    return () => window.clearTimeout(playTimer.current)
-  }, [currentSegment, orderedSegments.length, playing, selectedIndex])
+    poll()
+    const timer = window.setInterval(poll, 2000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [previewJob?.job_id, previewJob?.status, taskId])
+
+  useEffect(() => {
+    const audio = audioRef.current
+    window.clearTimeout(previewTimerRef.current)
+    if (!audio) return
+    if (!playing) {
+      audio.pause()
+      return
+    }
+    if (!audioUrl) {
+      previewTimerRef.current = window.setTimeout(() => {
+        const nextIndex = nextPlaybackIndex(selectedIndex, orderedSegments.length)
+        if (nextIndex === null) setPlaying(false)
+        else setSelectedIndex(nextIndex)
+      }, segmentDuration(currentSegment) * 1000)
+      return () => window.clearTimeout(previewTimerRef.current)
+    }
+    audio.currentTime = 0
+    audio.play().catch(error => {
+      console.error('播放片段配音失败', error)
+      setPlaying(false)
+      toast.error('配音加载失败，请稍后重试')
+    })
+    return () => window.clearTimeout(previewTimerRef.current)
+  }, [audioUrl, currentSegmentIdentity, orderedSegments.length, playing, selectedIndex])
+
+  const togglePlayback = async () => {
+    const audio = audioRef.current
+    if (playing) {
+      audio?.pause()
+      setPlaying(false)
+      return
+    }
+    if (!audioUrl || !audio) {
+      setPlaying(true)
+      return
+    }
+    try {
+      await audio.play()
+      setPlaying(true)
+    } catch (error) {
+      console.error('播放片段配音失败', error)
+      setPlaying(false)
+      toast.error('配音加载失败，请稍后重试')
+    }
+  }
+
+  const handleAudioEnded = () => {
+    const nextIndex = nextPlaybackIndex(selectedIndex, orderedSegments.length)
+    if (nextIndex === null) {
+      setPlaying(false)
+      return
+    }
+    setSelectedIndex(nextIndex)
+  }
 
   const selectSegment = index => {
     setPlaying(false)
@@ -247,6 +342,12 @@ export function PreviewPage() {
     setSegments(current => current.map(segment => (
       Number(segmentIndex(segment, 0)) === Number(index) ? { ...segment, ...patch } : segment
     )))
+    setExportState(current => current ? {
+      ...current,
+      preview: { ...current.preview, valid: false, exists: true, reason: 'stale', status: 'stale' },
+      render: { ...current.render, status: 'stale' },
+      outputs: { ...current.outputs, mp4: { ...current.outputs?.mp4, available: false, stale: true } },
+    } : current)
   }
 
   const saveCurrentSegment = async ({ quiet = false, requestToken = beginTaskRequest() } = {}) => {
@@ -375,23 +476,19 @@ export function PreviewPage() {
 
   const createFinalPreview = async () => {
     const requestToken = beginTaskRequest()
-    setRenderingPreview(true)
     try {
-      await renderPreview(taskId)
+      if (!await saveCurrentSegment({ quiet: true, requestToken })) return
+      const job = await createExport(taskId, { target: 'mp4', use_preview: !exportState?.preview?.valid, auto_download: false })
       if (!acceptsTaskRequest(requestToken)) return
-      const nextExportState = await getExportState(taskId).catch(() => null)
-      if (!acceptsTaskRequest(requestToken)) return
-      setExportState(nextExportState)
-      toast.success('最终预览已生成')
+      setPreviewJob(job)
+      toast.success(job.status === 'completed' ? '高保真预览已可用' : '已开始生成高保真预览')
     } catch (error) {
-      if (acceptsTaskRequest(requestToken)) toast.error(error?.response?.data?.detail || '生成最终预览失败')
-    } finally {
-      if (acceptsTaskRequest(requestToken)) setRenderingPreview(false)
+      if (acceptsTaskRequest(requestToken)) toast.error(error?.response?.data?.detail || '生成高保真预览失败')
     }
   }
 
   const openExport = () => {
-    if (!state.canExport) toast.warning('素材缺失或最终预览不可用，请先补齐素材或生成最终预览')
+    if (!state.canExport) toast.warning('当前还没有可交付的分镜素材')
     navigate(`/export/${taskId}`)
   }
 
@@ -432,16 +529,24 @@ export function PreviewPage() {
           {state.key === 'recoverable_assets' ? <section className="preview-recovery"><CircleAlert size={18} /><div><strong>已生成素材处于恢复模式</strong><p>任务失败不会隐藏已保存的文案、图片或配音。缺失素材可在右侧直接补齐。</p></div></section> : null}
           {orderedSegments.length === 0 ? <EmptyState title="暂无分镜数据" description="任务可能仍在生成，或尚未保存分镜。已生成资产仍可从项目资产中恢复查看。" action={<Link className="button button-secondary" to="/assets"><FolderKanban size={16} />返回项目资产</Link>} /> : <>
             <section className="preview-player-panel">
-              <div className={`preview-canvas ${ratioClassName(ratio)}`}>
-                {imageUrl ? <img src={imageUrl} alt={`分镜 ${selectedIndex + 1} 的画面`} /> : <ImagePlaceholder label="图片素材缺失，可上传替换或重新生成" />}
-                <p className="preview-subtitle" style={{ fontSize: `${subtitleFontSize(subtitle, ratio)}px` }}>{subtitle}</p>
-              </div>
-              <div className="preview-player-controls">
-                <button type="button" className="icon-button preview-play-button" onClick={() => setPlaying(value => !value)} aria-label={playing ? '暂停时间线' : '播放时间线'} title={playing ? '暂停时间线' : '播放时间线'}>{playing ? <Pause size={17} /> : <Play size={17} />}</button>
-                <time>{secondsToLabel(currentSeconds)}</time>
-                <input aria-label="选择时间线片段" type="range" min="0" max={Math.max(orderedSegments.length - 1, 0)} value={selectedIndex} onChange={event => selectSegment(event.target.value)} />
-                <time>{secondsToLabel(totalSeconds)}</time>
-              </div>
+              <header className="preview-mode-toolbar">
+                <div role="group" aria-label="预览模式"><button type="button" className={previewMode === 'content' ? 'is-active' : ''} onClick={() => setPreviewMode('content')}>内容预览</button><button type="button" className={previewMode === 'high' ? 'is-active' : ''} disabled={!exportState?.preview?.valid || !highFidelityUrl} onClick={() => setPreviewMode('high')}>高保真预览</button></div>
+                <span className={`preview-render-state is-${exportState?.preview?.status || 'missing'}`}>{renderingPreview ? '正在渲染完整视频' : exportState?.preview?.valid ? '已与当前素材同步' : exportState?.preview?.reason === 'stale' ? '完整视频已过期' : '内容预览无需生成视频'}</span>
+              </header>
+              {previewMode === 'high' && exportState?.preview?.valid && highFidelityUrl ? <div className={`preview-canvas preview-video-canvas ${ratioClassName(ratio)}`}><video controls preload="metadata" src={highFidelityUrl} aria-label="高保真完整视频预览" /></div> : <>
+                <div className={`preview-canvas ${ratioClassName(ratio)}`}>
+                  {imageUrl ? <img src={imageUrl} alt={`分镜 ${selectedIndex + 1} 的画面`} /> : <ImagePlaceholder label="图片素材缺失，可上传替换或重新生成" />}
+                  <p className="preview-subtitle" style={{ fontSize: `${subtitleFontSize(subtitle, ratio)}px` }}>{subtitle}</p>
+                  {!audioUrl ? <span className="preview-no-audio">该段无配音 · 按 {segmentDuration(currentSegment)} 秒播放</span> : null}
+                </div>
+                <div className="preview-player-controls">
+                  <button type="button" className="icon-button preview-play-button" onClick={togglePlayback} aria-label={playing ? '暂停时间线' : '播放时间线'} title={playing ? '暂停时间线' : '播放时间线'}>{playing ? <Pause size={17} /> : <Play size={17} />}</button>
+                  <time>{secondsToLabel(currentSeconds)}</time>
+                  <input aria-label="选择时间线片段" type="range" min="0" max={Math.max(orderedSegments.length - 1, 0)} value={selectedIndex} onChange={event => selectSegment(event.target.value)} />
+                  <time>{secondsToLabel(totalSeconds)}</time>
+                  <audio ref={audioRef} src={audioUrl || undefined} preload="auto" onEnded={handleAudioEnded} />
+                </div>
+              </>}
             </section>
 
             <section className="preview-table-panel">
@@ -468,7 +573,7 @@ export function PreviewPage() {
           </> : <EmptyState title="等待分镜" description="分镜写入后将在此处显示编辑控件。" />}
         </aside>
       </section>
-      {currentSegment ? <footer className="preview-editor-footer"><Link className="button button-secondary" to="/assets">返回项目资产</Link><button type="button" className="button button-secondary" disabled={renderingPreview} onClick={createFinalPreview}><LoaderCircle className={renderingPreview ? 'spin' : ''} size={16} />{renderingPreview ? '生成中...' : '生成最终预览'}</button><button type="button" className={state.canExport ? 'button button-primary' : 'button button-secondary'} onClick={openExport}>{state.canExport ? '导出视频' : '查看导出状态'}</button></footer> : null}
+      {currentSegment ? <footer className="preview-editor-footer"><Link className="button button-secondary" to="/assets">返回项目资产</Link><button type="button" className="button button-secondary" disabled={renderingPreview} onClick={createFinalPreview}><LoaderCircle className={renderingPreview ? 'spin' : ''} size={16} />{renderingPreview ? '渲染中...' : exportState?.preview?.valid ? '重新生成高保真预览' : '生成高保真预览'}</button><button type="button" className={state.canExport ? 'button button-primary' : 'button button-secondary'} onClick={openExport}>{state.canExport ? '前往导出中心' : '查看导出状态'}</button></footer> : null}
     </main>
   )
 }

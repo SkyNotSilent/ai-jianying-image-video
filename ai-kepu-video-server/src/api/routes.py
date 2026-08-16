@@ -34,6 +34,11 @@ from .task_manager import task_manager, TaskStatus
 from .task_executor import task_executor
 from src.config import Config
 from src.database import mysql_client
+from src.export.asset_package import (
+    build_material_package,
+    current_material_package,
+    material_package_state,
+)
 from src.draft.voice_catalog import (
     build_voice_key,
     normalize_tts_options,
@@ -319,15 +324,39 @@ def _ratio_slug(ratio: str) -> str:
     return normalize_ratio(ratio).replace(":", "x")
 
 
+def _file_signature(raw_path: Optional[str]) -> dict:
+    if not raw_path:
+        return {"path": "", "exists": False}
+    path = Path(raw_path)
+    try:
+        stat = path.stat()
+        return {
+            "path": str(path),
+            "exists": True,
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+        }
+    except OSError:
+        return {"path": str(path), "exists": False}
+
+
 def _media_fingerprint(task, segments: List[dict]) -> str:
+    from src.export.ffmpeg_exporter import FFmpegExporter
+
     payload = {
         "ratio": _task_ratio(task),
+        "canvas": _task_canvas(task),
+        "render_config": FFmpegExporter.get_render_config(canvas=_task_canvas(task)),
+        "settings": _file_signature(str(Config.BASE_DIR / "config" / "settings.json")),
         "animation_seed": _task_animation_seed(task.task_id),
         "segments": [
             {
                 "text": seg.get("text") or "",
-                "image_path": seg.get("image_path") or "",
-                "audio_path": seg.get("audio_path") or "",
+                "segment_index": seg.get("segment_index"),
+                "image": _file_signature(seg.get("image_path")),
+                "audio": _file_signature(seg.get("audio_path")),
+                "audio_voice_type": seg.get("audio_voice_type"),
+                "audio_tts_options_json": seg.get("audio_tts_options_json"),
                 "duration": seg.get("duration"),
             }
             for seg in segments
@@ -381,12 +410,15 @@ def _preview_state(task, segments: List[dict]) -> dict:
 
 
 def _write_preview_manifest(task, video_path: Path, preview_url: str, segments: List[dict]) -> dict:
+    fingerprint = _media_fingerprint(task, segments)
     manifest = {
         "video_path": str(video_path),
         "preview_url": preview_url,
+        "video_url": preview_url,
         "ratio": _task_ratio(task),
         "canvas": _task_canvas(task),
-        "fingerprint": _media_fingerprint(task, segments),
+        "fingerprint": fingerprint,
+        "snapshot_key": fingerprint,
         "created_at": datetime.now().isoformat(),
     }
     path = _preview_manifest_path(task)
@@ -398,6 +430,15 @@ def _write_preview_manifest(task, video_path: Path, preview_url: str, segments: 
 def _official_video_path(task) -> Path:
     draft_path = Path(task.result.draft_path)
     return draft_path / f"{draft_path.name}.mp4"
+
+
+def _ensure_legacy_render_manifest(task, segments: List[dict]) -> None:
+    """Adopt an old task's existing MP4 once so future edits can invalidate it."""
+    if not task.result or not task.result.draft_path or _read_preview_manifest(task):
+        return
+    video_path = _official_video_path(task)
+    if video_path.is_file() and task.result.video_url:
+        _write_preview_manifest(task, video_path, task.result.video_url, segments)
 
 
 def _draft_zip_path(task) -> Path:
@@ -1009,12 +1050,51 @@ def _create_export_job(task_id: str, target: str, payload: Optional[dict] = None
     return job
 
 
+def _create_or_reuse_export_job(task_id: str, target: str, payload: Optional[dict] = None) -> tuple:
+    """Create a job atomically, reusing an in-flight MP4 render for the same task."""
+    with EXPORT_JOBS_LOCK:
+        if target == "mp4":
+            for existing in EXPORT_JOBS.values():
+                if (
+                    existing.get("task_id") == task_id
+                    and existing.get("target") == "mp4"
+                    and existing.get("status") in {"pending", "processing"}
+                ):
+                    return dict(existing), False
+
+        job_id = uuid.uuid4().hex
+        now = datetime.now().isoformat()
+        job = {
+            "job_id": job_id,
+            "task_id": task_id,
+            "target": target,
+            "status": "pending",
+            "message": "等待开始",
+            "result": None,
+            "error": None,
+            "params": payload or {},
+            "created_at": now,
+            "updated_at": now,
+        }
+        EXPORT_JOBS[job_id] = job
+        return dict(job), True
+
+
 def _active_export_jobs(task_id: str) -> List[dict]:
     with EXPORT_JOBS_LOCK:
         return [
             dict(job) for job in EXPORT_JOBS.values()
             if job.get("task_id") == task_id and job.get("status") in {"pending", "processing"}
         ]
+
+
+def _latest_export_jobs(task_id: str) -> List[dict]:
+    with EXPORT_JOBS_LOCK:
+        matching = [dict(job) for job in EXPORT_JOBS.values() if job.get("task_id") == task_id]
+    latest = {}
+    for job in sorted(matching, key=lambda item: item.get("created_at") or ""):
+        latest[job.get("target")] = job
+    return list(latest.values())
 
 
 def _run_export_job(job_id: str, target: str, use_preview: bool, payload: Optional[dict] = None):
@@ -1025,7 +1105,7 @@ def _run_export_job(job_id: str, target: str, use_preview: bool, payload: Option
         task = task_manager.get_task(task_id)
         if not task:
             raise RuntimeError("任务不存在")
-        if not task.result or not task.result.draft_path:
+        if target != "materials" and (not task.result or not task.result.draft_path):
             raise RuntimeError("草稿路径不存在")
 
         segments = mysql_client.get_segments(task_id)
@@ -1038,6 +1118,17 @@ def _run_export_job(job_id: str, target: str, use_preview: bool, payload: Option
             result = _export_draft(task, segments)
         elif target == "draft_local":
             result = _export_draft_local(task, segments, payload or {})
+        elif target == "materials":
+            result = build_material_package(
+                task.task_id,
+                getattr(task, "name", None) or getattr(task, "theme", None) or task.task_id,
+                segments,
+                Config.BASE_DIR,
+            )
+            result["download_url"] = (
+                f"/ai/native/video/kepu/tasks/{task.task_id}/download-materials"
+                f"?snapshot_key={quote(result['snapshot_key'])}"
+            )
         else:
             raise RuntimeError("不支持的导出类型")
 
@@ -1052,13 +1143,16 @@ def _export_mp4(task, segments: List[dict], use_preview: bool) -> dict:
     from src.utils.local_uploader import LocalUploader
 
     output_path = _official_video_path(task)
+    snapshot_before = _media_fingerprint(task, segments)
     preview = _preview_state(task, segments)
     source = "rendered"
 
     if use_preview and preview["valid"]:
         manifest = preview["manifest"]
-        shutil.copy2(manifest["video_path"], output_path)
-        source = "preview"
+        preview_path = Path(manifest["video_path"])
+        if preview_path.resolve() != output_path.resolve():
+            shutil.copy2(preview_path, output_path)
+        source = "cached"
     else:
         segment_texts = [seg.get("text") or "" for seg in segments]
         media_paths = [seg.get("image_path") for seg in segments]
@@ -1074,16 +1168,23 @@ def _export_mp4(task, segments: List[dict], use_preview: bool) -> dict:
             animation_seed=_task_animation_seed(task.task_id),
         )
 
+    current_segments = mysql_client.get_segments(task.task_id)
+    if _media_fingerprint(task, current_segments) != snapshot_before:
+        output_path.unlink(missing_ok=True)
+        raise RuntimeError("渲染期间素材已变化，本次结果已作废，请重新生成")
+
     video_url = LocalUploader().upload(
         str(output_path),
         f"{task.task_id}/exports/{output_path.stem}_{_ratio_slug(_task_ratio(task))}_{int(time.time())}.mp4",
     )
+    manifest = _write_preview_manifest(task, output_path, video_url, segments)
     _set_task_result_preserving(task, len(segments), video_url=video_url)
     return {
         "target": "mp4",
         "source": source,
         "video_path": str(output_path),
         "video_url": video_url,
+        "snapshot_key": manifest["snapshot_key"],
         "ratio": _task_ratio(task),
         "canvas": _task_canvas(task),
     }
@@ -1840,9 +1941,13 @@ async def download_video(task_id: str):
     if not task.result or not task.result.draft_path:
         raise HTTPException(status_code=404, detail="草稿路径不存在")
 
-    # 查找 MP4 文件（在草稿目录内）
-    draft_path = Path(task.result.draft_path)
-    video_path = draft_path / f"{draft_path.name}.mp4"
+    segments = mysql_client.get_segments(task_id)
+    _ensure_legacy_render_manifest(task, segments)
+    preview = _preview_state(task, segments)
+    if not preview["valid"]:
+        raise HTTPException(status_code=409, detail="当前 MP4 未生成或已过期，请重新生成")
+
+    video_path = Path(preview["manifest"]["video_path"])
 
     if not video_path.exists():
         raise HTTPException(status_code=404, detail="视频文件不存在")
@@ -2008,19 +2113,48 @@ async def render_task_preview(
 
 @router.get("/tasks/{task_id}/export-state")
 async def get_export_state(task_id: str, request: Request):
-    """获取导出页状态：比例、最终预览可复用性、MP4/草稿产物状态。"""
+    """获取导出页状态：预览、MP4、当前分镜素材包与剪映草稿。"""
     task = task_manager.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
-    if not task.result or not task.result.draft_path:
-        raise HTTPException(status_code=404, detail="草稿路径不存在")
 
     segments = mysql_client.get_segments(task_id)
     ratio = _task_ratio(task)
     canvas = _task_canvas(task)
+    _ensure_legacy_render_manifest(task, segments)
     preview = _preview_state(task, segments)
-    draft_zip = _draft_zip_path(task)
-    video_path = _official_video_path(task)
+    has_draft_path = bool(task.result and task.result.draft_path)
+    draft_zip = _draft_zip_path(task) if has_draft_path else None
+    video_path = _official_video_path(task) if has_draft_path else None
+    materials = material_package_state(
+        task_id,
+        getattr(task, "name", None) or getattr(task, "theme", None) or task_id,
+        segments,
+        Config.BASE_DIR,
+    )
+    materials["download_url"] = (
+        f"{request.url_for('download_material_package', task_id=task_id)}"
+        f"?snapshot_key={quote(materials['snapshot_key'])}"
+        if materials["package_ready"] else None
+    )
+
+    jobs = _latest_export_jobs(task_id)
+    latest_mp4_job = next((job for job in jobs if job.get("target") == "mp4"), None)
+    if latest_mp4_job and latest_mp4_job.get("status") in {"pending", "processing"}:
+        render_status = latest_mp4_job["status"]
+    elif preview["valid"]:
+        render_status = "ready"
+    elif preview["reason"] in {"stale", "ratio_mismatch", "file_missing"}:
+        render_status = "stale"
+    elif latest_mp4_job and latest_mp4_job.get("status") == "failed":
+        render_status = "failed"
+    else:
+        render_status = "missing"
+
+    manifest = dict(preview["manifest"] or {})
+    if manifest.get("preview_url"):
+        manifest["preview_url"] = _normalize_local_media_url(manifest["preview_url"], request)
+        manifest["video_url"] = manifest["preview_url"]
 
     return {
         "task_id": task_id,
@@ -2031,21 +2165,32 @@ async def get_export_state(task_id: str, request: Request):
             "exists": preview["exists"],
             "valid": preview["valid"],
             "reason": preview["reason"],
-            "manifest": preview["manifest"],
+            "status": render_status,
+            "snapshot_key": preview["fingerprint"],
+            "manifest": manifest or None,
+        },
+        "render": {
+            "status": render_status,
+            "snapshot_key": preview["fingerprint"],
+            "video_url": manifest.get("preview_url"),
+            "created_at": manifest.get("created_at"),
+            "error": latest_mp4_job.get("error") if latest_mp4_job else None,
         },
         "outputs": {
             "mp4": {
-                "available": video_path.exists() or bool(task.result.video_url),
-                "path": str(video_path),
-                "url": _normalize_local_media_url(task.result.video_url, request),
+                "available": preview["valid"],
+                "stale": preview["exists"] and not preview["valid"],
+                "path": manifest.get("video_path"),
+                "url": manifest.get("preview_url"),
             },
             "draft": {
-                "available": draft_zip.exists() or bool(task.result.draft_url),
-                "path": str(draft_zip),
-                "url": _normalize_local_media_url(task.result.draft_url, request),
+                "available": bool(draft_zip and draft_zip.exists()) or bool(task.result and task.result.draft_url),
+                "path": str(draft_zip) if draft_zip else None,
+                "url": _normalize_local_media_url(task.result.draft_url, request) if task.result else None,
             },
+            "materials": materials,
         },
-        "jobs": _active_export_jobs(task_id),
+        "jobs": jobs,
     }
 
 
@@ -2074,17 +2219,28 @@ async def validate_local_draft_folder(task_id: str, payload: dict = Body(...)):
 
 @router.post("/tasks/{task_id}/exports")
 async def create_export(task_id: str, payload: dict = Body(...)):
-    """创建异步导出任务。target=mp4/draft/draft_local；MP4 可复用有效最终预览。"""
+    """创建异步导出任务。支持 MP4、剪映草稿、本地写入和分镜素材包。"""
     task = task_manager.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
-    if not task.result or not task.result.draft_path:
-        raise HTTPException(status_code=404, detail="草稿路径不存在")
 
     target = (payload or {}).get("target")
     use_preview = bool((payload or {}).get("use_preview", True))
-    if target not in {"mp4", "draft", "draft_local"}:
-        raise HTTPException(status_code=400, detail="target 必须是 mp4、draft 或 draft_local")
+    if target not in {"mp4", "draft", "draft_local", "materials"}:
+        raise HTTPException(status_code=400, detail="target 必须是 mp4、draft、draft_local 或 materials")
+    if target != "materials" and (not task.result or not task.result.draft_path):
+        raise HTTPException(status_code=404, detail="草稿路径不存在")
+
+    if target == "materials":
+        segments = mysql_client.get_segments(task_id)
+        state = material_package_state(
+            task_id,
+            getattr(task, "name", None) or getattr(task, "theme", None) or task_id,
+            segments,
+            Config.BASE_DIR,
+        )
+        if not state["available"]:
+            raise HTTPException(status_code=409, detail="暂无可打包素材")
 
     if target == "draft_local":
         root_check = _validate_local_draft_root(
@@ -2095,9 +2251,10 @@ async def create_export(task_id: str, payload: dict = Body(...)):
             raise HTTPException(status_code=400, detail="；".join(root_check["issues"] or ["剪映草稿目录不可用"]))
         payload = {**(payload or {}), "draft_root": root_check["path"], "target_os": root_check["target_os"]}
 
-    job = _create_export_job(task_id, target, payload)
-    thread = Thread(target=_run_export_job, args=(job["job_id"], target, use_preview, payload), daemon=True)
-    thread.start()
+    job, created = _create_or_reuse_export_job(task_id, target, payload)
+    if created:
+        thread = Thread(target=_run_export_job, args=(job["job_id"], target, use_preview, payload), daemon=True)
+        thread.start()
     return job
 
 
@@ -2107,6 +2264,36 @@ async def get_export_job(task_id: str, job_id: str):
     if not job or job.get("task_id") != task_id:
         raise HTTPException(status_code=404, detail="导出任务不存在")
     return job
+
+
+@router.get("/tasks/{task_id}/download-materials", name="download_material_package")
+async def download_material_package(
+    task_id: str,
+    snapshot_key: str = Query(..., min_length=16, description="素材包任务快照"),
+):
+    """下载与当前分镜快照一致的正式素材包。"""
+    task = task_manager.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    segments = mysql_client.get_segments(task_id)
+    project_name = getattr(task, "name", None) or getattr(task, "theme", None) or task_id
+    state = material_package_state(task_id, project_name, segments, Config.BASE_DIR)
+    if snapshot_key != state["snapshot_key"]:
+        raise HTTPException(status_code=409, detail="素材已变化，请重新打包")
+    package_path = current_material_package(
+        task_id,
+        project_name,
+        segments,
+        Config.BASE_DIR,
+        snapshot_key,
+    )
+    if not package_path:
+        raise HTTPException(status_code=404, detail="素材包尚未生成或已经失效")
+    return FileResponse(
+        path=str(package_path),
+        media_type="application/zip",
+        filename=package_path.name,
+    )
 
 
 @router.get("/tasks/{task_id}/assets")
