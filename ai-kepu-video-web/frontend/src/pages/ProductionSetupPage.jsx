@@ -84,7 +84,7 @@ export function ProductionSetupPage() {
       return
     }
     setDraft(loaded)
-    Promise.all([getVoices(), getConfig()])
+    Promise.all([getVoices({ include_disabled: true }), getConfig()])
       .then(([voiceList, runtimeConfig]) => {
         if (!active) return
         const available = normalizeVoiceCatalog(voiceList)
@@ -140,7 +140,7 @@ export function ProductionSetupPage() {
     const token = ++previewTokenRef.current
     setPreviewState(current => nextPreviewState(current, { type: 'start', voiceId: voice.id, token }))
     try {
-      const result = await previewVoice({ voice_type: voice.id, tts_options: selectedTtsOptions, text: config?.tts?.preview_text })
+      const result = await previewVoice({ voice_type: voice.id })
       const audio = new Audio(normalizeMediaUrl(result.url))
       audioRef.current = audio
       audio.onended = stopVoicePreview

@@ -10,6 +10,9 @@ from src.config import Config
 from src.draft.voice_catalog import normalize_tts_options, parse_voice_key
 from src.draft.voiceover import VoiceOverGenerator
 
+PRESET_VOICE_PREVIEW_TEXT = "欢迎来到 InsightCut，让我们一起把灵感变成精彩视频。"
+PRESET_VOICE_PREVIEW_VERSION = "preset-v1"
+
 
 class VoicePreviewService:
     def __init__(self, base_dir: Path = None, tts_config: Dict = None, clone_store=None):
@@ -47,34 +50,49 @@ class VoicePreviewService:
         tts_options: Optional[Dict],
         config_override: Optional[Dict] = None,
     ) -> Dict:
-        clean_text = str(text or "").strip()[:120]
-        if not clean_text:
-            raise ValueError("试听文本不能为空")
         config = self._merged_config(self.tts_config, config_override)
         selection = parse_voice_key(voice_type, default_provider=config.get("provider"))
+        clean_text = (
+            PRESET_VOICE_PREVIEW_TEXT
+            if selection.kind == "preset"
+            else str(text or "").strip()[:120]
+        )
+        if not clean_text:
+            raise ValueError("试听文本不能为空")
         provider_config = config if selection.provider == "doubao" else config.get("mimo") or {}
-        options = normalize_tts_options(tts_options, provider_config, selection.provider)
+        requested_options = tts_options
+        if selection.kind == "preset":
+            requested_options = {
+                "speed_level": "normal",
+                "volume_ratio": 1.0,
+                "style_prompt": "",
+            }
+        options = normalize_tts_options(requested_options, provider_config, selection.provider)
+        if selection.kind == "preset" and selection.provider == "mimo":
+            options["style_prompt"] = ""
         mimo = config.get("mimo") or {}
-        identity = {
-            "voice_type": selection.key,
-            "text": clean_text,
-            "options": options,
-            "provider": selection.provider,
-            "request_config": {
-                "auth_method": config.get("auth_method"),
-                "api_url": config.get("api_url"),
-                "cluster": config.get("cluster"),
-                "mimo_base_url": mimo.get("base_url"),
-                "mimo_model": mimo.get("model"),
-                "mimo_clone_model": mimo.get("clone_model"),
-                "mimo_format": mimo.get("format"),
-            },
-            "clone_revision": (
-                self._clone_revision(selection.voice_id)
-                if selection.kind == "clone"
-                else None
-            ),
-        }
+        if selection.kind == "preset":
+            identity = {
+                "version": PRESET_VOICE_PREVIEW_VERSION,
+                "voice_type": selection.key,
+            }
+        else:
+            identity = {
+                "voice_type": selection.key,
+                "text": clean_text,
+                "options": options,
+                "provider": selection.provider,
+                "request_config": {
+                    "auth_method": config.get("auth_method"),
+                    "api_url": config.get("api_url"),
+                    "cluster": config.get("cluster"),
+                    "mimo_base_url": mimo.get("base_url"),
+                    "mimo_model": mimo.get("model"),
+                    "mimo_clone_model": mimo.get("clone_model"),
+                    "mimo_format": mimo.get("format"),
+                },
+                "clone_revision": self._clone_revision(selection.voice_id),
+            }
         digest = hashlib.sha256(
             json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
         ).hexdigest()[:32]

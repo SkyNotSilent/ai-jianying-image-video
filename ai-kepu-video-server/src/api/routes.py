@@ -45,7 +45,7 @@ from src.draft.voice_catalog import (
     parse_voice_key,
 )
 from src.draft.voice_clone import VoiceCloneStore
-from src.draft.voice_preview import VoicePreviewService
+from src.draft.voice_preview import PRESET_VOICE_PREVIEW_TEXT, VoicePreviewService
 from src.draft.voiceover import VoiceOverGenerator
 from src.text.provider_catalog import (
     get_provider,
@@ -134,14 +134,14 @@ def _resolve_new_task_voice(voice_type: Optional[str]) -> str:
         return selection.key
 
     record = mysql_client.find_tts_voice(selection.provider, selection.voice_id)
-    if record and record.get("is_enabled"):
+    if record:
         return selection.key
     if voice_type:
-        raise HTTPException(status_code=400, detail="音色不存在或未对新任务开放")
+        raise HTTPException(status_code=400, detail="音色不存在")
 
-    fallback = mysql_client.list_tts_voices(provider=selection.provider)
+    fallback = mysql_client.list_tts_voices(provider=selection.provider, include_disabled=True)
     if not fallback:
-        fallback = mysql_client.list_tts_voices()
+        fallback = mysql_client.list_tts_voices(include_disabled=True)
     if not fallback:
         raise HTTPException(status_code=400, detail="当前没有可用音色")
     return fallback[0]["id"]
@@ -1473,7 +1473,15 @@ async def preview_voice(payload: dict = Body(...)):
     voice_type = str(payload.get("voice_type") or "").strip()
     if not voice_type:
         raise HTTPException(status_code=400, detail="请选择试听音色")
-    text = str(payload.get("text") or Config.tts_config().get("preview_text") or "这是音色试听。")[:120]
+    selection = parse_voice_key(
+        voice_type,
+        default_provider=Config.tts_config().get("provider"),
+    )
+    text = (
+        PRESET_VOICE_PREVIEW_TEXT
+        if selection.kind == "preset"
+        else str(payload.get("text") or Config.tts_config().get("preview_text") or "这是音色试听。")[:120]
+    )
     store = _voice_clone_store()
     try:
         service = VoicePreviewService(
@@ -1484,13 +1492,18 @@ async def preview_voice(payload: dict = Body(...)):
         return service.generate(
             voice_type,
             text,
-            payload.get("tts_options") or {},
+            {} if selection.kind == "preset" else payload.get("tts_options") or {},
             config_override=payload.get("config_override"),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("TTS 音色试听失败")
+        if getattr(getattr(exc, "response", None), "status_code", None) == 403:
+            raise HTTPException(
+                status_code=409,
+                detail="当前 TTS 账号未授权该音色，请先在服务商控制台开通",
+            ) from exc
         raise HTTPException(status_code=502, detail=f"音色试听失败: {exc}") from exc
 
 

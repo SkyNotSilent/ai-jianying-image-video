@@ -75,7 +75,7 @@ def test_normalizes_multi_provider_runtime_config():
     Config._normalize_tts_config(config)
 
     assert config["tts"]["enabled_providers"] == ["doubao", "mimo"]
-    assert config["tts"]["preview_text"].startswith("你好")
+    assert config["tts"]["preview_text"].startswith("欢迎来到")
     assert config["tts"]["speed_level"] == "normal"
     assert config["tts"]["volume_ratio"] == 1.0
     assert config["tts"]["mimo"]["speed_level"] == "normal"

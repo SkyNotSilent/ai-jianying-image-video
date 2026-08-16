@@ -31,7 +31,6 @@ import {
   refreshLlmProviderModels,
   testTtsConfig,
   updateConfig,
-  updateVoiceAvailability,
   updateVoiceClone,
 } from '../api/task'
 import { AdvancedSettings } from '../components/AdvancedSettings'
@@ -58,7 +57,7 @@ import {
   switchProviderDraft,
 } from '../lib/llmProviderCatalog'
 import { toast } from '../lib/toast'
-import { hasUsableVoice, nextPreviewState, normalizeVoiceCatalog, reconcileTtsVoiceConfig, togglePresetVoiceAvailability } from '../lib/voiceCatalog'
+import { hasUsableVoice, nextPreviewState, normalizeVoiceCatalog, reconcileTtsVoiceConfig } from '../lib/voiceCatalog'
 import { normalizeMediaUrl } from '../utils/mediaUrl'
 import './delivery-pages.css'
 
@@ -354,10 +353,10 @@ export function SettingsPage() {
 
   const setProviderEnabled = (provider, enabled) => {
     const providerHasVoice = voices.some(voice => (
-      voice.provider === provider && voice.is_enabled && voice.status === 'ready'
+      voice.provider === provider && voice.selectable
     ))
     if (enabled && !providerHasVoice) {
-      toast.warning('请先在该服务商音色库中勾选至少一个音色')
+      toast.warning('该服务商当前没有可用音色')
       return
     }
     const existing = form.tts.enabled_providers || []
@@ -366,7 +365,7 @@ export function SettingsPage() {
       : existing.filter(item => item !== provider)
     if (!next.length) {
       const fallback = ['doubao', 'mimo'].find(item => (
-        item !== provider && voices.some(voice => voice.provider === item && voice.is_enabled && voice.status === 'ready')
+        item !== provider && voices.some(voice => voice.provider === item && voice.selectable)
       ))
       if (!fallback) {
         toast.warning('至少保留一个含可用音色的 TTS 服务商')
@@ -378,20 +377,6 @@ export function SettingsPage() {
       const tts = reconcileTtsVoiceConfig({ ...current.tts, enabled_providers: next }, voices)
       return { ...current, tts }
     })
-  }
-
-  const handleAvailabilityChange = voiceId => {
-    const nextVoices = togglePresetVoiceAvailability(voices, voiceId)
-    const toggledVoice = nextVoices.find(voice => voice.id === voiceId)
-    setVoices(nextVoices)
-    setForm(current => ({
-      ...current,
-      tts: reconcileTtsVoiceConfig(
-        current.tts,
-        nextVoices,
-        toggledVoice?.is_enabled ? toggledVoice.provider : '',
-      ),
-    }))
   }
 
   const defaultVoiceKey = providerTab === 'mimo'
@@ -449,9 +434,6 @@ export function SettingsPage() {
     try {
       const result = await previewVoice({
         voice_type: voice.id,
-        text: form.tts.preview_text,
-        tts_options: providerOptions,
-        config_override: form.tts,
       })
       playPreviewUrl(voice.id, token, result.url)
     } catch (error) {
@@ -577,10 +559,6 @@ export function SettingsPage() {
     setSaving(true)
     try {
       const saved = await updateConfig(normalized)
-      const enabledVoiceKeys = voices
-        .filter(voice => voice.kind === 'preset' && voice.is_enabled)
-        .map(voice => voice.id)
-      await updateVoiceAvailability(enabledVoiceKeys)
       const savedConfig = normalizeConfig(saved || normalized)
       currentLlmProviderRef.current = savedConfig.llm.provider
       setForm(savedConfig)
@@ -677,10 +655,10 @@ export function SettingsPage() {
             {providerTab === 'doubao'
               ? <DoubaoFields form={form} updateTts={updateTts} />
               : <MimoFields form={form} updateMimo={updateMimo} onRestore={() => setForm(current => restoreMimoTechnicalPreset(current))} />}
-            <Field label="通用试听文本" wide><input value={form.tts.preview_text} maxLength="80" onChange={event => updateTts('preview_text', event.target.value)} placeholder="这是当前音色的试听。" /></Field>
+            <Field label="固定试听文案" wide><span className="settings-fixed-summary">欢迎来到 InsightCut，让我们一起把灵感变成精彩视频。</span></Field>
             <div className="settings-voice-library">
-              <header><div><strong>{providerTab === 'mimo' ? 'MiMo' : '豆包'} 音色库</strong><small>点击音色卡片切换对号；有对号的音色会出现在生成和预览页。</small></div></header>
-              <VoicePicker voices={providerVoices} value={defaultVoiceKey} ttsOptions={providerOptions} onChange={selectDefaultVoice} onOptionsChange={updateProviderOptions} onPreview={handleVoicePreview} playingVoice={previewState.playingVoice} previewLoading={previewState.loading} previewError={previewState.error} includeUnavailable manageAvailability optionsProvider={providerTab} onAvailabilityChange={handleAvailabilityChange} />
+              <header><div><strong>{providerTab === 'mimo' ? 'MiMo' : '豆包'} 音色库</strong><small>全部预置音色都会出现在第二阶段；这里只设置新任务的默认音色。</small></div></header>
+              <VoicePicker voices={providerVoices} value={defaultVoiceKey} ttsOptions={providerOptions} onChange={selectDefaultVoice} onOptionsChange={updateProviderOptions} onPreview={handleVoicePreview} playingVoice={previewState.playingVoice} previewLoading={previewState.loading} previewError={previewState.error} optionsProvider={providerTab} />
             </div>
             {providerTab === 'mimo' ? <div className="settings-clone-library">
               <header><div><strong>MiMo 声音克隆</strong><small>参考音频只保存在本地，试听成功后才能启用。</small></div></header>

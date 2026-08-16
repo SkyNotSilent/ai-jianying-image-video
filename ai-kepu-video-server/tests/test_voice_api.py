@@ -13,6 +13,7 @@ from src.api.models import RegenerateAudioRequest, TTSOptions
 from src.api.task_manager import TaskManager
 from src.database import sqlite_client as sqlite_client_module
 from src.database.sqlite_client import SQLiteClient
+from src.draft.voice_preview import PRESET_VOICE_PREVIEW_TEXT
 
 
 @pytest.fixture
@@ -90,7 +91,7 @@ def test_catalog_endpoint_filters_providers_and_bulk_availability(
     assert {voice["id"] for voice in enabled} == set(result["enabled_voice_keys"])
 
 
-def test_preview_endpoint_forwards_unsaved_config(tmp_path, temp_db, monkeypatch, tts_config):
+def test_preset_preview_endpoint_uses_fixed_copy_and_options(tmp_path, temp_db, monkeypatch, tts_config):
     captured = {}
 
     class FakePreviewService:
@@ -122,7 +123,43 @@ def test_preview_endpoint_forwards_unsaved_config(tmp_path, temp_db, monkeypatch
         )
     )
     assert result["url"].endswith("one.wav")
+    assert captured["text"] == PRESET_VOICE_PREVIEW_TEXT
+    assert captured["tts_options"] == {}
     assert captured["config_override"] == {"mimo": {"style_prompt": "轻松"}}
+
+
+def test_new_task_accepts_known_preset_even_when_legacy_checkmark_is_off(
+    temp_db, monkeypatch, tts_config
+):
+    monkeypatch.setattr(routes, "mysql_client", temp_db)
+    monkeypatch.setattr(routes.Config, "tts_config", classmethod(lambda cls: tts_config))
+
+    voice_key = "doubao:zh_male_chenwendongge_moon_bigtts"
+    assert temp_db.find_tts_voice("doubao", "zh_male_chenwendongge_moon_bigtts")["is_enabled"] is False
+    assert routes._resolve_new_task_voice(voice_key) == voice_key
+
+
+def test_preview_reports_provider_authorization_instead_of_generic_failure(
+    tmp_path, temp_db, monkeypatch, tts_config
+):
+    class ForbiddenPreviewService:
+        def __init__(self, **_kwargs):
+            pass
+
+        def generate(self, *_args, **_kwargs):
+            error = RuntimeError("forbidden")
+            error.response = SimpleNamespace(status_code=403)
+            raise error
+
+    monkeypatch.setattr(routes, "mysql_client", temp_db)
+    monkeypatch.setattr(routes, "VoicePreviewService", ForbiddenPreviewService)
+    monkeypatch.setattr(routes.Config, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(routes.Config, "tts_config", classmethod(lambda cls: tts_config))
+
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(routes.preview_voice({"voice_type": "doubao:missing-permission"}))
+    assert caught.value.status_code == 409
+    assert "未授权该音色" in caught.value.detail
 
 
 def test_clone_multipart_lifecycle_requires_preview_before_enable(

@@ -89,7 +89,7 @@ export function normalizeConfig(config = {}) {
       ...(source.tts || {}),
       provider,
       enabled_providers: enabledProviders,
-      preview_text: source.tts?.preview_text || '你好，这是当前音色的试听，欢迎使用 InsightCut。',
+      preview_text: '欢迎来到 InsightCut，让我们一起把灵感变成精彩视频。',
       auth_method: source.tts?.auth_method === 'api_key' ? 'api_key' : 'access_token',
       api_url: source.tts?.api_url || '',
       appid: source.tts?.appid || '',

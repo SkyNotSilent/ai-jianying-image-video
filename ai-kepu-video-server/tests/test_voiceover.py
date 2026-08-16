@@ -148,7 +148,7 @@ def test_clone_uses_clone_model_and_in_memory_reference_without_logging_it(
     assert "DO_NOT_LOG_THIS_REFERENCE" not in caplog.text
 
 
-def test_preview_cache_reuses_identical_input_and_invalidates_changes(
+def test_preset_preview_cache_is_stable_per_voice(
     tmp_path, monkeypatch, tts_config
 ):
     calls = []
@@ -176,9 +176,9 @@ def test_preview_cache_reuses_identical_input_and_invalidates_changes(
 
     assert first["cached"] is False
     assert second == {**first, "cached": True}
-    assert len(calls) == 5
-    assert len({
-        first["path"], changed_text["path"], changed_voice["path"],
-        changed_options["path"], changed_model["path"],
-    }) == 5
+    assert len(calls) == 2
+    assert changed_text["path"] == first["path"]
+    assert changed_options["path"] == first["path"]
+    assert changed_model["path"] == first["path"]
+    assert changed_voice["path"] != first["path"]
     assert first["url"].startswith("/media/_voice_previews/")

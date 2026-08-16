@@ -116,7 +116,7 @@ class Config:
             "tts": {
                 "provider": cls.TTS_PROVIDER,
                 "enabled_providers": ["doubao", "mimo"],
-                "preview_text": "你好，这是当前音色的试听，欢迎使用 InsightCut。",
+                "preview_text": "欢迎来到 InsightCut，让我们一起把灵感变成精彩视频。",
                 "auth_method": cls.DOUBAO_TTS_AUTH_METHOD,
                 "api_url": cls.DOUBAO_TTS_API_URL,
                 "appid": cls.DOUBAO_TTS_APPID,
@@ -254,7 +254,7 @@ class Config:
         )
         tts["preview_text"] = str(
             tts.get("preview_text")
-            or "你好，这是当前音色的试听，欢迎使用 InsightCut。"
+            or "欢迎来到 InsightCut，让我们一起把灵感变成精彩视频。"
         )[:80]
         raw_auth_method = (tts.get("auth_method") or cls.DOUBAO_TTS_AUTH_METHOD or "").strip().lower()
         if raw_auth_method not in {"access_token", "api_key"}:
