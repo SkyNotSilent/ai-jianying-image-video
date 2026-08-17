@@ -16,6 +16,12 @@ InsightCut 是一个本地优先的 AI 图片视频工作台，面向科普、�
 
 [打开完整在线成片展示](https://skynotsilent.github.io/ai-jianying-image-video/showcase/)
 
+### 小岛经济学
+
+文稿模式 · 16:9 · 01:02
+
+https://github.com/user-attachments/assets/34833f83-5416-41b9-9a75-b47ddd0e5f05
+
 ### 30 年河东，30 年河西，莫欺少年穷
 
 主题模式 · 16:9 · 18 个分镜 · 00:44
@@ -39,12 +45,6 @@ https://github.com/user-attachments/assets/7d7b050e-25c2-4f4f-8cf5-1ab3f7157a95
 文稿模式 · 3:4 · 00:52
 
 https://github.com/user-attachments/assets/e4695fbc-2339-4102-b631-bcf61df63264
-
-### 小岛经济学
-
-文稿模式 · 16:9 · 01:02
-
-https://github.com/user-attachments/assets/34833f83-5416-41b9-9a75-b47ddd0e5f05
 
 这些案例完成后，对应的文稿、分镜、画面提示词、图片、配音、字幕和导出记录仍然保存在项目中，可以继续逐段检查和修改。
 
