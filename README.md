@@ -1,4 +1,4 @@
-# InsightCut
+# InsightCut — Jianying / 剪映 / CapCut AI 图片视频工作台
 
 > 把文稿真正做成可修改、可恢复、还能继续精修的视频项目。
 
