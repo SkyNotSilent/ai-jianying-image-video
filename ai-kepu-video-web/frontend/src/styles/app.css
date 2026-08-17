@@ -20,6 +20,8 @@ button:focus-visible, a:focus-visible { outline: 3px solid #8ac8ff; outline-offs
 .app-shell { min-height: 100vh; }
 
 .app-header { position: sticky; top: 0; z-index: 10; min-height: 64px; display: flex; align-items: center; gap: 32px; padding: 10px max(20px, calc((100vw - 1360px) / 2)); border-bottom: 1px solid #dbe2ea; background: rgba(255, 255, 255, .96); }
+.active-workspace-link { max-width: 220px; margin-left: 8px; overflow: hidden; color: #1758ad !important; border: 1px solid #cfe0f4; border-radius: 999px !important; background: #eef6ff !important; text-overflow: ellipsis; white-space: nowrap; }
+.active-workspace-link span { overflow: hidden; text-overflow: ellipsis; }
 
 .brand { display: inline-flex; align-items: center; gap: 10px; color: #18212f; text-decoration: none; white-space: nowrap; }
 .brand > span:last-child { display: grid; gap: 1px; }

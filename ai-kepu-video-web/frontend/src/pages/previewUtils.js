@@ -58,8 +58,8 @@ export function appendPromptGuidance(value) {
 export function normalizeSubtitleText(value) {
   const compact = String(value || '').replace(/\s+/g, ' ').trim()
   const clean = compact
-    .replace(/^[。！？!?…，,；;、：:“”"‘’'「」『』《》〈〉]+/u, '')
-    .replace(/[。！？!?…，,；;、：:“”"‘’'「」『』《》〈〉\s]+$/u, '')
+    .replace(/^[。！？!?…，,；;、：:]+/u, '')
+    .replace(/[。！？!?…，,；;、：:\s]+$/u, '')
   return clean || compact
 }
 
@@ -82,4 +82,9 @@ export function secondsToLabel(value) {
 
 export function segmentDuration(segment) {
   return Number(segment?.duration) || 7
+}
+
+export function nextPlaybackIndex(currentIndex, segmentCount) {
+  const nextIndex = Number(currentIndex) + 1
+  return nextIndex < Number(segmentCount) ? nextIndex : null
 }

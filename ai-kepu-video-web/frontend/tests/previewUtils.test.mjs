@@ -7,6 +7,7 @@ import {
   getSegmentDraftSnapshot,
   getSegmentAssetState,
   isTaskLoadPending,
+  nextPlaybackIndex,
   normalizeSubtitleText,
   sortSegmentsByIndex,
 } from '../src/pages/previewUtils.js'
@@ -34,6 +35,10 @@ test('reports failed and missing segment assets as editable recovery states', ()
 
 test('trims subtitle punctuation and appends prompt guidance only once', () => {
   assert.equal(normalizeSubtitleText('  ，，这是字幕。  '), '这是字幕')
+  assert.equal(
+    normalizeSubtitleText('而是问“如果我连续做三年，它会把我带到哪里？”'),
+    '而是问“如果我连续做三年，它会把我带到哪里？”',
+  )
 
   const first = appendPromptGuidance('人物在书桌前讲解')
   assert.match(first, /字幕安全区/u)
@@ -82,4 +87,10 @@ test('rejects a deferred task A completion after the route transitions to task B
   resolveRequest({ image_url: '/media/task-a.png' })
 
   assert.equal(await completion, null)
+})
+
+test('advances audio playback by segment and stops after the final segment', () => {
+  assert.equal(nextPlaybackIndex(0, 3), 1)
+  assert.equal(nextPlaybackIndex(1, 3), 2)
+  assert.equal(nextPlaybackIndex(2, 3), null)
 })

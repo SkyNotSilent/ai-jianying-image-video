@@ -1,13 +1,37 @@
+import { useEffect, useState } from 'react'
 import { FileText, FolderKanban, Settings } from 'lucide-react'
-import { NavLink } from 'react-router'
+import { NavLink, useLocation } from 'react-router'
 
-const navigationItems = [
-  { to: '/', label: '文稿', icon: FileText, end: true },
-  { to: '/assets', label: '项目资产', icon: FolderKanban },
-  { to: '/settings', label: 'API 配置', icon: Settings }
-]
+function readLastWorkspace() {
+  try {
+    const value = JSON.parse(localStorage.getItem('insightcut:last-workspace') || 'null')
+    return value?.taskId ? value : null
+  } catch {
+    return null
+  }
+}
 
 export function BrandNavigation() {
+  const location = useLocation()
+  const [lastWorkspace, setLastWorkspace] = useState(readLastWorkspace)
+  const workspaceMatch = location.pathname.match(/^\/workspace\/([^/]+)/)
+  const navigationItems = [
+    { to: '/', label: '文稿', icon: FileText, end: true },
+    { to: '/assets', label: '项目资产', icon: FolderKanban },
+    { to: workspaceMatch ? `/workspace/${workspaceMatch[1]}/settings` : '/settings', label: 'API 配置', icon: Settings },
+  ]
+
+  useEffect(() => {
+    const refresh = () => setLastWorkspace(readLastWorkspace())
+    window.addEventListener('storage', refresh)
+    window.addEventListener('insightcut:workspace', refresh)
+    refresh()
+    return () => {
+      window.removeEventListener('storage', refresh)
+      window.removeEventListener('insightcut:workspace', refresh)
+    }
+  }, [location.pathname])
+
   return (
     <header className="app-header">
       <NavLink className="brand" to="/" aria-label="InsightCut 首页">
@@ -39,6 +63,7 @@ export function BrandNavigation() {
             <span>{label}</span>
           </NavLink>
         ))}
+        {lastWorkspace && !workspaceMatch ? <NavLink className="nav-link active-workspace-link" to={lastWorkspace.path || `/workspace/${lastWorkspace.taskId}`}><span>继续制作 · {lastWorkspace.name || '当前项目'}</span></NavLink> : null}
       </nav>
     </header>
   )

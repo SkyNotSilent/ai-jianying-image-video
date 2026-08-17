@@ -205,6 +205,37 @@ export function getTaskStatus(taskId) {
   })
 }
 
+export function getTaskWorkspace(taskId) {
+  return request({
+    url: `/ai/native/video/kepu/tasks/${taskId}/workspace`,
+    method: 'get'
+  })
+}
+
+export function updateTaskWorkspaceSettings(taskId, data) {
+  return request({
+    url: `/ai/native/video/kepu/tasks/${taskId}/settings`,
+    method: 'patch',
+    data
+  })
+}
+
+export function generateTaskWorkspaceAssets(taskId, data) {
+  return request({
+    url: `/ai/native/video/kepu/tasks/${taskId}/generate-assets`,
+    method: 'post',
+    data
+  })
+}
+
+export function resegmentTaskWorkspace(taskId, data) {
+  return request({
+    url: `/ai/native/video/kepu/tasks/${taskId}/resegment`,
+    method: 'post',
+    data
+  })
+}
+
 export function resumeTask(taskId) {
   return request({
     url: `/ai/native/video/kepu/tasks/${taskId}/resume`,
@@ -313,6 +344,10 @@ export function getSubtitleUrl(taskId) {
 
 export function getAssetsDownloadUrl(taskId, type = 'all') {
   return `/ai/native/video/kepu/tasks/${taskId}/assets/download?type=${encodeURIComponent(type)}`
+}
+
+export function getMaterialsDownloadUrl(taskId, snapshotKey) {
+  return `/ai/native/video/kepu/tasks/${taskId}/download-materials?snapshot_key=${encodeURIComponent(snapshotKey || '')}`
 }
 
 /**

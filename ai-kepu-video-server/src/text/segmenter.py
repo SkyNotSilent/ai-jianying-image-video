@@ -21,10 +21,40 @@ MIN_LEN = 8   # 单段字数下限；过短的段合并到前一段，避免 TTS
 STRONG_PUNCT = re.compile(r'[。！？!?…]+')
 # 弱标点：次选断点
 WEAK_PUNCT   = re.compile(r'[，,；;、]+')
+# 句末标点后必须跟随上一段的右侧成对符号
+CLOSING_MARKS = '”’」』》〉】）》'
+QUOTE_PAIRS = {'“': '”', '‘': '’', '「': '」', '『': '』', '《': '》', '〈': '〉'}
 # 段首不允许出现的标点（从切点开始的下一段可能以标点开头）
-LEADING_PUNCT = re.compile(r'^[。！？!?…，,；;、：:]+')
+LEADING_PUNCT = re.compile(rf'^[。！？!?…，,；;、：:{CLOSING_MARKS}]+')
 # 段尾不允许出现的标点（字幕显示用，TTS 文本保留）
 TRAILING_PUNCT_DISPLAY = re.compile(r'[。！？!?…，,；;、]+$')
+
+
+def _balanced_quote_spans(text: str):
+    """Return complete quote spans; unmatched quotes intentionally stay unprotected."""
+    stack = []
+    spans = []
+    for index, char in enumerate(text):
+        if char in QUOTE_PAIRS:
+            stack.append((char, index))
+        elif stack and char == QUOTE_PAIRS[stack[-1][0]]:
+            _, start = stack.pop()
+            spans.append((start, index + 1))
+    return spans
+
+
+def _extend_cut_past_balanced_quote(text: str, cut_end: int) -> int:
+    """Move a cut after any complete quote that currently contains it."""
+    spans = _balanced_quote_spans(text)
+    extended = cut_end
+    changed = True
+    while changed:
+        changed = False
+        for start, end in spans:
+            if start < extended < end:
+                extended = end
+                changed = True
+    return extended
 
 
 class TextSegmenter:
@@ -104,10 +134,13 @@ class TextSegmenter:
             # 在整段剩余文本里找第一个强标点
             m = STRONG_PUNCT.search(remaining)
             if m and m.end() <= self.max_length:
-                seg = remaining[:m.end()].strip()
+                cut_end = _extend_cut_past_balanced_quote(remaining, m.end())
+                while cut_end < len(remaining) and remaining[cut_end] in CLOSING_MARKS:
+                    cut_end += 1
+                seg = remaining[:cut_end].strip()
                 if seg:
                     result.append(seg)
-                start += m.end()
+                start += cut_end
                 continue
 
             # 强标点不存在或超限 → 在 max_length 内找最靠后的弱标点
@@ -117,15 +150,17 @@ class TextSegmenter:
                 weak_pos = wm.end()
 
             if weak_pos > 0:
-                seg = remaining[:weak_pos].strip()
+                cut_end = _extend_cut_past_balanced_quote(remaining, weak_pos)
+                seg = remaining[:cut_end].strip()
                 if seg:
                     result.append(seg)
-                start += weak_pos
+                start += cut_end
             else:
-                seg = remaining[:self.max_length].strip()
+                cut_end = _extend_cut_past_balanced_quote(remaining, self.max_length)
+                seg = remaining[:cut_end].strip()
                 if seg:
                     result.append(seg)
-                start += self.max_length
+                start += cut_end
 
         return result
 
@@ -133,7 +168,7 @@ class TextSegmenter:
 class LongTextSegmenter:
     """长文本分段器 - 约 150 字/段，优先在段落和句子边界断开"""
 
-    SENTENCE_END = re.compile(r'[^。！？!?…]+[。！？!?…]*')
+    SENTENCE_END = re.compile(rf'[^。！？!?…]+[。！？!?…]*[{CLOSING_MARKS}]*')
 
     def __init__(self, max_length: int = 150, min_length: int = 50):
         self.max_length = max_length
@@ -195,11 +230,17 @@ class LongTextSegmenter:
         return result
 
     def _hard_split(self, text: str) -> List[str]:
-        return [
-            text[i:i + self.max_length].strip()
-            for i in range(0, len(text), self.max_length)
-            if text[i:i + self.max_length].strip()
-        ]
+        result = []
+        start = 0
+        while start < len(text):
+            remaining = text[start:]
+            cut_end = min(self.max_length, len(remaining))
+            cut_end = _extend_cut_past_balanced_quote(remaining, cut_end)
+            segment = remaining[:cut_end].strip()
+            if segment:
+                result.append(segment)
+            start += cut_end
+        return result
 
     def _merge_short(self, segments: List[str]) -> List[str]:
         if not segments:

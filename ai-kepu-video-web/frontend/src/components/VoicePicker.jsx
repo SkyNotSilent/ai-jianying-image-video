@@ -22,9 +22,7 @@ export function VoicePicker({
   previewError = '',
   showAdvanced = true,
   includeUnavailable = false,
-  manageAvailability = false,
   optionsProvider = '',
-  onAvailabilityChange,
   compact = false,
 }) {
   const normalized = normalizeVoiceCatalog(voices)
@@ -38,7 +36,7 @@ export function VoicePicker({
   }
 
   if (!groups.length) {
-    return <div className="voice-picker-empty"><Volume2 size={18} /><span>当前没有已开放的音色</span></div>
+    return <div className="voice-picker-empty"><Volume2 size={18} /><span>当前没有可用音色</span></div>
   }
 
   return <div className={`voice-picker${compact ? ' is-compact' : ''}`}>
@@ -48,21 +46,16 @@ export function VoicePicker({
         <div className="voice-card-grid">
           {group.voices.map(voice => {
             const selectedVoice = voice.id === value
-            const checkedVoice = manageAvailability ? voice.is_enabled : selectedVoice
+            const checkedVoice = selectedVoice
             const previewing = voice.id === playingVoice
-            const cardSelectable = manageAvailability
-              ? voice.kind === 'preset' && voice.status === 'ready'
-              : voice.selectable
+            const cardSelectable = voice.selectable
             return <article className={`voice-card${checkedVoice ? ' is-selected' : ''}${cardSelectable ? '' : ' is-unavailable'}`} key={voice.id}>
               <button
                 type="button"
                 className="voice-card-select"
                 disabled={!cardSelectable}
                 aria-pressed={checkedVoice}
-                aria-label={manageAvailability ? `${checkedVoice ? '从生成列表移除' : '加入生成列表'}${voice.name}` : undefined}
-                onClick={() => manageAvailability
-                  ? onAvailabilityChange?.(voice.id, !voice.is_enabled)
-                  : onChange?.(voice.id, voice)}
+                onClick={() => onChange?.(voice.id, voice)}
               >
                 <span className="voice-avatar" aria-hidden="true">{voice.kind === 'clone' ? <Sparkles size={16} /> : voice.name.slice(0, 1)}</span>
                 <span className="voice-card-copy"><strong>{voice.name}</strong><small>{voice.kind === 'clone' ? '克隆音色' : voice.description || (voice.gender === 'male' ? '男声' : voice.gender === 'female' ? '女声' : '预置音色')}</small></span>
@@ -87,7 +80,7 @@ export function VoicePicker({
 
     {previewError ? <p className="voice-preview-error" role="alert"><CircleAlert size={15} />{previewError}</p> : null}
 
-    {showAdvanced && (selected || manageAvailability) ? <section className="voice-advanced" aria-label="配音参数">
+    {showAdvanced && selected ? <section className="voice-advanced" aria-label="配音参数">
       <label><span>语速</span><select value={options.speed_level} onChange={event => updateOptions({ speed_level: event.target.value })}>{SPEED_OPTIONS.map(([key, label]) => <option value={key} key={key}>{label}</option>)}</select></label>
       {provider === 'doubao'
         ? <label><span>音量 <strong>{options.volume_ratio.toFixed(1)}x</strong></span><input type="range" min="0.5" max="2" step="0.1" value={options.volume_ratio} onChange={event => updateOptions({ volume_ratio: Number(event.target.value) })} /></label>

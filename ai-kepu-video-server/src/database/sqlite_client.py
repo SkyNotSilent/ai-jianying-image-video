@@ -31,14 +31,16 @@ class SQLiteClient:
     """SQLite 数据库客户端"""
 
     TASK_CHECKPOINT_COLUMNS = frozenset({
-        "script_text", "summary", "input_mode", "delete_files_on_delete"
+        "script_text", "summary", "input_mode", "delete_files_on_delete",
+        "execution_mode", "workflow_phase", "script_policy", "voice_confirmed",
     })
     SEGMENT_CHECKPOINT_COLUMNS = frozenset({
         "text", "image_prompt", "image_path", "image_url", "image_status",
         "image_error", "audio_path", "audio_url", "audio_status", "audio_error",
         "duration", "audio_voice_type", "audio_tts_options_json",
+        "prompt_status", "prompt_error", "prompt_manual", "prompt_needs_review",
     })
-    CLEARABLE_SEGMENT_ERROR_COLUMNS = frozenset({"image_error", "audio_error"})
+    CLEARABLE_SEGMENT_ERROR_COLUMNS = frozenset({"image_error", "audio_error", "prompt_error"})
 
     def __init__(self):
         self._initialized = False
@@ -271,6 +273,29 @@ class SQLiteClient:
                 "tasks",
                 {"delete_files_on_delete": "INTEGER NOT NULL DEFAULT 0"},
             )
+            self._apply_column_migration(
+                cursor,
+                "20260816_review_first_workspace_tasks",
+                "tasks",
+                {
+                    "execution_mode": "TEXT NOT NULL DEFAULT 'full'",
+                    "workflow_phase": "TEXT NOT NULL DEFAULT 'pending'",
+                    "plan_version": "INTEGER NOT NULL DEFAULT 0",
+                    "script_policy": "TEXT NOT NULL DEFAULT 'rewrite'",
+                    "voice_confirmed": "INTEGER NOT NULL DEFAULT 0",
+                },
+            )
+            self._apply_column_migration(
+                cursor,
+                "20260816_review_first_workspace_segments",
+                "task_segments",
+                {
+                    "prompt_status": "TEXT NOT NULL DEFAULT 'completed'",
+                    "prompt_error": "TEXT",
+                    "prompt_manual": "INTEGER NOT NULL DEFAULT 0",
+                    "prompt_needs_review": "INTEGER NOT NULL DEFAULT 0",
+                },
+            )
 
             conn.commit()
             conn.close()
@@ -435,6 +460,8 @@ class SQLiteClient:
         ratio: str = "16:9",
         voice_type: str = None,
         tts_options: Dict = None,
+        execution_mode: str = "full",
+        script_policy: str = "rewrite",
     ) -> bool:
         if not self._initialized:
             self._init_db()
@@ -446,13 +473,16 @@ class SQLiteClient:
             cur.execute(
                 """INSERT INTO tasks
                    (task_id, name, theme, style, length, ratio, voice_type,
-                    tts_options_json, status, current_step)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    tts_options_json, status, current_step, execution_mode,
+                    workflow_phase, script_policy, voice_confirmed)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     task_id, name or theme[:20], theme, style, length, ratio,
                     voice_type,
                     json.dumps(tts_options, ensure_ascii=False) if tts_options else None,
-                    'pending', 'pending',
+                    'pending', 'pending', execution_mode,
+                    'planning' if execution_mode == 'review_first' else 'pending',
+                    script_policy, 0,
                 )
             )
             steps = [
@@ -461,7 +491,6 @@ class SQLiteClient:
                 "voiceover_generation",
                 "image_generation",
                 "draft_building",
-                "video_synthesis",
             ]
             for step in steps:
                 cur.execute(
@@ -580,14 +609,211 @@ class SQLiteClient:
             return False
 
     def save_task_checkpoint(self, task_id: str, script_text: str = None,
-                             summary: str = None, input_mode: str = None) -> bool:
+                             summary: str = None, input_mode: str = None,
+                             execution_mode: str = None,
+                             workflow_phase: str = None,
+                             script_policy: str = None,
+                             voice_confirmed: int = None) -> bool:
         values = {
             "script_text": script_text,
             "summary": summary,
             "input_mode": input_mode,
+            "execution_mode": execution_mode,
+            "workflow_phase": workflow_phase,
+            "script_policy": script_policy,
+            "voice_confirmed": voice_confirmed,
         }
         updates = {key: value for key, value in values.items() if value is not None}
         return self._update_task_fields(task_id, updates)
+
+    def update_task_workflow(
+        self,
+        task_id: str,
+        workflow_phase: str,
+        status: str = None,
+        current_step: str = None,
+    ) -> bool:
+        """Persist a workflow transition without losing the task checkpoint."""
+        if not self._initialized:
+            self._init_db()
+        if not self._initialized:
+            return False
+        try:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            fields = ["workflow_phase=?", "updated_at=datetime('now','localtime')"]
+            values = [workflow_phase]
+            if status is not None:
+                fields.append("status=?")
+                values.append(status)
+            if current_step is not None:
+                fields.append("current_step=?")
+                values.append(current_step)
+            values.append(task_id)
+            cur.execute(
+                f"UPDATE tasks SET {', '.join(fields)} WHERE task_id=?",
+                values,
+            )
+            updated = cur.rowcount > 0
+            conn.commit()
+            conn.close()
+            return updated
+        except Exception as exc:
+            logger.error(f"更新任务工作流失败: {exc}")
+            return False
+
+    def update_task_plan_fields(
+        self,
+        task_id: str,
+        updates: Dict,
+        expected_plan_version: int = None,
+    ) -> Optional[int]:
+        """Atomically update task settings and advance the plan version."""
+        allowed = {
+            "style", "ratio", "voice_type", "tts_options_json", "voice_confirmed",
+            "script_text", "summary", "workflow_phase",
+        }
+        fields = {key: value for key, value in updates.items() if key in allowed}
+        if not fields:
+            return None
+        if not self._initialized:
+            self._init_db()
+        if not self._initialized:
+            return None
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT plan_version FROM tasks WHERE task_id=?", (task_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            current = int(row["plan_version"] or 0)
+            if expected_plan_version is not None and current != int(expected_plan_version):
+                return -1
+            next_version = current + 1
+            parts = [f"{key}=?" for key in fields]
+            values = list(fields.values())
+            parts.extend(["plan_version=?", "updated_at=datetime('now','localtime')"])
+            values.extend([next_version, task_id])
+            cur.execute(
+                f"UPDATE tasks SET {', '.join(parts)} WHERE task_id=?",
+                values,
+            )
+            conn.commit()
+            return next_version
+        except Exception as exc:
+            conn.rollback()
+            logger.error(f"更新任务预案字段失败: {exc}")
+            return None
+        finally:
+            conn.close()
+
+    def update_segment_plan(
+        self,
+        task_id: str,
+        segment_index: int,
+        updates: Dict,
+        expected_plan_version: int = None,
+    ) -> Optional[int]:
+        """Atomically edit one segment and advance the task plan version."""
+        fields = {
+            key: value for key, value in updates.items()
+            if key in self.SEGMENT_CHECKPOINT_COLUMNS
+        }
+        if not fields:
+            return None
+        if not self._initialized:
+            self._init_db()
+        if not self._initialized:
+            return None
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT plan_version FROM tasks WHERE task_id=?", (task_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            current = int(row["plan_version"] or 0)
+            if expected_plan_version is not None and current != int(expected_plan_version):
+                return -1
+            parts = [f"{key}=?" for key in fields]
+            values = list(fields.values())
+            values.extend([task_id, segment_index])
+            cur.execute(
+                f"UPDATE task_segments SET {', '.join(parts)}, "
+                "updated_at=datetime('now','localtime') WHERE task_id=? AND segment_index=?",
+                values,
+            )
+            if cur.rowcount <= 0:
+                return None
+            next_version = current + 1
+            cur.execute(
+                "UPDATE tasks SET plan_version=?, updated_at=datetime('now','localtime') WHERE task_id=?",
+                (next_version, task_id),
+            )
+            conn.commit()
+            return next_version
+        except Exception as exc:
+            conn.rollback()
+            logger.error(f"更新分镜预案失败: {exc}")
+            return None
+        finally:
+            conn.close()
+
+    def replace_plan_segments(
+        self,
+        task_id: str,
+        script_text: str,
+        segments: List[Dict],
+        expected_plan_version: int = None,
+    ) -> Optional[int]:
+        """Replace the whole plan in one transaction, removing obsolete tail rows."""
+        if not self._initialized:
+            self._init_db()
+        if not self._initialized:
+            return None
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT plan_version FROM tasks WHERE task_id=?", (task_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            current = int(row["plan_version"] or 0)
+            if expected_plan_version is not None and current != int(expected_plan_version):
+                return -1
+            cur.execute("DELETE FROM task_segments WHERE task_id=?", (task_id,))
+            for segment in segments:
+                cur.execute(
+                    """INSERT INTO task_segments
+                       (task_id, segment_index, text, image_prompt, image_status,
+                        audio_status, prompt_status, prompt_manual, prompt_needs_review)
+                       VALUES (?,?,?,?,?,?,?,?,?)""",
+                    (
+                        task_id, segment["segment_index"], segment["text"],
+                        segment.get("image_prompt", ""),
+                        segment.get("image_status", "pending"),
+                        segment.get("audio_status", "pending"),
+                        segment.get("prompt_status", "pending"),
+                        int(bool(segment.get("prompt_manual"))),
+                        int(bool(segment.get("prompt_needs_review"))),
+                    ),
+                )
+            next_version = current + 1
+            cur.execute(
+                """UPDATE tasks SET script_text=?, plan_version=?, workflow_phase='planning',
+                   status='interrupted', current_step='image_prompt_generation', error=NULL,
+                   updated_at=datetime('now','localtime') WHERE task_id=?""",
+                (script_text, next_version, task_id),
+            )
+            conn.commit()
+            return next_version
+        except Exception as exc:
+            conn.rollback()
+            logger.error(f"替换分镜预案失败: {exc}")
+            return None
+        finally:
+            conn.close()
 
     def set_task_deletion_intent(self, task_id: str, delete_files: bool) -> bool:
         """Persist file cleanup intent so startup can finish deletion safely."""
@@ -982,8 +1208,9 @@ class SQLiteClient:
                        (task_id, segment_index, text, image_prompt, image_path,
                         image_url, image_status, image_error, audio_path, audio_url,
                         audio_status, audio_error, duration, audio_voice_type,
-                        audio_tts_options_json)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        audio_tts_options_json, prompt_status, prompt_error,
+                        prompt_manual, prompt_needs_review)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(task_id, segment_index) DO UPDATE SET
                        text=excluded.text, image_prompt=excluded.image_prompt,
                        image_path=COALESCE(excluded.image_path, task_segments.image_path),
@@ -996,6 +1223,10 @@ class SQLiteClient:
                        audio_error=COALESCE(excluded.audio_error, task_segments.audio_error),
                        audio_voice_type=COALESCE(excluded.audio_voice_type, task_segments.audio_voice_type),
                        audio_tts_options_json=COALESCE(excluded.audio_tts_options_json, task_segments.audio_tts_options_json),
+                       prompt_status=COALESCE(excluded.prompt_status, task_segments.prompt_status),
+                       prompt_error=COALESCE(excluded.prompt_error, task_segments.prompt_error),
+                       prompt_manual=COALESCE(excluded.prompt_manual, task_segments.prompt_manual),
+                       prompt_needs_review=COALESCE(excluded.prompt_needs_review, task_segments.prompt_needs_review),
                        duration=COALESCE(excluded.duration, task_segments.duration),
                        updated_at=datetime('now','localtime')""",
                     (task_id, seg['segment_index'], seg['text'],
@@ -1005,7 +1236,10 @@ class SQLiteClient:
                      seg.get('audio_path'), seg.get('audio_url'),
                      seg.get('audio_status'), seg.get('audio_error'),
                      seg.get('duration'), seg.get('audio_voice_type'),
-                     seg.get('audio_tts_options_json'))
+                     seg.get('audio_tts_options_json'),
+                     seg.get('prompt_status') or ('completed' if seg.get('image_prompt') else 'pending'),
+                     seg.get('prompt_error'), int(bool(seg.get('prompt_manual'))),
+                     int(bool(seg.get('prompt_needs_review'))))
                 )
             conn.commit()
             conn.close()

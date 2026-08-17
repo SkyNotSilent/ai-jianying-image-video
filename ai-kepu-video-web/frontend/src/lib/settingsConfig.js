@@ -27,9 +27,9 @@ export const MIMO_VOICES = [
   { id: 'Dean', name: 'Dean · English Male' },
 ]
 
-export function normalizeConcurrency(value) {
+export function normalizeConcurrency(value, fallback = 1) {
   const parsed = Number.parseInt(value, 10)
-  if (!Number.isFinite(parsed)) return 1
+  if (!Number.isFinite(parsed)) return fallback
   return Math.min(8, Math.max(1, parsed))
 }
 
@@ -89,7 +89,7 @@ export function normalizeConfig(config = {}) {
       ...(source.tts || {}),
       provider,
       enabled_providers: enabledProviders,
-      preview_text: source.tts?.preview_text || '你好，这是当前音色的试听，欢迎使用 InsightCut。',
+      preview_text: '欢迎来到 InsightCut，让我们一起把灵感变成精彩视频。',
       auth_method: source.tts?.auth_method === 'api_key' ? 'api_key' : 'access_token',
       api_url: source.tts?.api_url || '',
       appid: source.tts?.appid || '',
@@ -106,6 +106,7 @@ export function normalizeConfig(config = {}) {
     },
     generation: {
       ...(source.generation || {}),
+      prompt_concurrency: normalizeConcurrency(source.generation?.prompt_concurrency, 4),
       tts_concurrency: normalizeConcurrency(source.generation?.tts_concurrency),
       image_concurrency: 1,
     },

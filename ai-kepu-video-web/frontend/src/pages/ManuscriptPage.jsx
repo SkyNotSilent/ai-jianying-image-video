@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { CheckCircle2, ClipboardPaste, FileUp, Sparkles } from 'lucide-react'
 import { useNavigate, useParams } from 'react-router'
-import { extractDocumentText, getVoices } from '../api/task'
+import { createTask, extractDocumentText } from '../api/task'
 import { toast } from '../lib/toast'
-import { createDraft, estimateDuration, estimateSegments, getDraft, ratioOptions, saveDraft, textStyles, visualStyles } from '../utils/projectDrafts'
+import { createDraft, estimateDuration, estimateSegments, getDraft, getLatestDraft, ratioOptions, saveDraft, textStyles, visualStyles } from '../utils/projectDrafts'
 import './creation-flow.css'
 
 const exampleScript = `1  大脑如何影响我们的决策？\n\n你是否有过这样的经历：明明知道不应该买，却在情绪低落时下单了很多东西？或者明明想要好好休息，却因为一时愤怒做了后悔的决定？\n\n这并不是你不够理智，而是情绪正在悄悄影响着你的大脑。\n\n2  情绪与大脑的关系\n\n研究表明，情绪会影响我们大脑中负责决策的区域，改变我们对风险和收益的判断。\n\n例如，在压力状态下，我们的大脑更倾向于选择即时缓解的方案，而忽略了长期后果。\n\n3  如何做出更好的决策？\n\n觉察情绪，暂停片刻，理性评估，再从过去的决策中复盘学习。`
@@ -18,7 +18,7 @@ const rotatorItems = [
 const rotatorDurations = [3200, 3000, 3500, 5000, 2900]
 
 function createInitialDraft(draftId) {
-  return getDraft(draftId) || createDraft({ visual_style: '吉卜力', text_style: '知识科普' })
+  return getDraft(draftId) || (!draftId && getLatestDraft()) || createDraft({ visual_style: '吉卜力', text_style: '知识科普' })
 }
 
 function normalizeTitle(value) {
@@ -39,11 +39,11 @@ export function ManuscriptPage() {
   const saveTimer = useRef(null)
   const editorRef = useRef(null)
   const documentInput = useRef(null)
-  const [voices, setVoices] = useState([])
   const [paperFocused, setPaperFocused] = useState(false)
   const [saveState, setSaveState] = useState('saved')
   const [savedAt, setSavedAt] = useState(() => new Date())
   const [rotatorIndex, setRotatorIndex] = useState(0)
+  const [starting, setStarting] = useState(false)
 
   useEffect(() => {
     if (!draftId) {
@@ -58,20 +58,6 @@ export function ManuscriptPage() {
     draftRef.current = loaded
     setDraft(loaded)
   }, [draftId, navigate])
-
-  useEffect(() => {
-    getVoices().then(result => {
-      const available = Array.isArray(result) ? result : []
-      setVoices(available)
-      const current = draftRef.current
-      if (current.voice_type && !available.some(voice => voice.id === current.voice_type)) {
-        const next = { ...current, voice_type: '', voice_name: '' }
-        draftRef.current = next
-        setDraft(next)
-        saveDraft(next)
-      }
-    }).catch(() => setVoices([]))
-  }, [])
 
   useEffect(() => {
     if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return undefined
@@ -104,11 +90,6 @@ export function ManuscriptPage() {
     return next
   }
 
-  const selectVoice = value => {
-    const voice = voices.find(item => item.id === value)
-    patchDraft({ voice_type: value, voice_name: voice?.name || '' })
-  }
-
   const insertExample = () => {
     const direction = normalizeTitle(draftRef.current.name || draftRef.current.manuscript) || '普通人为什么越来越需要 AI 助手'
     const next = {
@@ -121,7 +102,7 @@ export function ManuscriptPage() {
     return result
   }
 
-  const continueToProduction = () => {
+  const continueToProduction = async () => {
     let next = draftRef.current
     if (next.input_mode !== 'theme' && !String(next.manuscript || '').trim()) next = insertExample()
     const currentText = next.input_mode === 'theme' ? next.theme : next.manuscript
@@ -133,7 +114,32 @@ export function ManuscriptPage() {
     const prepared = { ...next, name, length: next.input_mode === 'theme' ? normalizeLength(next.length) : next.length }
     draftRef.current = prepared
     persistDraft(prepared, setDraft, setSaveState, setSavedAt)
-    navigate(`/production/${prepared.draft_id}`)
+    setStarting(true)
+    try {
+      const inputMode = prepared.input_mode === 'theme' ? 'theme' : 'script'
+      const result = await createTask({
+        name: prepared.name,
+        theme: String(currentText).slice(0, 5000),
+        input_mode: inputMode,
+        style: `${prepared.text_style || '知识科普'}|${prepared.visual_style || '吉卜力'}`,
+        ratio: prepared.ratio || '16:9',
+        length: inputMode === 'theme' ? normalizeLength(prepared.length) : 0,
+        voice_type: localStorage.getItem('insightcut:last-voice') || undefined,
+        execution_mode: 'review_first',
+        script_policy: 'verbatim',
+      })
+      const saved = { ...prepared, created_task_id: result.task_id }
+      draftRef.current = saved
+      persistDraft(saved, setDraft, setSaveState, setSavedAt)
+      localStorage.setItem('insightcut:last-workspace', JSON.stringify({ taskId: result.task_id, name: prepared.name, path: `/workspace/${result.task_id}` }))
+      window.dispatchEvent(new Event('insightcut:workspace'))
+      toast.success('正在生成内容预案')
+      navigate(`/workspace/${result.task_id}`)
+    } catch (error) {
+      toast.error(error?.response?.data?.detail || '创建生产预案失败')
+    } finally {
+      setStarting(false)
+    }
   }
 
   const importDocument = async event => {
@@ -226,12 +232,11 @@ export function ManuscriptPage() {
         </section>
 
         <aside className="work-panel production-options" aria-label="生产设置">
-          <PanelHeading eyebrow="生产设置" title="画面与配音" />
+          <PanelHeading eyebrow="生产设置" title="画面设置" />
           <fieldset className="control-group"><legend>画面风格</legend><div className="style-thumbnail-grid">{visualStyles.map(style => <button type="button" key={style.value} className={draft.visual_style === style.value ? 'is-selected' : ''} onClick={() => patchDraft({ visual_style: style.value })}><img src={style.image} alt="" /><span>{style.label}</span></button>)}</div></fieldset>
           <fieldset className="control-group"><legend>视频比例</legend><div className="segmented-control">{ratioOptions.map(ratio => <button type="button" key={ratio} className={draft.ratio === ratio ? 'is-selected' : ''} onClick={() => patchDraft({ ratio })}>{ratio}</button>)}</div></fieldset>
           <label className="field-label">创作风格<select value={draft.text_style || '知识科普'} onChange={event => patchDraft({ text_style: event.target.value })}>{textStyles.map(style => <option key={style}>{style}</option>)}</select></label>
-          <label className="field-label">配音音色<select value={draft.voice_type || ''} onChange={event => selectVoice(event.target.value)}><option value="">自动匹配</option>{voices.map(voice => <option value={voice.id} key={voice.id}>{voice.name}</option>)}</select></label>
-          <button type="button" className="button button-primary continue-button" onClick={continueToProduction}>{!isTheme && !String(draft.manuscript || '').trim() ? '插入示例并继续' : '继续配置画面与配音'}</button>
+          <button type="button" className="button button-primary continue-button" disabled={starting} onClick={continueToProduction}>{starting ? '正在创建预案…' : !isTheme && !String(draft.manuscript || '').trim() ? '插入示例并继续' : '生成内容预案'}</button>
         </aside>
       </section>
     </main>

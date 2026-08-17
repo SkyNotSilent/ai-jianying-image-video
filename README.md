@@ -8,7 +8,45 @@ InsightCut 是一个本地优先的 AI 图片视频工作台，面向科普、�
 
 项目与剪映、CapCut、字节跳动没有隶属或合作关系。
 
-![InsightCut 文稿工作台](design-qa-artifacts/current-home-manuscript.png)
+![InsightCut 文稿工作台真实界面](design-qa-artifacts/readme-home.png)
+
+## 真实成片案例
+
+下面展示的不是效果稿，也不是为 README 拼接的静态样片。每个案例都来自 InsightCut 本地任务的真实成片，可以直接在当前页面播放。
+
+[打开完整在线成片展示](https://skynotsilent.github.io/ai-jianying-image-video/showcase/)
+
+### 30 年河东，30 年河西，莫欺少年穷
+
+主题模式 · 16:9 · 18 个分镜 · 00:44
+
+https://github.com/user-attachments/assets/989b52b5-2f3e-4ed6-9a36-6c26fd02f606
+
+### 成长就是最好的解药
+
+文稿模式 · 16:9 · 01:03
+
+https://github.com/user-attachments/assets/de662301-8653-43bf-bf54-31a6d7d2dba1
+
+### 为什么成年人越忙越需要刻意留白？
+
+文稿模式 · 9:16 · 00:55
+
+https://github.com/user-attachments/assets/7d7b050e-25c2-4f4f-8cf5-1ab3f7157a95
+
+### 别把忙碌误当成成长
+
+文稿模式 · 3:4 · 00:52
+
+https://github.com/user-attachments/assets/e4695fbc-2339-4102-b631-bcf61df63264
+
+### 小岛经济学
+
+文稿模式 · 16:9 · 01:02
+
+https://github.com/user-attachments/assets/34833f83-5416-41b9-9a75-b47ddd0e5f05
+
+这些案例完成后，对应的文稿、分镜、画面提示词、图片、配音、字幕和导出记录仍然保存在项目中，可以继续逐段检查和修改。
 
 ## InsightCut 是什么
 
@@ -37,48 +75,13 @@ InsightCut 是一个本地优先的 AI 图片视频工作台，面向科普、�
 ## 现在可以做什么
 
 1. 用一句主题生成文稿，或粘贴、导入自己的完整文稿。
-2. 选择画面比例、视觉风格、文案风格、配音音色和语速。
-3. 自动整理脚本，拆分分镜，并为每段生成图片提示词。
-4. 生成 AI 图片、TTS 配音、字幕和基础动态效果。
-5. 在素材库和预览页逐段检查，替换图片或重新生成配音。
-6. 导出 MP4、字幕、分镜素材和剪映 / CapCut 草稿。
+2. 选择画面比例、视觉风格和文案风格，进入持续保存的三栏生产工作台。
+3. 检查完整文稿、短分镜和逐段画面提示词，再确认全片音色。
+4. 按需生成 AI 图片与 TTS 配音，并在同一工作台渐进查看结果。
+5. 无需先生成 MP4 即可连续预览；也可以逐段替换图片、修改提示词或重新配音。
+6. 按需生成高保真预览，并导出 MP4、字幕、分镜素材包和剪映 / CapCut 草稿。
 7. 在 API 配置页选择生文服务商与模型，管理 Agnes 生图、豆包 TTS 和小米 MiMo TTS。
 8. 试听项目内置音色，或在确认声音授权后创建 MiMo 克隆音色。
-
-## 产品截图
-
-| 文稿工作台 | 项目素材库 |
-| --- | --- |
-| ![InsightCut 文稿编辑器](design-qa-artifacts/current-home-manuscript.png) | ![InsightCut 项目素材库](design-qa-artifacts/current-assets.png) |
-
-| 生产配置 | 预览编辑器 |
-| --- | --- |
-| ![InsightCut 生产配置](design-qa-artifacts/current-production.png) | ![InsightCut 预览编辑器](design-qa-artifacts/current-preview.png) |
-
-| 9:16 预览 | 3:4 预览 |
-| --- | --- |
-| ![InsightCut 9:16 预览](design-qa-artifacts/qa-preview-9x16.png) | ![InsightCut 3:4 预览](design-qa-artifacts/qa-preview-3x4.png) |
-
-| 模型配置 | 配音、试听与声音克隆 |
-| --- | --- |
-| ![InsightCut 模型配置](design-qa-artifacts/current-settings.png) | ![InsightCut 配音与声音克隆](design-qa-artifacts/current-settings-tts.png) |
-
-## 真实生成效果
-
-下面四个例子来自本地真实生成结果。仓库中保存的是适合 README 浏览的压缩版本；在线展示页使用原生播放器，可以直接查看不同输入方式和画面比例的效果。
-
-[打开在线生成效果展示](https://skynotsilent.github.io/ai-jianying-image-video/showcase/)
-
-| 示例 | 输入方式 | 比例 | 时长 | 在线预览 |
-| --- | --- | --- | --- | --- |
-| 书 | 文稿模式 | 16:9 | 01:02 | [![“书”生成视频](docs/showcase/thumbs/book-16x9.jpg)](https://skynotsilent.github.io/ai-jianying-image-video/showcase/#book-16x9) |
-| 0623 | 长文生成 | 16:9 | 01:03 | [![长文生成视频](docs/showcase/thumbs/long-0623-16x9.jpg)](https://skynotsilent.github.io/ai-jianying-image-video/showcase/#long-0623-16x9) |
-| 主题模式一分钟测试 | 主题模式 | 9:16 | 00:55 | [![主题模式竖屏视频](docs/showcase/thumbs/theme-vertical-9x16.jpg)](https://skynotsilent.github.io/ai-jianying-image-video/showcase/#theme-vertical-9x16) |
-| 文稿模式 3:4 测试 | 文稿模式 | 3:4 | 00:52 | [![文稿模式 3:4 视频](docs/showcase/thumbs/script-portrait-3x4.jpg)](https://skynotsilent.github.io/ai-jianying-image-video/showcase/#script-portrait-3x4) |
-
-仓库内备用 MP4：[书](docs/showcase/videos/book-16x9.mp4) · [0623](docs/showcase/videos/long-0623-16x9.mp4) · [主题模式 9:16](docs/showcase/videos/theme-vertical-9x16.mp4) · [文稿模式 3:4](docs/showcase/videos/script-portrait-3x4.mp4)
-
-这些例子不只是为了证明“可以导出视频”。生成结束以后，对应的分镜、图片、配音、字幕和草稿路径仍然存在，后续还可以继续检查和修改——这才是这条工作流真正有用的地方。
 
 ## 从零开始使用
 
@@ -144,7 +147,7 @@ npm run dev
 
 ### 5. 完成第一次生成
 
-回到文稿页，输入一个主题，或者切换到文稿模式粘贴完整内容。完成画面比例、视觉风格、配音和字幕设置后开始生产。生成过程中可以在项目素材库查看已经完成的部分；生成结束后进入预览页逐段检查，再按需要导出 MP4 或剪映草稿。
+回到文稿页，输入一个主题，或者切换到文稿模式粘贴完整内容。选择画面比例与视觉风格后生成内容预案；进入生产工作台检查文稿、分镜和提示词，确认音色后再生成图片与配音。素材会在同一页面逐段出现，可以直接连续预览，最后再按需要生成高保真预览、MP4 或剪映草稿。
 
 ### 6. 把结果写入剪映
 

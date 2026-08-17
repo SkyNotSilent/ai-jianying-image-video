@@ -1,5 +1,6 @@
 import sqlite3
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -69,12 +70,38 @@ class FakePromptAgent:
         return f"prompt-{self.calls - 1}"
 
 
+class ConcurrentPromptAgent:
+    def __init__(self, fail_text=None, delay=0.02):
+        self.fail_text = fail_text
+        self.delay = delay
+        self.calls = []
+        self.active = 0
+        self.max_active = 0
+        self.lock = threading.Lock()
+
+    def generate_prompt(self, **kwargs):
+        segment_text = kwargs["segment_text"]
+        with self.lock:
+            self.calls.append(segment_text)
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            time.sleep(self.delay)
+            if segment_text == self.fail_text:
+                raise RuntimeError("prompt failed")
+            return f"prompt:{segment_text}"
+        finally:
+            with self.lock:
+                self.active -= 1
+
+
 class FakeAssetGenerator:
     def __init__(self, output_dir, suffix, fail=False):
         self.output_dir = Path(output_dir)
         self.suffix = suffix
         self.fail = fail
         self.calls = []
+        self.call_kwargs = []
         self.on_generate = None
         self.cancel_indexes = set()
 
@@ -83,6 +110,7 @@ class FakeAssetGenerator:
         if index is None:
             index = int(kwargs["filename"].split("_")[-1])
         self.calls.append(index)
+        self.call_kwargs.append({"value": value, **kwargs})
         if index in self.cancel_indexes:
             raise TaskCancelled(f"cancelled item {index}")
         if self.fail:
@@ -813,7 +841,7 @@ def test_initial_segments_checkpoint_false_stops_before_prompt_provider(
     assert pipeline.draft_builder.calls == 0
 
 
-def test_prompt_checkpoint_false_stops_before_next_prompt_and_assets(
+def test_prompt_checkpoint_false_stops_after_bounded_in_flight_prompts(
     executor_db, monkeypatch
 ):
     create_task(executor_db)
@@ -832,10 +860,81 @@ def test_prompt_checkpoint_false_stops_before_next_prompt_and_assets(
     )
 
     assert executor_db.get_task("task-1")["status"] == "interrupted"
-    assert pipeline.image_prompt_agent.calls == 1
+    assert pipeline.image_prompt_agent.calls == 2
     assert pipeline.image_generator.calls == []
     assert pipeline.voiceover_generator.calls == []
     assert pipeline.draft_builder.calls == 0
+
+
+def test_prompt_generation_uses_configured_bounded_concurrency(
+    executor_db, tmp_path, monkeypatch
+):
+    executor_db.create_task(
+        "prompt-concurrency",
+        "测试主题",
+        "知识科普|电影质感",
+        100,
+        execution_mode="review_first",
+    )
+    pipeline = FakePipeline(output_dir=str(tmp_path / "prompt-concurrency"))
+    pipeline.text_segmenter.split = lambda article: [f"第{i}段" for i in range(8)]
+    pipeline.image_prompt_agent = ConcurrentPromptAgent()
+    monkeypatch.setattr(
+        task_executor_module.Config,
+        "generation_config",
+        lambda: {"prompt_concurrency": 4, "tts_concurrency": 1, "image_concurrency": 1},
+    )
+
+    TaskExecutor(pipeline_factory=lambda **kwargs: pipeline).run_inline(
+        "prompt-concurrency", cancellation=TaskCancellation()
+    )
+
+    rows = executor_db.get_segments("prompt-concurrency")
+    assert pipeline.image_prompt_agent.max_active == 4
+    assert sorted(pipeline.image_prompt_agent.calls) == [f"第{i}段" for i in range(8)]
+    assert [row["image_prompt"] for row in rows] == [f"prompt:第{i}段" for i in range(8)]
+    assert executor_db.get_task("prompt-concurrency")["status"] == "awaiting_confirmation"
+
+
+def test_prompt_failure_keeps_other_concurrent_results_and_resume_only_retries_missing(
+    executor_db, tmp_path, monkeypatch
+):
+    executor_db.create_task(
+        "prompt-recovery",
+        "测试主题",
+        "知识科普|电影质感",
+        100,
+        execution_mode="review_first",
+    )
+    first = FakePipeline(output_dir=str(tmp_path / "prompt-recovery"))
+    first.text_segmenter.split = lambda article: [f"第{i}段" for i in range(4)]
+    first.image_prompt_agent = ConcurrentPromptAgent(fail_text="第2段")
+    monkeypatch.setattr(
+        task_executor_module.Config,
+        "generation_config",
+        lambda: {"prompt_concurrency": 4, "tts_concurrency": 1, "image_concurrency": 1},
+    )
+
+    TaskExecutor(pipeline_factory=lambda **kwargs: first).run_inline(
+        "prompt-recovery", cancellation=TaskCancellation()
+    )
+
+    interrupted_rows = executor_db.get_segments("prompt-recovery")
+    assert [row["prompt_status"] for row in interrupted_rows] == [
+        "completed", "completed", "failed", "completed"
+    ]
+    assert executor_db.get_task("prompt-recovery")["status"] == "interrupted"
+
+    resumed = FakePipeline(output_dir=str(tmp_path / "prompt-recovery"))
+    resumed.image_prompt_agent = ConcurrentPromptAgent()
+    TaskExecutor(pipeline_factory=lambda **kwargs: resumed).run_inline(
+        "prompt-recovery", cancellation=TaskCancellation()
+    )
+
+    resumed_rows = executor_db.get_segments("prompt-recovery")
+    assert resumed.image_prompt_agent.calls == ["第2段"]
+    assert [row["prompt_status"] for row in resumed_rows] == ["completed"] * 4
+    assert executor_db.get_task("prompt-recovery")["status"] == "awaiting_confirmation"
 
 
 def test_sparse_legacy_segment_indexes_are_used_for_db_rows_and_assets(
@@ -1118,7 +1217,7 @@ def test_final_segments_save_false_prevents_result_and_completion(
     pipeline = FakePipeline(output_dir=str(tmp_path / "generated"))
     monkeypatch.setattr(executor_db, "save_segments", lambda *a, **k: False)
     monkeypatch.setattr(task_executor_module, "LocalUploader", FakeUploader)
-    monkeypatch.setattr(task_executor_module, "FFmpegExporter", FakeFFmpegExporter)
+    monkeypatch.setattr(task_executor_module, "FFmpegExporter", FakeFFmpegExporter, raising=False)
 
     TaskExecutor(pipeline_factory=lambda **kwargs: pipeline).run_inline(
         "task-1", cancellation=TaskCancellation()
@@ -1128,6 +1227,30 @@ def test_final_segments_save_false_prevents_result_and_completion(
     assert pipeline.draft_builder.calls == 1
     assert task["status"] == "interrupted"
     assert task.get("result") is None
+
+
+def test_default_task_completes_without_instantiating_ffmpeg(
+    executor_db, tmp_path, monkeypatch
+):
+    create_task(executor_db)
+    pipeline = FakePipeline(output_dir=str(tmp_path / "generated"))
+
+    class ForbiddenFFmpegExporter:
+        def __init__(self, **kwargs):
+            raise AssertionError("默认任务不应初始化 FFmpeg")
+
+    monkeypatch.setattr(task_executor_module, "LocalUploader", FakeUploader)
+    monkeypatch.setattr(task_executor_module, "FFmpegExporter", ForbiddenFFmpegExporter, raising=False)
+
+    TaskExecutor(pipeline_factory=lambda **kwargs: pipeline).run_inline(
+        "task-1", cancellation=TaskCancellation()
+    )
+
+    task = executor_db.get_task("task-1")
+    assert task["status"] == "completed"
+    assert task["result"]["video_url"] is None
+    assert "video_synthesis" not in {step["step_name"] for step in task["steps"]}
+    assert list(tmp_path.rglob("*.mp4")) == []
 
 
 def test_reused_valid_assets_clear_stale_segment_and_asset_errors(
@@ -1466,3 +1589,132 @@ def test_upload_copy_failure_keeps_local_asset_reusable_on_resume(
     assert resumed_generator.calls == []
     assert resumed_row[status_field] == "completed"
     assert resumed_row[error_field] == "Upload failed: copy failed"
+
+
+def test_review_first_verbatim_task_pauses_after_persisted_plan(
+    executor_db, tmp_path
+):
+    executor_db.create_task(
+        "review-task",
+        "用户原文，不允许改写。",
+        "知识科普|电影质感",
+        0,
+        name="预案任务",
+        execution_mode="review_first",
+        script_policy="verbatim",
+    )
+    pipeline = FakePipeline(output_dir=str(tmp_path / "review-task"))
+
+    TaskExecutor(pipeline_factory=lambda **kwargs: pipeline).run_inline(
+        "review-task", cancellation=TaskCancellation()
+    )
+
+    task = executor_db.get_task("review-task")
+    segments = executor_db.get_segments("review-task")
+    assert task["script_text"] == "用户原文，不允许改写。"
+    assert task["status"] == "awaiting_confirmation"
+    assert task["workflow_phase"] == "awaiting_confirmation"
+    assert pipeline.script_rewriter.calls == 0
+    assert pipeline.image_prompt_agent.calls == 2
+    assert pipeline.image_generator.calls == []
+    assert pipeline.voiceover_generator.calls == []
+    assert pipeline.draft_builder.calls == 0
+    assert [segment["prompt_status"] for segment in segments] == ["completed", "completed"]
+
+
+def test_workspace_plan_version_rejects_stale_segment_edit(temp_db):
+    temp_db.create_task(
+        "version-task",
+        "原文",
+        "知识科普|电影质感",
+        0,
+        execution_mode="review_first",
+        script_policy="verbatim",
+    )
+    temp_db.save_segments(
+        "version-task",
+        [{"segment_index": 0, "text": "第一段", "image_prompt": "提示词"}],
+    )
+
+    version = temp_db.update_segment_plan(
+        "version-task", 0, {"text": "新文案"}, expected_plan_version=0
+    )
+    stale = temp_db.update_segment_plan(
+        "version-task", 0, {"text": "旧页面覆盖"}, expected_plan_version=0
+    )
+
+    assert version == 1
+    assert stale == -1
+    assert temp_db.get_segments("version-task")[0]["text"] == "新文案"
+
+
+def test_review_first_asset_generation_honors_segment_voice_override(
+    executor_db, tmp_path, monkeypatch
+):
+    executor_db.create_task(
+        "voice-override-task",
+        "第一段。第二段。",
+        "知识科普|电影质感",
+        0,
+        voice_type="mimo:冰糖",
+        tts_options={"speed_level": "normal", "style_prompt": "全片风格"},
+        execution_mode="review_first",
+        script_policy="verbatim",
+    )
+    executor_db.save_task_checkpoint(
+        "voice-override-task",
+        script_text="第一段。第二段。",
+        summary="摘要",
+        input_mode="script",
+        workflow_phase="assets_requested",
+        voice_confirmed=1,
+    )
+    executor_db.save_segments(
+        "voice-override-task",
+        [
+            {
+                "segment_index": 0,
+                "text": "第一段",
+                "image_prompt": "提示一",
+                "image_status": "pending",
+                "audio_status": "pending",
+            },
+            {
+                "segment_index": 1,
+                "text": "第二段",
+                "image_prompt": "提示二",
+                "image_status": "pending",
+                "audio_status": "pending",
+                "audio_voice_type": "doubao:zh_male_jieshuoxiaoming_moon_bigtts",
+                "audio_tts_options_json": '{"speed_level":"fast","volume_ratio":1.2}',
+            },
+        ],
+    )
+    executor_db.update_task_workflow(
+        "voice-override-task", "assets_requested", status="interrupted"
+    )
+    pipeline = FakePipeline(output_dir=str(tmp_path / "voice-override-task"))
+    monkeypatch.setattr(task_executor_module, "LocalUploader", FakeUploader)
+    monkeypatch.setattr(
+        task_executor_module.Config,
+        "generation_config",
+        lambda: {"tts_concurrency": 1, "image_concurrency": 1},
+    )
+
+    TaskExecutor(pipeline_factory=lambda **kwargs: pipeline).run_inline(
+        "voice-override-task", cancellation=TaskCancellation()
+    )
+
+    calls = sorted(
+        pipeline.voiceover_generator.call_kwargs,
+        key=lambda item: item["filename"],
+    )
+    rows = executor_db.get_segments("voice-override-task")
+    assert [call["voice_type"] for call in calls] == [
+        "mimo:冰糖",
+        "doubao:zh_male_jieshuoxiaoming_moon_bigtts",
+    ]
+    assert calls[1]["speed_level"] == "fast"
+    assert calls[1]["volume_ratio"] == 1.2
+    assert rows[0]["audio_voice_type"] == ""
+    assert rows[1]["audio_voice_type"] == "doubao:zh_male_jieshuoxiaoming_moon_bigtts"

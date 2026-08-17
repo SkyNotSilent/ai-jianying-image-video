@@ -12,14 +12,13 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Thread
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from typing import List, Optional
 from .task_manager import task_manager, TaskStatus
 from .task_runtime import TaskCancellation, TaskCancelled, task_runtime
 from src.core.pipeline import VideoEditorPipeline
 from src.database import db_client
 from src.utils.local_uploader import LocalUploader
-from src.export.ffmpeg_exporter import FFmpegExporter
 from src.utils.rendering import canvas_for_ratio, normalize_ratio
 from src.config import Config
 
@@ -244,6 +243,49 @@ class TaskExecutor:
             raise
         return "started"
 
+    def continue_task(self, task_id: str) -> str:
+        """Continue a review-first task from its persisted plan checkpoint."""
+        task_row = db_client.get_task(task_id)
+        if not task_row or not db_client.get_segments(task_id):
+            return "not_recoverable"
+        if task_runtime.is_running(task_id):
+            return "already_running"
+        if task_row.get("execution_mode") != "review_first":
+            return "not_review_first"
+
+        if not db_client.update_task_workflow(
+            task_id,
+            "assets_requested",
+            status=TaskStatus.INTERRUPTED.value,
+            current_step="image_prompt_generation",
+        ):
+            return "not_recoverable"
+        task_manager.invalidate_task_cache(task_id)
+
+        cancellation = task_runtime.begin(task_id)
+        if cancellation is None:
+            return "already_running" if task_runtime.is_running(task_id) else "not_recoverable"
+        thread = Thread(
+            target=self._run_registered_task,
+            args=(
+                cancellation,
+                task_id,
+                task_row["theme"],
+                task_row["style"],
+                task_row["length"],
+                task_row.get("voice_type"),
+                task_row.get("ratio", "16:9"),
+                task_row.get("input_mode", "script"),
+            ),
+        )
+        thread.daemon = True
+        try:
+            thread.start()
+        except Exception:
+            task_runtime.finish(task_id, cancellation)
+            raise
+        return "started"
+
     def run_inline(
         self, task_id: str, cancellation: Optional[TaskCancellation] = None
     ) -> None:
@@ -282,6 +324,18 @@ class TaskExecutor:
             if cancellation:
                 cancellation.raise_if_cancelled()
 
+            task_row = db_client.get_task(task_id) or {}
+            execution_mode = task_row.get("execution_mode", "full")
+            workflow_phase = task_row.get("workflow_phase", "pending")
+            if execution_mode == "review_first":
+                workflow_phase = (
+                    "generating_assets"
+                    if workflow_phase in {"assets_requested", "generating_assets", "ready"}
+                    else "planning"
+                )
+                task.workflow_phase = workflow_phase
+                db_client.update_task_workflow(task_id, workflow_phase)
+
             # 更新任务状态为处理中
             task_manager.update_task_status(task_id, TaskStatus.PROCESSING)
             logger.info(f"[{task_id}] ========== 开始执行任务 ==========")
@@ -300,7 +354,7 @@ class TaskExecutor:
             logger.info(f"[{task_id}] 文章风格: {text_style}, 画面风格: {visual_style}")
 
             # 创建草稿名称和目录
-            task_row = db_client.get_task(task_id) or {}
+            task_row = db_client.get_task(task_id) or task_row
             persisted_segments = db_client.get_segments(task_id)
             draft_base = task_row.get("name") or task.name or theme[:20]
             draft_name = _safe_project_name(draft_base)
@@ -315,7 +369,7 @@ class TaskExecutor:
             )
 
             # 步骤 1: 文案改写 / 主题生成
-            logger.info(f"[{task_id}] [1/7] 开始生成/改写脚本...")
+            logger.info(f"[{task_id}] [1/6] 开始生成/改写脚本...")
             task.start_step("text_generation")
             if task_row.get("script_text"):
                 pipeline.article = task_row["script_text"]
@@ -333,6 +387,18 @@ class TaskExecutor:
                         input_mode=input_mode,
                     ),
                     "旧任务脚本检查点",
+                )
+            elif input_mode == "script" and task_row.get("script_policy") == "verbatim":
+                pipeline.article = theme
+                pipeline.summary = theme[:500]
+                _require_checkpoint(
+                    db_client.save_task_checkpoint(
+                        task_id,
+                        script_text=pipeline.article,
+                        summary=pipeline.summary,
+                        input_mode=input_mode,
+                    ),
+                    "原文脚本检查点",
                 )
             else:
                 rewrite_result = pipeline.script_rewriter.rewrite(
@@ -352,14 +418,16 @@ class TaskExecutor:
                     ),
                     "脚本检查点",
                 )
-            logger.info(f"[{task_id}] [1/7] 脚本生成完成，共 {len(pipeline.article)} 字")
+            logger.info(f"[{task_id}] [1/6] 脚本生成完成，共 {len(pipeline.article)} 字")
             logger.info(f"[{task_id}] 内容总结: {pipeline.summary}")
             task.complete_step("text_generation")
             if cancellation:
                 cancellation.raise_if_cancelled()
 
             # 步骤 2: 短节奏分段，约 20 字一段，对应更密的画面切换
-            logger.info(f"[{task_id}] [2/7] 开始短节奏分段...")
+            logger.info(f"[{task_id}] [2/6] 开始短节奏分段...")
+            task.current_step = "segmentation"
+            db_client.update_task_status(task_id, "processing", "segmentation")
             if persisted_segments:
                 pipeline.segments = [row["text"] for row in persisted_segments]
             else:
@@ -371,6 +439,9 @@ class TaskExecutor:
                         "image_prompt": "",
                         "image_status": "pending",
                         "audio_status": "pending",
+                        "prompt_status": "pending",
+                        "prompt_manual": 0,
+                        "prompt_needs_review": 0,
                     }
                     for i, segment in enumerate(pipeline.segments)
                 ]
@@ -383,8 +454,11 @@ class TaskExecutor:
                 row["segment_index"] for row in persisted_segments
             ]
             segments_count = len(pipeline.segments)
-            logger.info(f"[{task_id}] [2/7] 分段完成，共 {segments_count} 段")
+            logger.info(f"[{task_id}] [2/6] 分段完成，共 {segments_count} 段")
             generation_config = Config.generation_config()
+            prompt_concurrency = _bounded_concurrency(
+                generation_config.get("prompt_concurrency", 4), segments_count
+            )
             tts_concurrency = _bounded_concurrency(
                 generation_config.get("tts_concurrency", 1), segments_count
             )
@@ -392,21 +466,22 @@ class TaskExecutor:
                 generation_config.get("image_concurrency", 1), segments_count
             )
             logger.info(
-                f"[{task_id}] 生成并发配置: 配音={tts_concurrency}, 生图={image_concurrency}"
+                f"[{task_id}] 生成并发配置: 提示词={prompt_concurrency}, "
+                f"配音={tts_concurrency}, 生图={image_concurrency}"
             )
             if cancellation:
                 cancellation.raise_if_cancelled()
 
             # 步骤 3: 逐段生成图像 prompts
-            logger.info(f"[{task_id}] [3/7] 开始逐段生成图像描述...")
+            logger.info(f"[{task_id}] [3/6] 开始逐段生成图像描述...")
             task.start_step("image_prompt_generation")
             resume_work = build_resume_work(persisted_segments)
             image_prompts = [row.get("image_prompt") or "" for row in persisted_segments]
-            for i in resume_work.prompt_indexes:
+
+            def generate_prompt_item(i: int):
                 if cancellation:
                     cancellation.raise_if_cancelled()
                 seg = pipeline.segments[i]
-                logger.debug(f"[{task_id}] 图像描述进度: {i+1}/{segments_count}")
                 try:
                     prompt = pipeline.image_prompt_agent.generate_prompt(
                         segment_text=seg,
@@ -414,40 +489,112 @@ class TaskExecutor:
                         style=visual_prompt_style,
                         aspect_ratio=ratio,
                     )
+                    return {"status": "success", "prompt": prompt, "error": None}
                 except TaskCancelled:
                     raise
                 except Exception as error:
-                    prompt_error_updates = {"image_error": str(error)}
-                    if _completed_local_path(persisted_segments[i], "image") is None:
-                        prompt_error_updates["image_status"] = "failed"
-                    _require_checkpoint(
-                        db_client.update_segment(
-                            task_id,
-                            segment_db_indexes[i],
-                            prompt_error_updates,
-                        ),
-                        f"分镜 {segment_db_indexes[i]} 提示词错误检查点",
-                    )
-                    raise RecoverableTaskError(
-                        f"图片提示词生成失败 [片段 {i + 1}]: {error}"
-                    ) from error
-                image_prompts[i] = prompt
-                prompt_updates = {
-                    "image_prompt": prompt,
-                    "image_error": None,
-                }
-                if _completed_local_path(persisted_segments[i], "image") is None:
-                    prompt_updates["image_status"] = "pending"
+                    return {"status": "failed", "prompt": "", "error": str(error)}
+
+            pending_prompt_indexes = iter(resume_work.prompt_indexes)
+            prompt_failures = []
+            prompt_cancelled = False
+            completed_prompts = segments_count - len(resume_work.prompt_indexes)
+
+            def submit_next_prompt(executor, futures) -> bool:
+                nonlocal prompt_cancelled
+                if cancellation and cancellation.is_cancelled():
+                    prompt_cancelled = True
+                    return False
+                try:
+                    index = next(pending_prompt_indexes)
+                except StopIteration:
+                    return False
                 _require_checkpoint(
                     db_client.update_segment(
                         task_id,
-                        segment_db_indexes[i],
-                        prompt_updates,
+                        segment_db_indexes[index],
+                        {"prompt_status": "processing", "prompt_error": None},
                     ),
-                    f"分镜 {segment_db_indexes[i]} 提示词检查点",
+                    f"分镜 {segment_db_indexes[index]} 提示词开始检查点",
                 )
-                task.update_step_progress("image_prompt_generation", i + 1, segments_count)
+                futures[executor.submit(generate_prompt_item, index)] = index
+                return True
+
+            with ThreadPoolExecutor(max_workers=prompt_concurrency) as prompt_executor:
+                prompt_futures = {}
+                for _ in range(prompt_concurrency):
+                    if not submit_next_prompt(prompt_executor, prompt_futures):
+                        break
+
+                while prompt_futures:
+                    done, _ = wait(prompt_futures, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        i = prompt_futures.pop(future)
+                        try:
+                            result = future.result()
+                        except TaskCancelled:
+                            prompt_cancelled = True
+                            result = {"status": "cancelled", "prompt": "", "error": "任务已取消"}
+
+                        if result["status"] == "success":
+                            prompt = result["prompt"]
+                            image_prompts[i] = prompt
+                            prompt_updates = {
+                                "image_prompt": prompt,
+                                "image_error": None,
+                                "prompt_status": "completed",
+                                "prompt_error": None,
+                                "prompt_manual": 0,
+                                "prompt_needs_review": 0,
+                            }
+                            if _completed_local_path(persisted_segments[i], "image") is None:
+                                prompt_updates["image_status"] = "pending"
+                            _require_checkpoint(
+                                db_client.update_segment(
+                                    task_id, segment_db_indexes[i], prompt_updates
+                                ),
+                                f"分镜 {segment_db_indexes[i]} 提示词检查点",
+                            )
+                        elif result["status"] == "failed":
+                            prompt_failures.append({"index": i, "error": result["error"]})
+                            prompt_error_updates = {
+                                "image_error": result["error"],
+                                "prompt_status": "failed",
+                                "prompt_error": result["error"],
+                            }
+                            if _completed_local_path(persisted_segments[i], "image") is None:
+                                prompt_error_updates["image_status"] = "failed"
+                            _require_checkpoint(
+                                db_client.update_segment(
+                                    task_id,
+                                    segment_db_indexes[i],
+                                    prompt_error_updates,
+                                ),
+                                f"分镜 {segment_db_indexes[i]} 提示词错误检查点",
+                            )
+
+                        completed_prompts += 1
+                        task.update_step_progress(
+                            "image_prompt_generation", completed_prompts, segments_count
+                        )
+                        logger.debug(
+                            f"[{task_id}] 图像描述进度: {completed_prompts}/{segments_count}"
+                        )
+
+                    if not prompt_cancelled:
+                        for _ in range(len(done)):
+                            if not submit_next_prompt(prompt_executor, prompt_futures):
+                                break
+
             pipeline.image_prompts = image_prompts
+            if prompt_cancelled or (cancellation and cancellation.is_cancelled()):
+                raise TaskCancelled("Task execution was cancelled during prompt generation")
+            if prompt_failures:
+                failed_numbers = "、".join(str(item["index"] + 1) for item in prompt_failures)
+                logger.warning(f"[{task_id}] 部分图片提示词生成失败: {prompt_failures}")
+                raise RecoverableTaskError(
+                    f"图片提示词生成失败 [片段 {failed_numbers}]"
+                )
             persisted_segments = db_client.get_segments(task_id)
             resume_work = build_resume_work(persisted_segments)
             for i, segment in enumerate(persisted_segments):
@@ -514,15 +661,48 @@ class TaskExecutor:
                             f"分镜 {segment_index} 已有{asset_type}资产检查点保存失败"
                         )
             logger.info(f"[{task_id}] 已保存分镜和图片提示词，共 {len(persisted_segments)} 段")
-            logger.info(f"[{task_id}] [3/7] 图像描述生成完成")
+            logger.info(f"[{task_id}] [3/6] 图像描述生成完成")
             task.complete_step("image_prompt_generation")
             if cancellation:
                 cancellation.raise_if_cancelled()
 
+            if execution_mode == "review_first" and workflow_phase == "planning":
+                task.current_step = "awaiting_confirmation"
+                task.workflow_phase = "awaiting_confirmation"
+                task_manager.update_task_status(task_id, TaskStatus.AWAITING_CONFIRMATION)
+                _require_checkpoint(
+                    db_client.update_task_workflow(
+                        task_id,
+                        "awaiting_confirmation",
+                        status=TaskStatus.AWAITING_CONFIRMATION.value,
+                        current_step="awaiting_confirmation",
+                    ),
+                    "预案确认状态检查点",
+                )
+                logger.info(f"[{task_id}] 预案已完成，等待用户确认后生成素材")
+                return
+
             # 步骤 4-5: 配音和生图互不依赖，并行执行；内部并发由模型配置页控制。
-            logger.info(f"[{task_id}] [4-5/7] 开始并行生成配音和图像（共 {segments_count} 段）...")
+            logger.info(f"[{task_id}] [4-5/6] 开始并行生成配音和图像（共 {segments_count} 段）...")
             pipeline.voiceover_files = resume_work.voiceover_files
             pipeline.media_paths = resume_work.media_paths
+
+            segment_audio_settings = []
+            for segment in persisted_segments:
+                segment_voice = segment.get("audio_voice_type") or voice_type
+                segment_options = dict(tts_options)
+                if segment.get("audio_voice_type") and segment.get("audio_tts_options_json"):
+                    try:
+                        parsed_segment_options = json.loads(segment["audio_tts_options_json"])
+                        if isinstance(parsed_segment_options, dict):
+                            segment_options.update(parsed_segment_options)
+                    except (TypeError, ValueError):
+                        logger.warning(
+                            "[%s] 分镜 %s 的配音参数快照无效，改用全片参数",
+                            task_id,
+                            segment.get("segment_index"),
+                        )
+                segment_audio_settings.append((segment_voice, segment_options))
 
             def generate_voiceover_item(i: int, seg: str):
                 logger.debug(f"[{task_id}] 配音进度: {i+1}/{segments_count}")
@@ -531,13 +711,14 @@ class TaskExecutor:
                         time.sleep(0.5)
                     if cancellation:
                         cancellation.raise_if_cancelled()
+                    segment_voice, segment_options = segment_audio_settings[i]
                     path = pipeline.voiceover_generator.generate(
                         seg,
                         filename=f"seg_{i:03d}",
-                        voice_type=voice_type,
-                        speed_level=tts_options.get("speed_level"),
-                        volume_ratio=tts_options.get("volume_ratio"),
-                        style_prompt=tts_options.get("style_prompt"),
+                        voice_type=segment_voice,
+                        speed_level=segment_options.get("speed_level"),
+                        volume_ratio=segment_options.get("volume_ratio"),
+                        style_prompt=segment_options.get("style_prompt"),
                     )
                     return i, {"status": "success", "path": path, "error": None}
                 except TaskCancelled:
@@ -598,17 +779,22 @@ class TaskExecutor:
                     prompt = image_prompts[i] if i < len(image_prompts) else ""
                     voice = None
                 else:
+                    segment_voice, segment_options = segment_audio_settings[i]
                     updates = {
                         "audio_path": path,
                         "audio_url": url,
                         "audio_status": status,
                         "audio_error": final_error,
-                        "audio_voice_type": voice_type,
-                        "audio_tts_options_json": json.dumps(tts_options, ensure_ascii=False),
+                        "audio_voice_type": (
+                            segment_voice
+                            if persisted_segments[i].get("audio_voice_type")
+                            else ""
+                        ),
+                        "audio_tts_options_json": json.dumps(segment_options, ensure_ascii=False),
                     }
                     label = f"配音 · 分镜 {i + 1}"
                     prompt = None
-                    voice = voice_type
+                    voice = segment_voice
 
                 _require_checkpoint(
                     db_client.update_segment(task_id, segment_index, updates),
@@ -626,7 +812,7 @@ class TaskExecutor:
                     text=pipeline.segments[i] if i < len(pipeline.segments) else None,
                     voice_type=voice,
                     metadata_json=(
-                        json.dumps({"tts_options": tts_options}, ensure_ascii=False)
+                        json.dumps({"tts_options": segment_options}, ensure_ascii=False)
                         if asset_type == "audio"
                         else None
                     ),
@@ -730,12 +916,12 @@ class TaskExecutor:
                     f"资源生成中断，共 {len(all_failures)} 项失败"
                 )
 
-            logger.info(f"[{task_id}] [4-5/7] 配音和图像生成完成")
+            logger.info(f"[{task_id}] [4-5/6] 配音和图像生成完成")
             if cancellation:
                 cancellation.raise_if_cancelled()
 
             # 步骤 6: 草稿构建
-            logger.info(f"[{task_id}] [6/7] 开始构建剪映草稿...")
+            logger.info(f"[{task_id}] [6/6] 开始构建剪映草稿...")
             task.start_step("draft_building")
             draft_path = pipeline.draft_builder.build(
                 segments=pipeline.segments,
@@ -744,7 +930,7 @@ class TaskExecutor:
                 voiceover_files=pipeline.voiceover_files,
                 output_dir=str(draft_dir),
             )
-            logger.info(f"[{task_id}] [6/7] 草稿构建完成")
+            logger.info(f"[{task_id}] [6/6] 草稿构建完成")
             task.complete_step("draft_building")
             if cancellation:
                 cancellation.raise_if_cancelled()
@@ -759,7 +945,7 @@ class TaskExecutor:
                     logger.debug(f"[{task_id}]   目录: {item.relative_to(draft_dir)}/")
 
             # 步骤 6: 打包并保存到本地媒体目录
-            logger.info(f"[{task_id}] [6/7] 开始打包并保存到本地媒体目录...")
+            logger.info(f"[{task_id}] [6/6] 开始打包并保存到本地媒体目录...")
             zip_path = None
             draft_url = None
 
@@ -810,43 +996,9 @@ class TaskExecutor:
             if cancellation:
                 cancellation.raise_if_cancelled()
 
-            # 步骤 7: 视频合成并保存到本地媒体目录
-            logger.info(f"[{task_id}] [7/7] 开始视频合成...")
-            task.start_step("video_synthesis")
+            # 完整 MP4 改为用户按需异步渲染，不再阻塞默认任务完成。
             video_path = None
             video_url = None
-
-            try:
-                ffmpeg_exporter = FFmpegExporter(canvas=canvas)
-                video_path = draft_dir / f"{draft_name}.mp4"
-
-                logger.info(f"[{task_id}] 使用 FFmpeg 生成视频...")
-                ffmpeg_exporter.export(
-                    segments=pipeline.segments,
-                    media_paths=pipeline.media_paths,
-                    voiceover_files=pipeline.voiceover_files,
-                    output_path=str(video_path),
-                )
-
-                video_size = video_path.stat().st_size / 1024 / 1024
-                logger.info(f"[{task_id}] 视频生成完成，大小: {video_size:.2f} MB")
-
-                # 保存视频到本地媒体目录
-                try:
-                    video_url = LocalUploader().upload(str(video_path))
-                    logger.info(f"[{task_id}] 视频保存成功: {video_url}")
-                except Exception as e:
-                    logger.warning(f"[{task_id}] 视频保存失败（不影响本地视频）: {e}")
-
-                task.complete_step("video_synthesis")
-
-            except Exception as e:
-                logger.warning(f"[{task_id}] 视频合成失败（不影响草稿）: {e}")
-                logger.exception(f"[{task_id}] 视频合成错误详情:")
-                task.fail_step("video_synthesis", str(e))
-
-            if cancellation:
-                cancellation.raise_if_cancelled()
 
             # 保存段落数据到数据库
             logger.info(f"[{task_id}] 保存段落数据到数据库...")
@@ -876,6 +1028,7 @@ class TaskExecutor:
                 image_url = None
                 audio_url = None
 
+                segment_voice, segment_options = segment_audio_settings[i]
                 seg_data = {
                     'segment_index': segment_index,
                     'text': seg_text,
@@ -888,8 +1041,12 @@ class TaskExecutor:
                     'audio_url': audio_url,
                     'audio_status': audio_status,
                     'audio_error': audio_error,
-                    'audio_voice_type': voice_type,
-                    'audio_tts_options_json': json.dumps(tts_options, ensure_ascii=False),
+                    'audio_voice_type': (
+                        segment_voice
+                        if persisted_segments[i].get('audio_voice_type')
+                        else ''
+                    ),
+                    'audio_tts_options_json': json.dumps(segment_options, ensure_ascii=False),
                 }
                 segments_data.append(seg_data)
 
@@ -922,8 +1079,8 @@ class TaskExecutor:
                         segment_index=segment_index,
                         label=f"配音 · 分镜 {i + 1}",
                         text=seg_text,
-                        voice_type=voice_type,
-                        metadata_json=json.dumps({"tts_options": tts_options}, ensure_ascii=False),
+                        voice_type=segment_voice,
+                        metadata_json=json.dumps({"tts_options": segment_options}, ensure_ascii=False),
                         status=audio_status,
                         error_message=audio_error,
                     )
@@ -938,6 +1095,8 @@ class TaskExecutor:
 
             # 设置任务结果
             task_manager.set_task_result(task_id, draft_path, segments_count, draft_url, video_url)
+            task.workflow_phase = "ready"
+            db_client.update_task_workflow(task_id, "ready")
             task_manager.update_task_status(task_id, TaskStatus.COMPLETED)
 
             image_ok, image_failed = _asset_counts(pipeline.media_paths)
@@ -946,7 +1105,7 @@ class TaskExecutor:
             logger.info(f"[{task_id}] ========== 任务完成 ==========")
             logger.info(
                 f"[{task_id}] 摘要: 段落={segments_count}, 图片={image_ok}成功/{image_failed}失败, "
-                f"音频={audio_ok}成功/{audio_failed}失败, 草稿={draft_path}, 视频={video_path}, 耗时={elapsed:.1f}s"
+                f"音频={audio_ok}成功/{audio_failed}失败, 草稿={draft_path}, 视频=按需渲染, 耗时={elapsed:.1f}s"
             )
 
         except TaskCancelled as error:

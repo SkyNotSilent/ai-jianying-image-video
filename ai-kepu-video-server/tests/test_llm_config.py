@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from src.config import Config
 
 
@@ -98,4 +100,17 @@ def test_save_model_config_persists_normalized_llm_and_other_defaults(
     }
     assert persisted["tts"]["mimo"]["model"] == Config.MIMO_TTS_MODEL
     assert persisted["image"]["model"] == Config.SEEDREAM_MODEL
+    assert persisted["generation"]["prompt_concurrency"] == 4
     assert persisted["generation"]["image_concurrency"] == 1
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(None, 4), (0, 1), (1, 1), (6, 6), (9, 8), ("bad", 4)],
+)
+def test_prompt_concurrency_is_normalized(value, expected):
+    config = {"generation": {"prompt_concurrency": value}}
+
+    Config._normalize_generation_config(config)
+
+    assert config["generation"]["prompt_concurrency"] == expected

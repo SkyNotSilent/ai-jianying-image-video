@@ -3,8 +3,8 @@
 import re
 
 
-_LEADING_PUNCT = re.compile(r'^[。！？!?…，,；;、：:“”"‘’\'「」『』《》〈〉]+')
-_TRAILING_PUNCT = re.compile(r'[。！？!?…，,；;、：:“”"‘’\'「」『』《》〈〉\s]+$')
+_LEADING_PUNCT = re.compile(r'^[。！？!?…，,；;、：:]+')
+_TRAILING_PUNCT = re.compile(r'[。！？!?…，,；;、：:\s]+$')
 _WHITESPACE = re.compile(r"\s+")
 
 

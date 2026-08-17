@@ -7,12 +7,14 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException, UploadFile
+from starlette.requests import Request
 
 from src.api import routes
 from src.api.models import RegenerateAudioRequest, TTSOptions
 from src.api.task_manager import TaskManager
 from src.database import sqlite_client as sqlite_client_module
 from src.database.sqlite_client import SQLiteClient
+from src.draft.voice_preview import PRESET_VOICE_PREVIEW_TEXT
 
 
 @pytest.fixture
@@ -90,7 +92,7 @@ def test_catalog_endpoint_filters_providers_and_bulk_availability(
     assert {voice["id"] for voice in enabled} == set(result["enabled_voice_keys"])
 
 
-def test_preview_endpoint_forwards_unsaved_config(tmp_path, temp_db, monkeypatch, tts_config):
+def test_preset_preview_endpoint_uses_fixed_copy_and_options(tmp_path, temp_db, monkeypatch, tts_config):
     captured = {}
 
     class FakePreviewService:
@@ -122,7 +124,137 @@ def test_preview_endpoint_forwards_unsaved_config(tmp_path, temp_db, monkeypatch
         )
     )
     assert result["url"].endswith("one.wav")
+    assert captured["text"] == PRESET_VOICE_PREVIEW_TEXT
+    assert captured["tts_options"] == {}
     assert captured["config_override"] == {"mimo": {"style_prompt": "轻松"}}
+
+
+def test_confirming_voice_does_not_rewrite_legacy_single_value_style(temp_db, monkeypatch):
+    temp_db.create_task(
+        "legacy-style-task",
+        "原始文案",
+        "cinematic",
+        200,
+        execution_mode="review_first",
+        script_policy="verbatim",
+    )
+    temp_db.save_segments(
+        "legacy-style-task",
+        [{"segment_index": 0, "text": "第一段", "image_prompt": "已有提示词"}],
+    )
+    temp_db.update_task_workflow(
+        "legacy-style-task", "awaiting_confirmation", status="awaiting_confirmation"
+    )
+    monkeypatch.setattr(routes, "mysql_client", temp_db)
+    monkeypatch.setattr(routes.task_manager, "invalidate_task_cache", lambda _task_id: None)
+
+    result = asyncio.run(
+        routes.update_task_workspace_settings(
+            "legacy-style-task",
+            {
+                "voice_type": "mimo:冰糖",
+                "tts_options": {"speed_level": "normal"},
+                "voice_confirmed": True,
+                "expected_plan_version": 0,
+            },
+        )
+    )
+
+    task = temp_db.get_task("legacy-style-task")
+    segment = temp_db.get_segments("legacy-style-task")[0]
+    assert result["stage"] != "planning"
+    assert task["style"] == "cinematic"
+    assert segment["image_prompt"] == "已有提示词"
+    assert segment["prompt_status"] == "completed"
+
+
+def test_workspace_reports_progressive_planning_step_and_prompt_counts(
+    temp_db, monkeypatch
+):
+    temp_db.create_task(
+        "planning-task",
+        "原始主题",
+        "知识科普|电影质感",
+        200,
+        execution_mode="review_first",
+    )
+    temp_db.update_task_status("planning-task", "processing", "text_generation")
+    monkeypatch.setattr(routes, "mysql_client", temp_db)
+    monkeypatch.setattr(routes.task_manager, "fail_stale_task_data", lambda _row: False)
+    request = Request({
+        "type": "http",
+        "scheme": "http",
+        "server": ("testserver", 80),
+        "path": "/workspace",
+        "headers": [],
+    })
+
+    text_stage = asyncio.run(routes.get_task_workspace("planning-task", request))
+    assert text_stage["planning_step"] == "text_generation"
+    assert text_stage["script_text"] == ""
+    assert text_stage["progress"]["prompts_total"] == 0
+
+    temp_db.save_task_checkpoint(
+        "planning-task", script_text="完整文案", summary="摘要", input_mode="theme"
+    )
+    temp_db.save_segments(
+        "planning-task",
+        [
+            {"segment_index": 0, "text": "第一段", "image_prompt": "prompt", "prompt_status": "completed"},
+            {"segment_index": 1, "text": "第二段", "prompt_status": "processing"},
+            {"segment_index": 2, "text": "第三段", "prompt_status": "failed", "prompt_error": "failed"},
+        ],
+    )
+    temp_db.update_task_status(
+        "planning-task", "processing", "image_prompt_generation"
+    )
+
+    prompt_stage = asyncio.run(routes.get_task_workspace("planning-task", request))
+    assert prompt_stage["planning_step"] == "image_prompt_generation"
+    assert prompt_stage["script_text"] == "完整文案"
+    assert prompt_stage["progress"] == {
+        "prompts_ready": 1,
+        "prompts_total": 3,
+        "prompts_processing": 1,
+        "prompts_failed": 1,
+        "images_ready": 0,
+        "audio_ready": 0,
+    }
+    assert prompt_stage["voice_confirmed"] is False
+
+
+def test_new_task_accepts_known_preset_even_when_legacy_checkmark_is_off(
+    temp_db, monkeypatch, tts_config
+):
+    monkeypatch.setattr(routes, "mysql_client", temp_db)
+    monkeypatch.setattr(routes.Config, "tts_config", classmethod(lambda cls: tts_config))
+
+    voice_key = "doubao:zh_male_chenwendongge_moon_bigtts"
+    assert temp_db.find_tts_voice("doubao", "zh_male_chenwendongge_moon_bigtts")["is_enabled"] is False
+    assert routes._resolve_new_task_voice(voice_key) == voice_key
+
+
+def test_preview_reports_provider_authorization_instead_of_generic_failure(
+    tmp_path, temp_db, monkeypatch, tts_config
+):
+    class ForbiddenPreviewService:
+        def __init__(self, **_kwargs):
+            pass
+
+        def generate(self, *_args, **_kwargs):
+            error = RuntimeError("forbidden")
+            error.response = SimpleNamespace(status_code=403)
+            raise error
+
+    monkeypatch.setattr(routes, "mysql_client", temp_db)
+    monkeypatch.setattr(routes, "VoicePreviewService", ForbiddenPreviewService)
+    monkeypatch.setattr(routes.Config, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(routes.Config, "tts_config", classmethod(lambda cls: tts_config))
+
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(routes.preview_voice({"voice_type": "doubao:missing-permission"}))
+    assert caught.value.status_code == 409
+    assert "未授权该音色" in caught.value.detail
 
 
 def test_clone_multipart_lifecycle_requires_preview_before_enable(

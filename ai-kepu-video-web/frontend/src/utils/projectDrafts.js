@@ -78,6 +78,10 @@ export function getDraft(draftId) {
   return listDrafts().find((draft) => draft.draft_id === draftId) || null
 }
 
+export function getLatestDraft() {
+  return listDrafts()[0] || null
+}
+
 export function saveDraft(draft) {
   const drafts = listDrafts()
   const normalized = {

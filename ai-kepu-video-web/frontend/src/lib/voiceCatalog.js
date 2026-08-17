@@ -29,7 +29,7 @@ export function normalizeVoiceCatalog(input) {
       status,
       is_enabled: isEnabled,
       isClone: kind === 'clone',
-      selectable: isEnabled && status === 'ready',
+      selectable: status === 'ready' && (kind === 'preset' || isEnabled),
       preview_url: voice?.preview_url || '',
     }
   }).filter(voice => voice.id)
@@ -46,17 +46,8 @@ export function groupVisibleVoices(voices, { includeUnavailable = false } = {}) 
   })).filter(group => group.voices.length)
 }
 
-export function togglePresetVoiceAvailability(input, voiceId) {
-  const voices = normalizeVoiceCatalog(input)
-  return voices.map(voice => {
-    if (voice.id !== voiceId || voice.kind !== 'preset' || voice.status !== 'ready') return voice
-    const isEnabled = !voice.is_enabled
-    return { ...voice, is_enabled: isEnabled, selectable: isEnabled }
-  })
-}
-
 export function resolveEnabledVoiceDefaults(input, defaults = {}, requestedProvider = 'doubao') {
-  const enabled = normalizeVoiceCatalog(input).filter(voice => voice.is_enabled && voice.status === 'ready')
+  const enabled = normalizeVoiceCatalog(input).filter(voice => voice.selectable)
   const byProvider = {
     doubao: enabled.filter(voice => voice.provider === 'doubao'),
     mimo: enabled.filter(voice => voice.provider === 'mimo'),
@@ -111,7 +102,7 @@ export function reconcileTtsVoiceConfig(tts = {}, input, activatedProvider = '')
 export function hasUsableVoice(input, enabledProviders = []) {
   const providers = new Set(enabledProviders)
   return normalizeVoiceCatalog(input).some(voice => (
-    voice.is_enabled && voice.status === 'ready' && providers.has(voice.provider)
+    voice.selectable && providers.has(voice.provider)
   ))
 }
 

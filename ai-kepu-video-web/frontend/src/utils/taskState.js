@@ -54,7 +54,7 @@ export function deriveTaskState({ task = {}, segments = [], exportState = null }
       tone: 'danger',
       actionLabel: '查看已保存素材',
       canPreview: true,
-      canExport: false,
+      canExport: hasSegmentEvidence || draftAvailable,
       canRecover: true,
     }
   }
@@ -74,11 +74,11 @@ export function deriveTaskState({ task = {}, segments = [], exportState = null }
   if (hasPreviewEvidence && !previewValid) {
     return {
       key: 'completed',
-      label: draftAvailable ? '草稿可用' : '待生成预览',
-      tone: draftAvailable ? 'warning' : 'info',
+      label: draftAvailable ? '素材已就绪' : '内容预览可用',
+      tone: 'success',
       actionLabel: '查看预览',
       canPreview: true,
-      canExport: false,
+      canExport: hasSegmentEvidence || draftAvailable,
       canRecover: true,
     }
   }
