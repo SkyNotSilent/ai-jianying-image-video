@@ -12,19 +12,39 @@ InsightCut 是一个本地优先的 AI 图片视频工作台，面向科普、�
 
 ## 真实成片案例
 
-下面展示的不是效果稿，也不是为 README 拼接的静态样片。每个案例都来自 InsightCut 本地任务的真实成片，缩略图直接截取自对应视频；点击画面可以在线播放压缩展示版。
+下面展示的不是效果稿，也不是为 README 拼接的静态样片。每个案例都来自 InsightCut 本地任务的真实成片，可以直接在当前页面播放。
 
 [打开完整在线成片展示](https://skynotsilent.github.io/ai-jianying-image-video/showcase/)
 
-| 案例 | 真实生成信息 | 成片预览 |
-| --- | --- | --- |
-| 30 年河东，30 年河西，莫欺少年穷 | 主题模式 · 16:9 · 18 个分镜 · 00:44 | [![30 年河东，30 年河西，莫欺少年穷](docs/showcase/thumbs/thirty-years-16x9.jpg)](https://skynotsilent.github.io/ai-jianying-image-video/showcase/#thirty-years-16x9) |
-| 成长就是最好的解药 | 文稿模式 · 16:9 · 01:03 | [![成长就是最好的解药](docs/showcase/thumbs/long-0623-16x9.jpg)](https://skynotsilent.github.io/ai-jianying-image-video/showcase/#growth-16x9) |
-| 为什么成年人越忙越需要刻意留白？ | 文稿模式 · 9:16 · 00:55 | [![为什么成年人越忙越需要刻意留白](docs/showcase/thumbs/theme-vertical-9x16.jpg)](https://skynotsilent.github.io/ai-jianying-image-video/showcase/#intentional-blank-9x16) |
-| 别把忙碌误当成成长 | 文稿模式 · 3:4 · 00:52 | [![别把忙碌误当成成长](docs/showcase/thumbs/script-portrait-3x4.jpg)](https://skynotsilent.github.io/ai-jianying-image-video/showcase/#busy-growth-3x4) |
-| 小岛经济学 | 文稿模式 · 16:9 · 01:02 | [![小岛经济学](docs/showcase/thumbs/book-16x9.jpg)](https://skynotsilent.github.io/ai-jianying-image-video/showcase/#island-economics-16x9) |
+### 30 年河东，30 年河西，莫欺少年穷
 
-仓库内备用 MP4：[30 年河东，30 年河西，莫欺少年穷](docs/showcase/videos/thirty-years-16x9.mp4) · [成长就是最好的解药](docs/showcase/videos/long-0623-16x9.mp4) · [成年人为什么需要刻意留白](docs/showcase/videos/theme-vertical-9x16.mp4) · [别把忙碌误当成成长](docs/showcase/videos/script-portrait-3x4.mp4) · [小岛经济学](docs/showcase/videos/book-16x9.mp4)
+主题模式 · 16:9 · 18 个分镜 · 00:44
+
+https://github.com/user-attachments/assets/989b52b5-2f3e-4ed6-9a36-6c26fd02f606
+
+### 成长就是最好的解药
+
+文稿模式 · 16:9 · 01:03
+
+https://github.com/user-attachments/assets/de662301-8653-43bf-bf54-31a6d7d2dba1
+
+### 为什么成年人越忙越需要刻意留白？
+
+文稿模式 · 9:16 · 00:55
+
+https://github.com/user-attachments/assets/7d7b050e-25c2-4f4f-8cf5-1ab3f7157a95
+
+### 别把忙碌误当成成长
+
+文稿模式 · 3:4 · 00:52
+
+https://github.com/user-attachments/assets/e4695fbc-2339-4102-b631-bcf61df63264
+
+### 小岛经济学
+
+文稿模式 · 16:9 · 01:02
+
+https://github.com/user-attachments/assets/34833f83-5416-41b9-9a75-b47ddd0e5f05
 
 这些案例完成后，对应的文稿、分镜、画面提示词、图片、配音、字幕和导出记录仍然保存在项目中，可以继续逐段检查和修改。
 
