@@ -453,6 +453,11 @@
 .workspace-actionbar > div:first-child strong { font-size: 12px; }
 .workspace-actionbar > div:first-child span { color: #7b8796; font-size: 10px; }
 .workspace-actionbar .button { white-space: nowrap; }
+.workspace-confirmation-steps { display: flex; align-items: center; gap: 6px; }
+.workspace-confirmation-steps span { padding: 3px 7px; border-radius: 999px; background: #eef2f6; font-weight: 750; }
+.workspace-confirmation-steps span.is-ready { color: #167044; background: #eaf8f0; }
+.workspace-confirmation-steps span.is-current { color: #9a5b08; background: #fff3d4; box-shadow: inset 0 0 0 1px rgba(230,155,36,.22); }
+.workspace-confirmation-steps span.is-pending { color: #7b8796; }
 
 .workspace-settings-overlay {
   position: fixed;

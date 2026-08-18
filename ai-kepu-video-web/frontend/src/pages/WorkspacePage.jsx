@@ -43,6 +43,7 @@ import { ratioOptions, visualStyles } from '../utils/projectDrafts'
 import { ratioClassName } from '../utils/taskState'
 import { normalizeSubtitleText, secondsToLabel, segmentDuration } from './previewUtils'
 import { SettingsPage } from './SettingsPage'
+import { isSegmentPreviewReady, nextPreviewIndex } from './workspacePreview'
 import './workspace-page.css'
 
 const LAST_VOICE_KEY = 'insightcut:last-voice'
@@ -123,6 +124,20 @@ function parseOptions(value) {
   try { return JSON.parse(value || '{}') } catch { return {} }
 }
 
+function preloadPreviewImage(url) {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    image.onload = resolve
+    image.onerror = reject
+    image.src = url
+    if (image.complete && image.naturalWidth) resolve()
+  })
+}
+
+function waitForPreviewPaint() {
+  return new Promise(resolve => window.requestAnimationFrame(() => window.requestAnimationFrame(resolve)))
+}
+
 export function WorkspacePage() {
   const { taskId } = useParams()
   const navigate = useNavigate()
@@ -142,7 +157,7 @@ export function WorkspacePage() {
   const voiceAudioRef = useRef(null)
   const previewTokenRef = useRef(0)
   const playbackAudioRef = useRef(null)
-  const playbackTimerRef = useRef(null)
+  const playbackRunRef = useRef(0)
   const [playing, setPlaying] = useState(false)
   const [previewMode, setPreviewMode] = useState('content')
   const [exportState, setExportState] = useState(null)
@@ -246,7 +261,6 @@ export function WorkspacePage() {
     saveTimersRef.current.forEach(timer => window.clearTimeout(timer))
     playbackAudioRef.current?.pause()
     voiceAudioRef.current?.pause()
-    window.clearTimeout(playbackTimerRef.current)
   }, [])
 
   const segments = workspace?.segments || []
@@ -258,6 +272,15 @@ export function WorkspacePage() {
   const activeStyle = visualStyles.find(style => style.value === workspace?.visual_style) || visualStyles[0]
   const stage = stageMeta(workspace)
   const voiceReady = Boolean(workspace?.voice_confirmed && workspace?.voice_type)
+  const visualPlanReady = Boolean(
+    segments.length
+    && workspace?.visual_style
+    && workspace?.ratio
+    && segments.every(segment => segment.prompt_status === 'completed' && segment.image_prompt),
+  )
+  const canEnterExport = Boolean(
+    segments.length && !['planning', 'awaiting_confirmation', 'generating_assets'].includes(workspace?.stage),
+  )
   const isPlanning = workspace?.stage === 'planning'
   const editable = !isPlanning && workspace?.stage !== 'generating_assets'
   const staleSegments = useMemo(
@@ -265,47 +288,74 @@ export function WorkspacePage() {
     [segments],
   )
 
-  const selectSegment = index => {
-    const safe = Math.max(0, Math.min(Number(index), Math.max(segments.length - 1, 0)))
+  const selectSegment = useCallback(index => {
+    const segmentCount = workspaceRef.current?.segments?.length || 0
+    const safe = Math.max(0, Math.min(Number(index), Math.max(segmentCount - 1, 0)))
     setSelectedIndex(safe)
     localStorage.setItem(`insightcut:selected:${taskId}`, String(safe))
-  }
+  }, [taskId])
 
   const stopPlayback = useCallback(() => {
+    playbackRunRef.current += 1
     playbackAudioRef.current?.pause()
     playbackAudioRef.current = null
-    window.clearTimeout(playbackTimerRef.current)
     setPlaying(false)
   }, [])
 
-  const playFrom = useCallback(index => {
+  const playFrom = useCallback(async (index, runId) => {
     const segment = (workspaceRef.current?.segments || [])[index]
     if (!segment) return stopPlayback()
+    if (!isSegmentPreviewReady(segment)) {
+      toast.info(`第 ${index + 1} 段的图片或配音尚未生成，连续预览已停在这里`)
+      return stopPlayback()
+    }
+
+    const imageUrl = normalizeMediaUrl(segment.image_url)
+    try {
+      await preloadPreviewImage(imageUrl)
+    } catch {
+      if (playbackRunRef.current !== runId) return
+      toast.warning(`第 ${index + 1} 段画面加载失败，连续预览已停止`)
+      return stopPlayback()
+    }
+    if (playbackRunRef.current !== runId) return
+
     selectSegment(index)
-    setPlaying(true)
+    await waitForPreviewPaint()
+    if (playbackRunRef.current !== runId) return
+
     const next = () => {
       const all = workspaceRef.current?.segments || []
       if (index + 1 >= all.length) return stopPlayback()
-      playFrom(index + 1)
+      const nextIndex = nextPreviewIndex(all, index)
+      if (nextIndex === null) {
+        toast.info(`第 ${index + 2} 段素材尚未完成，连续预览已停止`)
+        return stopPlayback()
+      }
+      void playFrom(nextIndex, runId)
     }
     const audioUrl = normalizeMediaUrl(segment.audio_url)
-    if (audioUrl) {
-      const audio = new Audio(audioUrl)
-      playbackAudioRef.current = audio
-      audio.onended = next
-      audio.onerror = next
-      audio.play().catch(() => {
-        toast.warning('浏览器阻止了音频播放，请再次点击播放')
-        stopPlayback()
-      })
-    } else {
-      playbackTimerRef.current = window.setTimeout(next, segmentDuration(segment) * 1000)
+    const audio = new Audio(audioUrl)
+    playbackAudioRef.current = audio
+    audio.onended = next
+    audio.onerror = () => {
+      toast.warning(`第 ${index + 1} 段配音加载失败，连续预览已停止`)
+      stopPlayback()
     }
-  }, [stopPlayback, taskId]) // eslint-disable-line react-hooks/exhaustive-deps
+    audio.play().catch(() => {
+      toast.warning('浏览器阻止了音频播放，请再次点击播放')
+      stopPlayback()
+    })
+  }, [selectSegment, stopPlayback])
 
   const togglePlayback = () => {
     if (playing) stopPlayback()
-    else playFrom(selectedIndex)
+    else {
+      const runId = playbackRunRef.current + 1
+      playbackRunRef.current = runId
+      setPlaying(true)
+      void playFrom(selectedIndex, runId)
+    }
   }
 
   const updateLocalSegment = (segmentIndex, patch) => {
@@ -666,7 +716,7 @@ export function WorkspacePage() {
         </div> : <div className="workspace-settings-panel">
           <header><div><span>全片设置</span><h2>画面与配音</h2></div><button type="button" aria-label="收起设置" onClick={closeSettingsPanel}><PanelRightClose size={18} /></button></header>
           <section className="workspace-setting-section"><div className="workspace-setting-heading"><strong>配音音色</strong><span>选择一次作用全片，分镜可单独覆盖</span></div><VoicePicker voices={voices} value={selectedVoice} ttsOptions={ttsOptions} onChange={(id) => { setSelectedVoice(id); setTtsOptions(mergeTtsOptions({}, workspace.tts_options || {}, id.startsWith('doubao:') ? 'doubao' : 'mimo')) }} onOptionsChange={setTtsOptions} onPreview={previewSelectedVoice} playingVoice={voicePreviewState.playingVoice} previewLoading={voicePreviewState.loading} previewError={voicePreviewState.error} compact /></section>
-          <button type="button" className="button button-primary workspace-confirm-voice" disabled={!selectedVoice || busyAction === 'settings'} onClick={confirmVoice}>{busyAction === 'settings' ? '正在保存…' : voiceReady ? '更新全片音色' : '确认全片音色'}</button>
+          <button type="button" className="button button-primary workspace-confirm-voice" disabled={!selectedVoice || busyAction === 'settings'} onClick={confirmVoice}>{busyAction === 'settings' ? '正在保存…' : voiceReady ? '更新全片音色' : '确认音色并返回预案'}</button>
           <section className="workspace-setting-section"><div className="workspace-setting-heading"><strong>画面风格</strong><span>修改后自动重算系统提示词</span></div><div className="workspace-style-grid">{visualStyles.map(style => <button type="button" key={style.value} className={workspace.visual_style === style.value ? 'is-selected' : ''} onClick={() => saveWorkspaceSettings({ visual_style: style.value, voice_confirmed: voiceReady })}><img src={style.image} alt="" /><span>{style.label}</span></button>)}</div></section>
           <section className="workspace-setting-section"><div className="workspace-setting-heading"><strong>视频比例</strong><span>已有图片会标记为待更新</span></div><div className="workspace-ratio-control">{ratioOptions.map(ratio => <button type="button" key={ratio} className={workspace.ratio === ratio ? 'is-selected' : ''} onClick={() => saveWorkspaceSettings({ ratio, voice_confirmed: voiceReady })}>{ratio}</button>)}</div></section>
           <button type="button" className="button button-secondary workspace-api-button" onClick={() => navigate(`/workspace/${taskId}/settings`)}><Settings2 size={16} />打开 API 配置</button>
@@ -675,13 +725,23 @@ export function WorkspacePage() {
     </div>
 
     <footer className="workspace-actionbar">
-      <div><strong>{stage.title}</strong><span>{voiceReady ? `全片音色：${voiceName(voices, workspace.voice_type)}` : '生成前需要确认全片音色'}</span></div>
+      <div className="workspace-action-status">
+        <strong>{workspace.stage === 'awaiting_confirmation' ? '生成前确认' : stage.title}</strong>
+        {workspace.stage === 'awaiting_confirmation'
+          ? <div className="workspace-confirmation-steps" aria-label="生成前确认步骤">
+              <span className={voiceReady ? 'is-ready' : 'is-current'}>1 音色 · {voiceReady ? voiceName(voices, workspace.voice_type) : '待确认'}</span>
+              <span className={visualPlanReady ? 'is-ready' : 'is-pending'}>2 画面方案 · {visualPlanReady ? '待你确认' : '生成中'}</span>
+              <span className="is-pending">3 生成图片与配音</span>
+            </div>
+          : <span>{voiceReady ? `全片音色：${voiceName(voices, workspace.voice_type)}` : stage.description}</span>}
+      </div>
       <div>
         {['interrupted', 'failed'].includes(workspace.stage) ? <button type="button" className="button button-secondary" disabled={busyAction === 'resume'} onClick={resumeGeneration}><RefreshCw size={16} />从检查点继续</button> : null}
         {staleSegments.length ? <button type="button" className="button button-secondary" disabled={busyAction === 'stale'} onClick={updateStaleAssets}><RefreshCw size={16} />更新 {staleSegments.length} 段受影响素材</button> : null}
-        {workspace.stage === 'awaiting_confirmation' ? <button type="button" className="button button-primary" disabled={!voiceReady || savingCount > 0 || busyAction === 'generate'} onClick={startAssets}>{busyAction === 'generate' ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}确认预案并生成图片与配音</button> : null}
+        {workspace.stage === 'awaiting_confirmation' && !voiceReady ? <button type="button" className="button button-primary" onClick={() => { setSettingsOpen(true); if (window.matchMedia?.('(max-width: 780px)').matches) setMobilePane('settings') }}><Volume2 size={16} />先确认全片音色</button> : null}
+        {workspace.stage === 'awaiting_confirmation' && voiceReady ? <button type="button" className="button button-primary" disabled={!visualPlanReady || savingCount > 0 || busyAction === 'generate'} onClick={startAssets}>{busyAction === 'generate' ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}确认画面方案并生成素材</button> : null}
         {workspace.stage === 'ready' ? <button type="button" className="button button-secondary" disabled={busyAction === 'preview' || previewJob?.status === 'processing'} onClick={createHighPreview}><Play size={16} />{exportState?.preview?.valid ? '重新生成高保真预览' : '生成高保真预览'}</button> : null}
-        <button type="button" className="button button-primary" disabled={!segments.length} onClick={() => navigate(`/export/${taskId}`)}><Download size={16} />进入导出中心</button>
+        <button type="button" className="button button-primary" disabled={!canEnterExport} onClick={() => navigate(`/export/${taskId}`)}><Download size={16} />进入导出中心</button>
       </div>
     </footer>
 
