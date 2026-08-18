@@ -1827,12 +1827,17 @@ async def get_task(task_id: str):
 
 
 def _workspace_stage(task_row: dict) -> str:
+    status = task_row.get("status")
+    # A stopped task must expose its recovery state even when the last persisted
+    # workflow phase still says planning/generating_assets. Otherwise the
+    # workspace keeps showing a non-running progress state and hides resume.
+    if status in {TaskStatus.FAILED.value, TaskStatus.INTERRUPTED.value}:
+        return status
     phase = str(task_row.get("workflow_phase") or "").strip()
     if phase and phase != "pending":
         if phase == "assets_requested":
             return "generating_assets"
         return phase
-    status = task_row.get("status")
     current_step = task_row.get("current_step")
     if status == TaskStatus.COMPLETED.value:
         return "ready"
@@ -1840,8 +1845,6 @@ def _workspace_stage(task_row: dict) -> str:
         return "awaiting_confirmation"
     if current_step in {"voiceover_generation", "image_generation", "draft_building"}:
         return "generating_assets"
-    if status in {TaskStatus.FAILED.value, TaskStatus.INTERRUPTED.value}:
-        return status
     return "planning"
 
 
@@ -1956,7 +1959,11 @@ async def get_task_workspace(task_id: str, request: Request):
         },
         "draft_url": _normalize_local_media_url(result.get("draft_url"), request),
         "error": task_row.get("error"),
-        "can_resume": bool(task_row.get("script_text") or segments),
+        "can_resume": bool(
+            task_row.get("status")
+            in {TaskStatus.FAILED.value, TaskStatus.INTERRUPTED.value}
+            and (task_row.get("theme") or task_row.get("script_text") or segments)
+        ),
     }
 
 

@@ -223,6 +223,56 @@ def test_workspace_reports_progressive_planning_step_and_prompt_counts(
     assert prompt_stage["voice_confirmed"] is False
 
 
+@pytest.mark.parametrize(
+    ("task_id", "workflow_phase", "current_step", "with_segments"),
+    [
+        ("asset-interrupted", "generating_assets", "image_generation", True),
+        ("text-interrupted", "planning", "text_generation", False),
+    ],
+)
+def test_workspace_interruption_overrides_stale_workflow_phase_and_can_resume(
+    temp_db,
+    monkeypatch,
+    task_id,
+    workflow_phase,
+    current_step,
+    with_segments,
+):
+    temp_db.create_task(
+        task_id,
+        "原始主题",
+        "知识科普|电影质感",
+        200,
+        execution_mode="review_first",
+    )
+    if with_segments:
+        temp_db.save_segments(
+            task_id,
+            [{"segment_index": 0, "text": "第一段", "image_prompt": "prompt"}],
+        )
+    temp_db.update_task_workflow(
+        task_id,
+        workflow_phase,
+        status="interrupted",
+        current_step=current_step,
+    )
+    monkeypatch.setattr(routes, "mysql_client", temp_db)
+    monkeypatch.setattr(routes.task_manager, "fail_stale_task_data", lambda _row: False)
+    request = Request({
+        "type": "http",
+        "scheme": "http",
+        "server": ("testserver", 80),
+        "path": "/workspace",
+        "headers": [],
+    })
+
+    workspace = asyncio.run(routes.get_task_workspace(task_id, request))
+
+    assert workspace["stage"] == "interrupted"
+    assert workspace["planning_step"] is None
+    assert workspace["can_resume"] is True
+
+
 def test_new_task_accepts_known_preset_even_when_legacy_checkmark_is_off(
     temp_db, monkeypatch, tts_config
 ):

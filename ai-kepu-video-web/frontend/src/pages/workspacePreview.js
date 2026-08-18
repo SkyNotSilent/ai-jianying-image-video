@@ -8,6 +8,14 @@ export function isSegmentPreviewReady(segment) {
   )
 }
 
+export function areAllSegmentAssetsReady(segments) {
+  return Boolean(
+    Array.isArray(segments)
+    && segments.length
+    && segments.every(isSegmentPreviewReady),
+  )
+}
+
 export function nextPreviewIndex(segments, currentIndex) {
   const nextIndex = Number(currentIndex) + 1
   if (!Array.isArray(segments) || nextIndex >= segments.length) return null

@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  areAllSegmentAssetsReady,
   isSegmentPreviewReady,
   nextPreviewIndex,
   previewPlaybackStartIndex,
@@ -39,4 +40,16 @@ test('a naturally completed continuous preview restarts from the first segment',
 
   assert.equal(previewPlaybackStartIndex(segments, 2, true), 0)
   assert.equal(previewPlaybackStartIndex(segments, 1, false), 1)
+})
+
+test('export readiness requires every segment to have both persisted media files', () => {
+  const complete = [readySegment(0), readySegment(1)]
+  const missingImage = [
+    readySegment(0),
+    { ...readySegment(1), image_url: '', image_status: 'failed' },
+  ]
+
+  assert.equal(areAllSegmentAssetsReady(complete), true)
+  assert.equal(areAllSegmentAssetsReady(missingImage), false)
+  assert.equal(areAllSegmentAssetsReady([]), false)
 })

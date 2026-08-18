@@ -179,9 +179,9 @@ class FakePipeline:
         self.voiceover_files = []
 
 
-def create_task(db, task_id="task-1", status="pending"):
+def create_task(db, task_id="task-1", status="pending", theme="原始内容"):
     db.create_task(
-        task_id, "原始内容", "知识科普|电影质感", 100, name="恢复测试"
+        task_id, theme, "知识科普|电影质感", 100, name="恢复测试"
     )
     if status != "pending":
         db.update_task_status(task_id, status, "image_generation")
@@ -711,7 +711,8 @@ def test_resume_task_reports_lifecycle_outcomes(
         "recoverable", [{"segment_index": 0, "text": "第一段"}]
     )
     create_task(executor_db, "completed", status="completed")
-    create_task(executor_db, "empty", status="interrupted")
+    create_task(executor_db, "empty", status="interrupted", theme="")
+    create_task(executor_db, "theme-only", status="interrupted")
     registry = TaskRuntimeRegistry()
     threads = []
 
@@ -732,10 +733,11 @@ def test_resume_task_reports_lifecycle_outcomes(
     assert executor.resume_task("completed") == "already_completed"
     assert executor.resume_task("missing") == "not_recoverable"
     assert executor.resume_task("empty") == "not_recoverable"
+    assert executor.resume_task("theme-only") == "started"
     assert executor.resume_task("recoverable") == "started"
     assert executor.resume_task("recoverable") == "already_running"
-    assert len(threads) == 1
-    assert threads[0].daemon
+    assert len(threads) == 2
+    assert all(thread.daemon for thread in threads)
 
 
 def test_segments_only_legacy_resume_reconstructs_script_without_rewrite(

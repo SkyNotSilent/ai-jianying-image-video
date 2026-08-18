@@ -214,7 +214,7 @@ class TaskExecutor:
         if task_row.get("status") not in {
             TaskStatus.INTERRUPTED.value,
             TaskStatus.FAILED.value,
-        } or not (task_row.get("script_text") or segments):
+        } or not (task_row.get("theme") or task_row.get("script_text") or segments):
             return "not_recoverable"
 
         cancellation = task_runtime.begin(task_id)

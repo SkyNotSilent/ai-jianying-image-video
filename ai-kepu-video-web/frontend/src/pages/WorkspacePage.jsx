@@ -47,6 +47,7 @@ import { ratioClassName } from '../utils/taskState'
 import { normalizeSubtitleText, secondsToLabel, segmentDuration } from './previewUtils'
 import { SettingsPage } from './SettingsPage'
 import {
+  areAllSegmentAssetsReady,
   isSegmentPreviewReady,
   nextPreviewIndex,
   previewPlaybackStartIndex,
@@ -331,9 +332,22 @@ export function WorkspacePage() {
     && workspace?.ratio
     && segments.every(segment => segment.prompt_status === 'completed' && segment.image_prompt),
   )
-  const canEnterExport = Boolean(
-    segments.length && !['planning', 'awaiting_confirmation', 'generating_assets'].includes(workspace?.stage),
-  )
+  const allAssetsReady = areAllSegmentAssetsReady(segments)
+  const assetIssueCount = segments.reduce((count, segment) => (
+    count
+    + (segment.image_status === 'completed' && segment.image_url ? 0 : 1)
+    + (segment.audio_status === 'completed' && segment.audio_url ? 0 : 1)
+  ), 0)
+  const isRecoverableStage = ['interrupted', 'failed'].includes(workspace?.stage)
+  const canEnterExport = allAssetsReady
+  const recoveryActionLabel = !segments.length
+    ? '重新开始生成'
+    : allAssetsReady
+      ? '完成生产并进入预览'
+      : `重试 ${assetIssueCount} 个缺失或失败素材`
+  const recoverySummary = !segments.length
+    ? '生成在文案阶段中断，可从原始内容重新开始'
+    : `图片 ${workspace?.progress?.images_ready || 0}/${segments.length} · 配音 ${workspace?.progress?.audio_ready || 0}/${segments.length}${allAssetsReady ? ' · 素材齐全，待完成生产' : ` · ${assetIssueCount} 项待重试`}`
   const isPlanning = workspace?.stage === 'planning'
   const editable = !isPlanning && workspace?.stage !== 'generating_assets'
   const staleSegments = useMemo(
@@ -849,10 +863,10 @@ export function WorkspacePage() {
               <span className={visualPlanReady ? 'is-ready' : 'is-pending'}>2 画面方案 · {visualPlanReady ? '待你确认' : '生成中'}</span>
               <span className="is-pending">3 生成图片与配音</span>
             </div>
-          : <span>{voiceReady ? `全片音色：${voiceName(voices, workspace.voice_type)}` : stage.description}</span>}
+          : <span>{isRecoverableStage ? recoverySummary : voiceReady ? `全片音色：${voiceName(voices, workspace.voice_type)}` : stage.description}</span>}
       </div>
       <div>
-        {['interrupted', 'failed'].includes(workspace.stage) ? <button type="button" className="button button-secondary" disabled={busyAction === 'resume'} onClick={resumeGeneration}><RefreshCw size={16} />从检查点继续</button> : null}
+        {isRecoverableStage && workspace.can_resume ? <button type="button" className="button button-secondary" disabled={busyAction === 'resume'} onClick={resumeGeneration}>{busyAction === 'resume' ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}{busyAction === 'resume' ? '正在恢复…' : recoveryActionLabel}</button> : null}
         {staleSegments.length ? <button type="button" className="button button-secondary" disabled={busyAction === 'stale'} onClick={updateStaleAssets}><RefreshCw size={16} />更新 {staleSegments.length} 段受影响素材</button> : null}
         {workspace.stage === 'awaiting_confirmation' && !voiceReady ? <button type="button" className="button button-primary" onClick={() => { setSettingsOpen(true); if (window.matchMedia?.('(max-width: 780px)').matches) setMobilePane('settings') }}><Volume2 size={16} />先确认全片音色</button> : null}
         {workspace.stage === 'awaiting_confirmation' && voiceReady ? <button type="button" className="button button-primary" disabled={!visualPlanReady || savingCount > 0 || busyAction === 'generate'} onClick={startAssets}>{busyAction === 'generate' ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}确认画面方案并生成素材</button> : null}
