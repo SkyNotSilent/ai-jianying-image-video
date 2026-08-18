@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   buildVoiceTaskPayload,
+  doubaoSpeedRatio,
   groupVisibleVoices,
   hasUsableVoice,
   mergeTtsOptions,
@@ -103,6 +104,15 @@ test('merges inherited options and emits only provider-relevant task fields', ()
       tts_options: { speed_level: 'very_fast', volume_ratio: 1.8 },
     },
   )
+})
+
+test('uses the same doubao speed multipliers as final TTS generation', () => {
+  assert.equal(doubaoSpeedRatio('very_slow'), 0.8)
+  assert.equal(doubaoSpeedRatio('slow'), 1)
+  assert.equal(doubaoSpeedRatio('normal'), 1.25)
+  assert.equal(doubaoSpeedRatio('fast'), 1.5)
+  assert.equal(doubaoSpeedRatio('very_fast'), 1.75)
+  assert.equal(doubaoSpeedRatio('unknown'), 1.25)
 })
 
 test('preview state keeps one active voice and ignores stale completions', () => {

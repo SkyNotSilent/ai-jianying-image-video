@@ -114,7 +114,7 @@ export function normalizeConfig(config = {}) {
       ...(source.generation || {}),
       prompt_concurrency: normalizeConcurrency(source.generation?.prompt_concurrency, 4),
       tts_concurrency: normalizeConcurrency(source.generation?.tts_concurrency),
-      image_concurrency: 1,
+      image_concurrency: normalizeConcurrency(source.generation?.image_concurrency, 8),
       retry_count: normalizeRetryCount(source.generation?.retry_count),
     },
   }

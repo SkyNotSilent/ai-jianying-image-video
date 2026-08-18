@@ -463,7 +463,7 @@ class TaskExecutor:
                 generation_config.get("tts_concurrency", 1), segments_count
             )
             image_concurrency = _bounded_concurrency(
-                generation_config.get("image_concurrency", 1), segments_count
+                generation_config.get("image_concurrency", 8), segments_count
             )
             logger.info(
                 f"[{task_id}] 生成并发配置: 提示词={prompt_concurrency}, "

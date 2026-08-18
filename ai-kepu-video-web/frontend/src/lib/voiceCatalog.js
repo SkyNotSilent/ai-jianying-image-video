@@ -1,4 +1,15 @@
 const SPEED_LEVELS = new Set(['very_slow', 'slow', 'normal', 'fast', 'very_fast'])
+const DOUBAO_SPEED_RATIOS = {
+  very_slow: 0.8,
+  slow: 1,
+  normal: 1.25,
+  fast: 1.5,
+  very_fast: 1.75,
+}
+
+export function doubaoSpeedRatio(speedLevel) {
+  return DOUBAO_SPEED_RATIOS[SPEED_LEVELS.has(speedLevel) ? speedLevel : 'normal']
+}
 
 function canonicalVoiceId(voice = {}) {
   const current = String(voice.id || '').trim()

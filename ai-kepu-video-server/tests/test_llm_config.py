@@ -101,7 +101,7 @@ def test_save_model_config_persists_normalized_llm_and_other_defaults(
     assert persisted["tts"]["mimo"]["model"] == Config.MIMO_TTS_MODEL
     assert persisted["image"]["model"] == Config.SEEDREAM_MODEL
     assert persisted["generation"]["prompt_concurrency"] == 4
-    assert persisted["generation"]["image_concurrency"] == 1
+    assert persisted["generation"]["image_concurrency"] == 8
     assert persisted["generation"]["retry_count"] == 2
 
 
@@ -127,3 +127,15 @@ def test_generation_retry_count_is_normalized(value, expected):
     Config._normalize_generation_config(config)
 
     assert config["generation"]["retry_count"] == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(None, 8), (0, 1), (1, 1), (6, 6), (12, 8), ("bad", 8)],
+)
+def test_image_concurrency_defaults_to_measured_burst_limit(value, expected):
+    config = {"generation": {"image_concurrency": value}}
+
+    Config._normalize_generation_config(config)
+
+    assert config["generation"]["image_concurrency"] == expected

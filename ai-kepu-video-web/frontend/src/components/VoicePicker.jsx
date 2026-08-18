@@ -1,5 +1,5 @@
 import { Check, CircleAlert, LoaderCircle, Pause, Play, Sparkles, Volume2 } from 'lucide-react'
-import { groupVisibleVoices, mergeTtsOptions, normalizeVoiceCatalog } from '../lib/voiceCatalog'
+import { doubaoSpeedRatio, groupVisibleVoices, mergeTtsOptions, normalizeVoiceCatalog } from '../lib/voiceCatalog'
 import './voice-picker.css'
 
 const SPEED_OPTIONS = [
@@ -30,6 +30,7 @@ export function VoicePicker({
   const selected = normalized.find(voice => voice.id === value)
   const provider = selected?.provider || optionsProvider || (String(value).startsWith('doubao:') ? 'doubao' : 'mimo')
   const options = mergeTtsOptions({}, ttsOptions, provider)
+  const speedRatio = provider === 'doubao' ? doubaoSpeedRatio(options.speed_level) : null
 
   const updateOptions = patch => {
     onOptionsChange?.(mergeTtsOptions(options, patch, provider))
@@ -81,9 +82,9 @@ export function VoicePicker({
     {previewError ? <p className="voice-preview-error" role="alert"><CircleAlert size={15} />{previewError}</p> : null}
 
     {showAdvanced && selected ? <section className="voice-advanced" aria-label="配音参数">
-      <label><span>语速</span><select value={options.speed_level} onChange={event => updateOptions({ speed_level: event.target.value })}>{SPEED_OPTIONS.map(([key, label]) => <option value={key} key={key}>{label}</option>)}</select></label>
+      <label><span>语速{speedRatio ? <strong>{speedRatio}x</strong> : null}</span><select value={options.speed_level} onChange={event => updateOptions({ speed_level: event.target.value })}>{SPEED_OPTIONS.map(([key, label]) => <option value={key} key={key}>{provider === 'doubao' ? `${label} · ${doubaoSpeedRatio(key)}x` : label}</option>)}</select></label>
       {provider === 'doubao'
-        ? <label><span>音量 <strong>{Math.round(options.volume_ratio * 100)}%</strong></span><input type="range" min="0.5" max="2" step="0.1" value={options.volume_ratio} onChange={event => updateOptions({ volume_ratio: Number(event.target.value) })} /></label>
+        ? <label><span>音量 <strong>{options.volume_ratio.toFixed(1)}x</strong></span><input type="range" min="0.5" max="2" step="0.1" value={options.volume_ratio} onChange={event => updateOptions({ volume_ratio: Number(event.target.value) })} /></label>
         : <label className="voice-style-field"><span>风格指令</span><input value={options.style_prompt} maxLength="300" placeholder="例如：轻松、有感情，适合短视频旁白" onChange={event => updateOptions({ style_prompt: event.target.value })} /></label>}
     </section> : null}
   </div>

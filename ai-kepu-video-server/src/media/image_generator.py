@@ -4,6 +4,7 @@
 """
 
 import base64
+from collections import deque
 import logging
 import threading
 import time
@@ -16,8 +17,10 @@ from src.config import Config
 
 logger = logging.getLogger(__name__)
 _RATE_LIMIT_LOCK = threading.Lock()
-_LAST_IMAGE_REQUEST_AT = 0.0
-_DEFAULT_REQUEST_INTERVAL_SECONDS = 3.0
+_IMAGE_REQUEST_TIMESTAMPS = deque()
+_IMAGE_RATE_LIMIT = 20
+_IMAGE_RATE_WINDOW_SECONDS = 60.0
+_DEFAULT_RETRY_DELAY_SECONDS = 3.0
 
 # 风格预设（附加到 prompt 末尾）
 STYLE_PRESETS = {
@@ -133,22 +136,31 @@ class ImageGenerator:
         return parsed.netloc in {"api.openai.com", "api.openai.com:443"}
 
     def _wait_for_rate_limit(self) -> None:
-        global _LAST_IMAGE_REQUEST_AT
         with _RATE_LIMIT_LOCK:
-            now = time.monotonic()
-            elapsed = now - _LAST_IMAGE_REQUEST_AT
-            if elapsed < _DEFAULT_REQUEST_INTERVAL_SECONDS:
-                time.sleep(_DEFAULT_REQUEST_INTERVAL_SECONDS - elapsed)
-            _LAST_IMAGE_REQUEST_AT = time.monotonic()
+            while True:
+                now = time.monotonic()
+                while (
+                    _IMAGE_REQUEST_TIMESTAMPS
+                    and now - _IMAGE_REQUEST_TIMESTAMPS[0] >= _IMAGE_RATE_WINDOW_SECONDS
+                ):
+                    _IMAGE_REQUEST_TIMESTAMPS.popleft()
+                if len(_IMAGE_REQUEST_TIMESTAMPS) < _IMAGE_RATE_LIMIT:
+                    _IMAGE_REQUEST_TIMESTAMPS.append(now)
+                    return
+                wait_seconds = max(
+                    0.01,
+                    _IMAGE_RATE_WINDOW_SECONDS - (now - _IMAGE_REQUEST_TIMESTAMPS[0]),
+                )
+                time.sleep(wait_seconds)
 
     def _retry_delay(self, resp) -> float:
         if resp is not None and resp.status_code == 429:
             retry_after = resp.headers.get("retry-after")
             try:
-                return max(float(retry_after), _DEFAULT_REQUEST_INTERVAL_SECONDS)
+                return max(float(retry_after), _DEFAULT_RETRY_DELAY_SECONDS)
             except (TypeError, ValueError):
                 return 60.0
-        return _DEFAULT_REQUEST_INTERVAL_SECONDS
+        return _DEFAULT_RETRY_DELAY_SECONDS
 
     def _extract_image_bytes(self, data: dict) -> bytes:
         item = data["data"][0]

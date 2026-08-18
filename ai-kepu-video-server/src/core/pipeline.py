@@ -180,7 +180,7 @@ class VideoEditorPipeline:
 
         image_prompts = self.image_prompts
         generation_config = Config.generation_config()
-        image_workers = max(1, min(8, int(generation_config.get("image_concurrency", 1) or 1)))
+        image_workers = max(1, min(8, int(generation_config.get("image_concurrency", 8) or 8)))
         tts_workers = max(1, min(8, int(generation_config.get("tts_concurrency", 1) or 1)))
 
         def gen_image(i):

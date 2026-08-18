@@ -99,7 +99,7 @@ npm run dev
 - **配置方式**：`api_url` + `api_key` + `model`
 - **核心文件**：`src/media/image_generator.py`
 - **请求格式注意**：Agnes 的 `response_format` 必须放在 `extra_body.response_format`，不能放在请求体顶层
-- **免费限速注意**：附件文档未列出明确 RPM；当前按公开资料的免费 `RPM 20` 处理，项目内生图请求至少间隔 3 秒，`IMAGE_CONCURRENCY` 保持 `1`，遇到 429 按 `retry-after` 或 60 秒等待后重试
+- **免费限速注意**：2026-08-18 使用当前免费账号实测，8 路瞬时请求全部成功，但滚动一分钟累计成功 20 次后继续请求会返回 429；`IMAGE_CONCURRENCY` 默认 `8`，项目内按滚动 60 秒最多 20 次请求节流，遇到 429 按 `retry-after` 或 60 秒等待后重试
 
 ### TTS 模块
 
