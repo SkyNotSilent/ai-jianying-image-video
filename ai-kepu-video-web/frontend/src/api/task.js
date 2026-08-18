@@ -205,10 +205,11 @@ export function getTaskStatus(taskId) {
   })
 }
 
-export function getTaskWorkspace(taskId) {
+export function getTaskWorkspace(taskId, { silent = false } = {}) {
   return request({
     url: `/ai/native/video/kepu/tasks/${taskId}/workspace`,
-    method: 'get'
+    method: 'get',
+    suppressToast: silent,
   })
 }
 
@@ -284,10 +285,11 @@ export function renderPreview(taskId, segmentIndex = null) {
   })
 }
 
-export function getExportState(taskId) {
+export function getExportState(taskId, { silent = false } = {}) {
   return request({
     url: `/ai/native/video/kepu/tasks/${taskId}/export-state`,
-    method: 'get'
+    method: 'get',
+    suppressToast: silent,
   })
 }
 

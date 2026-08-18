@@ -149,6 +149,21 @@ class TaskExecutor:
             logger.info(f"[{task_id}] 任务已在执行，跳过重复启动")
             return False
 
+        task_row = db_client.get_task(task_id)
+        original_status = (task_row or {}).get("status") or TaskStatus.PENDING.value
+        original_phase = (task_row or {}).get("workflow_phase") or "pending"
+        original_step = (task_row or {}).get("current_step") or "pending"
+        if task_row:
+            if not db_client.update_task_workflow(
+                task_id,
+                original_phase,
+                status=TaskStatus.PROCESSING.value,
+                current_step=original_step,
+            ):
+                task_runtime.finish(task_id, cancellation)
+                return False
+            task_manager.invalidate_task_cache(task_id)
+
         thread = Thread(
             target=self._run_registered_task,
             args=(
@@ -166,6 +181,14 @@ class TaskExecutor:
         try:
             thread.start()
         except Exception:
+            if task_row:
+                db_client.update_task_workflow(
+                    task_id,
+                    original_phase,
+                    status=original_status,
+                    current_step=original_step,
+                )
+                task_manager.invalidate_task_cache(task_id)
             task_runtime.finish(task_id, cancellation)
             raise
         logger.info(f"[{task_id}] 启动后台任务线程")
@@ -208,6 +231,17 @@ class TaskExecutor:
         if task_row.get("status") == TaskStatus.COMPLETED.value:
             return "already_completed"
         if task_runtime.is_running(task_id):
+            if task_row.get("status") in {
+                TaskStatus.INTERRUPTED.value,
+                TaskStatus.FAILED.value,
+            }:
+                db_client.update_task_workflow(
+                    task_id,
+                    task_row.get("workflow_phase") or "planning",
+                    status=TaskStatus.PROCESSING.value,
+                    current_step=task_row.get("current_step") or "pending",
+                )
+                task_manager.invalidate_task_cache(task_id)
             return "already_running"
 
         segments = db_client.get_segments(task_id)
@@ -222,6 +256,28 @@ class TaskExecutor:
             if task_runtime.is_running(task_id):
                 return "already_running"
             return "not_recoverable"
+        original_status = task_row.get("status")
+        original_phase = task_row.get("workflow_phase") or "planning"
+        original_step = task_row.get("current_step") or "pending"
+        active_phase = (
+            "generating_assets"
+            if original_phase in {"assets_requested", "generating_assets", "ready"}
+            else "planning"
+        )
+        active_step = (
+            original_step
+            if original_step not in {"pending", "awaiting_confirmation", "completed"}
+            else "image_generation" if active_phase == "generating_assets" else "text_generation"
+        )
+        if not db_client.update_task_workflow(
+            task_id,
+            active_phase,
+            status=TaskStatus.PROCESSING.value,
+            current_step=active_step,
+        ):
+            task_runtime.finish(task_id, cancellation)
+            return "not_recoverable"
+        task_manager.invalidate_task_cache(task_id)
         thread = Thread(
             target=self._run_registered_task,
             args=(
@@ -239,6 +295,13 @@ class TaskExecutor:
         try:
             thread.start()
         except Exception:
+            db_client.update_task_workflow(
+                task_id,
+                original_phase,
+                status=original_status,
+                current_step=original_step,
+            )
+            task_manager.invalidate_task_cache(task_id)
             task_runtime.finish(task_id, cancellation)
             raise
         return "started"
@@ -252,19 +315,28 @@ class TaskExecutor:
             return "already_running"
         if task_row.get("execution_mode") != "review_first":
             return "not_review_first"
-
-        if not db_client.update_task_workflow(
-            task_id,
-            "assets_requested",
-            status=TaskStatus.INTERRUPTED.value,
-            current_step="image_prompt_generation",
-        ):
-            return "not_recoverable"
-        task_manager.invalidate_task_cache(task_id)
+        if task_row.get("status") not in {
+            TaskStatus.AWAITING_CONFIRMATION.value,
+            TaskStatus.INTERRUPTED.value,
+            TaskStatus.FAILED.value,
+        }:
+            return "invalid_state"
 
         cancellation = task_runtime.begin(task_id)
         if cancellation is None:
             return "already_running" if task_runtime.is_running(task_id) else "not_recoverable"
+        original_status = task_row.get("status")
+        original_phase = task_row.get("workflow_phase") or "awaiting_confirmation"
+        original_step = task_row.get("current_step") or "awaiting_confirmation"
+        if not db_client.update_task_workflow(
+            task_id,
+            "assets_requested",
+            status=TaskStatus.PROCESSING.value,
+            current_step="image_generation",
+        ):
+            task_runtime.finish(task_id, cancellation)
+            return "not_recoverable"
+        task_manager.invalidate_task_cache(task_id)
         thread = Thread(
             target=self._run_registered_task,
             args=(
@@ -282,6 +354,13 @@ class TaskExecutor:
         try:
             thread.start()
         except Exception:
+            db_client.update_task_workflow(
+                task_id,
+                original_phase,
+                status=original_status,
+                current_step=original_step,
+            )
+            task_manager.invalidate_task_cache(task_id)
             task_runtime.finish(task_id, cancellation)
             raise
         return "started"

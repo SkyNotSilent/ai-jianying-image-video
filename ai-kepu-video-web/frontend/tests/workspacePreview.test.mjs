@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   areAllSegmentAssetsReady,
+  deriveWorkspaceControls,
   isSegmentPreviewReady,
   nextPreviewIndex,
   previewPlaybackStartIndex,
@@ -52,4 +53,47 @@ test('export readiness requires every segment to have both persisted media files
   assert.equal(areAllSegmentAssetsReady(complete), true)
   assert.equal(areAllSegmentAssetsReady(missingImage), false)
   assert.equal(areAllSegmentAssetsReady([]), false)
+})
+
+test('workspace controls cover planning restart, partial retry, finalization, and ready delivery', () => {
+  assert.deepEqual(deriveWorkspaceControls({
+    stage: 'interrupted',
+    can_resume: true,
+    segments: [],
+  }), {
+    isRecoverable: true,
+    canResume: true,
+    recoveryLabel: '重新开始生成',
+    recoverySummary: '生成在文案阶段中断，可从原始内容重新开始',
+    canEnterExport: false,
+    canRenderFullVideo: false,
+  })
+
+  const partial = deriveWorkspaceControls({
+    stage: 'interrupted',
+    can_resume: true,
+    segments: [readySegment(0), { ...readySegment(1), image_status: 'failed', image_url: '' }],
+  })
+  assert.equal(partial.recoveryLabel, '重试 1 个缺失或失败素材')
+  assert.equal(partial.canEnterExport, false)
+
+  const finalize = deriveWorkspaceControls({
+    stage: 'interrupted',
+    can_resume: true,
+    segments: [readySegment(0)],
+    recovery: { label: '完成生产并进入预览', description: '素材齐全，待完成草稿' },
+    capabilities: { enter_export: true, full_video: false },
+  })
+  assert.equal(finalize.recoveryLabel, '完成生产并进入预览')
+  assert.equal(finalize.canEnterExport, true)
+  assert.equal(finalize.canRenderFullVideo, false)
+
+  const ready = deriveWorkspaceControls({
+    stage: 'ready',
+    can_resume: false,
+    segments: [readySegment(0)],
+    capabilities: { enter_export: true, full_video: true },
+  })
+  assert.equal(ready.isRecoverable, false)
+  assert.equal(ready.canRenderFullVideo, true)
 })

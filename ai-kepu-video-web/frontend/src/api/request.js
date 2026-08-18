@@ -49,8 +49,11 @@ request.interceptors.response.use(
     return response.data
   },
   error => {
+    const suppressToast = Boolean(error?.config?.suppressToast)
     const safeError = toSafeApiError(error)
     console.error(...safeApiLogArgs('[API Response Error]', safeError))
+
+    if (suppressToast) return Promise.reject(safeError)
 
     // 网络错误
     if (!safeError.response) {

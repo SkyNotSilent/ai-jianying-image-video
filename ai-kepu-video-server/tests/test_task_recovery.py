@@ -734,7 +734,9 @@ def test_resume_task_reports_lifecycle_outcomes(
     assert executor.resume_task("missing") == "not_recoverable"
     assert executor.resume_task("empty") == "not_recoverable"
     assert executor.resume_task("theme-only") == "started"
+    assert executor_db.get_task("theme-only")["status"] == "processing"
     assert executor.resume_task("recoverable") == "started"
+    assert executor_db.get_task("recoverable")["status"] == "processing"
     assert executor.resume_task("recoverable") == "already_running"
     assert len(threads) == 2
     assert all(thread.daemon for thread in threads)

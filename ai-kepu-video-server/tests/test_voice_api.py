@@ -273,6 +273,130 @@ def test_workspace_interruption_overrides_stale_workflow_phase_and_can_resume(
     assert workspace["can_resume"] is True
 
 
+def test_workspace_reports_recovery_and_delivery_capabilities_from_real_files(
+    tmp_path, temp_db, monkeypatch
+):
+    image = tmp_path / "segment.png"
+    audio = tmp_path / "segment.wav"
+    draft = tmp_path / "draft"
+    audio.write_bytes(b"audio")
+    draft.mkdir()
+    temp_db.create_task(
+        "asset-health",
+        "原始主题",
+        "知识科普|电影质感",
+        200,
+        execution_mode="review_first",
+    )
+    temp_db.save_task_checkpoint(
+        "asset-health",
+        script_text="第一段",
+        summary="摘要",
+        input_mode="theme",
+        workflow_phase="ready",
+        voice_confirmed=1,
+    )
+    temp_db.save_segments(
+        "asset-health",
+        [{
+            "segment_index": 0,
+            "text": "第一段",
+            "image_prompt": "prompt",
+            "image_path": str(image),
+            "image_url": "http://testserver/files/segment.png",
+            "image_status": "completed",
+            "audio_path": str(audio),
+            "audio_url": "http://testserver/files/segment.wav",
+            "audio_status": "completed",
+        }],
+    )
+    temp_db.save_task_result("asset-health", str(draft), 1)
+    temp_db.update_task_workflow(
+        "asset-health", "ready", status="completed", current_step="completed"
+    )
+    monkeypatch.setattr(routes, "mysql_client", temp_db)
+    monkeypatch.setattr(routes.task_manager, "invalidate_task_cache", lambda _task_id: None)
+    monkeypatch.setattr(routes.task_manager, "fail_stale_task_data", lambda _row: False)
+    request = Request({
+        "type": "http",
+        "scheme": "http",
+        "server": ("testserver", 80),
+        "path": "/workspace",
+        "headers": [],
+    })
+
+    missing_image = asyncio.run(routes.get_task_workspace("asset-health", request))
+
+    assert missing_image["stage"] == "interrupted"
+    assert missing_image["segments"][0]["image_status"] == "failed"
+    assert missing_image["health"]["missing_images"] == 1
+    assert missing_image["recovery"]["mode"] == "retry_assets"
+    assert missing_image["capabilities"] == {
+        "instant_preview": False,
+        "full_video": False,
+        "enter_export": True,
+        "material_export": True,
+    }
+    assert temp_db.get_task("asset-health")["status"] == "interrupted"
+
+    image.write_bytes(b"image")
+    temp_db.update_task_workflow(
+        "asset-health", "generating_assets", status="interrupted", current_step="draft_building"
+    )
+    draft.rmdir()
+
+    assets_complete = asyncio.run(routes.get_task_workspace("asset-health", request))
+
+    assert assets_complete["health"]["assets_complete"] is True
+    assert assets_complete["recovery"]["mode"] == "finalize"
+    assert assets_complete["capabilities"]["enter_export"] is True
+    assert assets_complete["capabilities"]["full_video"] is False
+
+
+def test_resegment_moves_task_to_planning_before_resuming(temp_db, monkeypatch):
+    temp_db.create_task(
+        "resegment-state",
+        "原始主题",
+        "知识科普|电影质感",
+        200,
+        execution_mode="review_first",
+    )
+    temp_db.save_task_checkpoint(
+        "resegment-state",
+        script_text="第一句。第二句。",
+        workflow_phase="awaiting_confirmation",
+    )
+    temp_db.save_segments(
+        "resegment-state",
+        [{"segment_index": 0, "text": "旧分镜", "image_prompt": "old"}],
+    )
+    temp_db.update_task_workflow(
+        "resegment-state",
+        "awaiting_confirmation",
+        status="awaiting_confirmation",
+        current_step="awaiting_confirmation",
+    )
+    observed = {}
+    monkeypatch.setattr(routes, "mysql_client", temp_db)
+    monkeypatch.setattr(routes.task_manager, "invalidate_task_cache", lambda _task_id: None)
+
+    def resume(task_id):
+        observed.update(temp_db.get_task(task_id))
+        return "started"
+
+    monkeypatch.setattr(routes.task_executor, "resume_task", resume)
+
+    result = asyncio.run(routes.resegment_task_workspace(
+        "resegment-state",
+        {"script_text": "第一句。第二句。", "expected_plan_version": 0},
+    ))
+
+    assert result["outcome"] == "started"
+    assert observed["status"] == "interrupted"
+    assert observed["workflow_phase"] == "planning"
+    assert observed["current_step"] == "image_prompt_generation"
+
+
 def test_new_task_accepts_known_preset_even_when_legacy_checkmark_is_off(
     temp_db, monkeypatch, tts_config
 ):
@@ -416,7 +540,13 @@ def test_regenerate_audio_accepts_legacy_query_and_saves_segment_snapshot(
         tts_options={"speed_level": "slow", "style_prompt": "平静"},
     )
     temp_db.save_segments(
-        "task-query", [{"segment_index": 0, "text": "这是第一段"}]
+        "task-query",
+        [{
+            "segment_index": 4,
+            "text": "这是第一段",
+            "audio_status": "failed",
+            "audio_error": "previous failure",
+        }],
     )
     task = SimpleNamespace(
         task_id="task-query",
@@ -424,7 +554,7 @@ def test_regenerate_audio_accepts_legacy_query_and_saves_segment_snapshot(
         ratio="16:9",
         voice_type="mimo:冰糖",
         tts_options={"speed_level": "slow", "style_prompt": "平静"},
-        result=SimpleNamespace(draft_path=str(tmp_path / "draft")),
+        result=None,
     )
     captured = {}
 
@@ -445,6 +575,7 @@ def test_regenerate_audio_accepts_legacy_query_and_saves_segment_snapshot(
 
     monkeypatch.setattr(routes, "mysql_client", temp_db)
     monkeypatch.setattr(routes, "task_manager", SimpleNamespace(get_task=lambda _task_id: task))
+    monkeypatch.setattr(routes.Config, "BASE_DIR", tmp_path)
     monkeypatch.setattr(routes.Config, "tts_config", classmethod(lambda cls: tts_config))
     monkeypatch.setattr(pipeline_module, "VideoEditorPipeline", FakePipeline)
     monkeypatch.setattr(uploader_module, "LocalUploader", FakeUploader)
@@ -452,7 +583,7 @@ def test_regenerate_audio_accepts_legacy_query_and_saves_segment_snapshot(
     result = asyncio.run(
         routes.regenerate_audio(
             "task-query",
-            0,
+            4,
             payload=None,
             voice_type="doubao:zh_male_jieshuoxiaoming_moon_bigtts",
         )
@@ -464,3 +595,30 @@ def test_regenerate_audio_accepts_legacy_query_and_saves_segment_snapshot(
     segment = temp_db.get_segments("task-query")[0]
     assert segment["audio_voice_type"] == result["voice_type"]
     assert json.loads(segment["audio_tts_options_json"])["volume_ratio"] == 1.0
+    assert segment["audio_status"] == "completed"
+    assert segment["audio_error"] is None
+
+
+def test_workspace_mutations_are_rejected_while_generation_is_running(
+    temp_db, monkeypatch
+):
+    temp_db.create_task(
+        "running-task",
+        "文案",
+        "知识科普|电影质感",
+        100,
+        execution_mode="review_first",
+    )
+    temp_db.update_task_workflow(
+        "running-task", "planning", status="processing", current_step="text_generation"
+    )
+    monkeypatch.setattr(routes, "mysql_client", temp_db)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(routes.update_task_workspace_settings(
+            "running-task",
+            {"voice_type": "mimo:冰糖", "voice_confirmed": True},
+        ))
+
+    assert exc_info.value.status_code == 409
+    assert "正在生成" in exc_info.value.detail

@@ -342,7 +342,9 @@ class TaskManager:
         }:
             return False
         return bool(
-            data.get("script_text") or db_client.get_segments(data["task_id"])
+            data.get("theme")
+            or data.get("script_text")
+            or db_client.get_segments(data["task_id"])
         )
 
     def _rebuild_task_from_cache(self, data: dict) -> Optional[Task]:

@@ -15,8 +15,8 @@ test('interrupted task exposes continue generation', () => {
   })
 
   assert.equal(state.key, 'interrupted')
-  assert.equal(state.actionLabel, '继续生成')
-  assert.equal(getProjectPrimaryAction({ type: 'task', status: state.key }), 'resume')
+  assert.equal(state.actionLabel, '查看并继续')
+  assert.equal(getProjectPrimaryAction({ type: 'task', status: state.key }), 'workspace')
 })
 
 test('failed task with a saved segment exposes continue generation', () => {
@@ -26,8 +26,8 @@ test('failed task with a saved segment exposes continue generation', () => {
   })
 
   assert.equal(state.key, 'interrupted')
-  assert.equal(state.actionLabel, '继续生成')
-  assert.equal(getProjectPrimaryAction({ type: 'task', status: state.key }), 'resume')
+  assert.equal(state.actionLabel, '查看并继续')
+  assert.equal(getProjectPrimaryAction({ type: 'task', status: state.key }), 'workspace')
 })
 
 test('failed task with only a saved script still exposes continue generation', () => {
@@ -37,7 +37,7 @@ test('failed task with only a saved script still exposes continue generation', (
   })
 
   assert.equal(state.key, 'interrupted')
-  assert.equal(state.actionLabel, '继续生成')
+  assert.equal(state.actionLabel, '查看并继续')
 })
 
 test('failed task detail can expose resume without returning checkpoint content', () => {
@@ -47,7 +47,7 @@ test('failed task detail can expose resume without returning checkpoint content'
   })
 
   assert.equal(state.key, 'interrupted')
-  assert.equal(state.actionLabel, '继续生成')
+  assert.equal(state.actionLabel, '查看并继续')
 })
 
 test('failed task without checkpoint evidence retains recovery-only action', () => {
@@ -58,15 +58,15 @@ test('failed task without checkpoint evidence retains recovery-only action', () 
 
   assert.equal(state.key, 'recoverable_assets')
   assert.equal(state.actionLabel, '查看已保存素材')
-  assert.equal(getProjectPrimaryAction({ type: 'task', status: state.key }), 'preview')
+  assert.equal(getProjectPrimaryAction({ type: 'task', status: state.key }), 'workspace')
 })
 
-test('processing, completed, and local draft projects keep their existing primary actions', () => {
+test('all generated projects open the persistent workspace without triggering generation', () => {
   assert.equal(deriveTaskState({ task: { status: 'pending' } }).key, 'processing')
   assert.equal(deriveTaskState({ task: { status: 'processing' } }).key, 'processing')
   assert.equal(deriveTaskState({ task: { status: 'completed' } }).key, 'completed')
-  assert.equal(getProjectPrimaryAction({ type: 'task', status: 'processing' }), 'progress')
-  assert.equal(getProjectPrimaryAction({ type: 'task', status: 'completed' }), 'preview')
+  assert.equal(getProjectPrimaryAction({ type: 'task', status: 'processing' }), 'workspace')
+  assert.equal(getProjectPrimaryAction({ type: 'task', status: 'completed' }), 'workspace')
   assert.equal(getProjectPrimaryAction({ type: 'draft', status: 'draft' }), 'draft')
 })
 

@@ -24,6 +24,7 @@ export function VoicePicker({
   includeUnavailable = false,
   optionsProvider = '',
   compact = false,
+  disabled = false,
 }) {
   const normalized = normalizeVoiceCatalog(voices)
   const groups = groupVisibleVoices(normalized, { includeUnavailable })
@@ -55,7 +56,7 @@ export function VoicePicker({
               <button
                 type="button"
                 className="voice-card-select"
-                disabled={!cardSelectable}
+                disabled={disabled || !cardSelectable}
                 aria-pressed={checkedVoice}
                 onClick={() => onChange?.(voice.id, voice)}
               >
@@ -83,8 +84,8 @@ export function VoicePicker({
     {previewError ? <p className="voice-preview-error" role="alert"><CircleAlert size={15} />{previewError}</p> : null}
 
     {showAdvanced && selected ? <section className="voice-advanced" aria-label="配音参数">
-      <label className={`voice-speed-control${provider === 'doubao' ? ' is-wide' : ''}`}><span>语速{speedRatio ? <strong>{speedRatio}x</strong> : null}</span><select aria-label="语速档位" value={options.speed_level} onChange={event => updateOptions({ speed_level: event.target.value })}>{SPEED_OPTIONS.map(([key, label]) => <option value={key} key={key}>{provider === 'doubao' ? `${label} · ${doubaoSpeedRatio(key)}x` : label}</option>)}</select><input aria-label="语速档位滑杆" aria-valuetext={SPEED_OPTIONS[speedPosition][1]} type="range" min="0" max="4" step="1" value={speedPosition} onChange={event => updateOptions({ speed_level: speedLevelAtPosition(event.target.value) })} /><span className="voice-speed-ticks" aria-hidden="true">{SPEED_OPTIONS.map(([key, label]) => <small className={key === options.speed_level ? 'is-active' : ''} key={key}>{label}</small>)}</span><small className="voice-speed-hint">下拉档位与滑杆同步，试听和最终配音使用同一语速</small></label>
-      {provider === 'mimo' ? <label className="voice-style-field"><span>风格指令</span><input value={options.style_prompt} maxLength="300" placeholder="例如：轻松、有感情，适合短视频旁白" onChange={event => updateOptions({ style_prompt: event.target.value })} /></label> : null}
+      <label className={`voice-speed-control${provider === 'doubao' ? ' is-wide' : ''}`}><span>语速{speedRatio ? <strong>{speedRatio}x</strong> : null}</span><select aria-label="语速档位" value={options.speed_level} disabled={disabled} onChange={event => updateOptions({ speed_level: event.target.value })}>{SPEED_OPTIONS.map(([key, label]) => <option value={key} key={key}>{provider === 'doubao' ? `${label} · ${doubaoSpeedRatio(key)}x` : label}</option>)}</select><input aria-label="语速档位滑杆" aria-valuetext={SPEED_OPTIONS[speedPosition][1]} type="range" min="0" max="4" step="1" value={speedPosition} disabled={disabled} onChange={event => updateOptions({ speed_level: speedLevelAtPosition(event.target.value) })} /><span className="voice-speed-ticks" aria-hidden="true">{SPEED_OPTIONS.map(([key, label]) => <small className={key === options.speed_level ? 'is-active' : ''} key={key}>{label}</small>)}</span><small className="voice-speed-hint">下拉档位与滑杆同步，试听和最终配音使用同一语速</small></label>
+      {provider === 'mimo' ? <label className="voice-style-field"><span>风格指令</span><input value={options.style_prompt} maxLength="300" disabled={disabled} placeholder="例如：轻松、有感情，适合短视频旁白" onChange={event => updateOptions({ style_prompt: event.target.value })} /></label> : null}
     </section> : null}
   </div>
 }

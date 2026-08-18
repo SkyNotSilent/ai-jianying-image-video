@@ -47,7 +47,7 @@ import { ratioClassName } from '../utils/taskState'
 import { normalizeSubtitleText, secondsToLabel, segmentDuration } from './previewUtils'
 import { SettingsPage } from './SettingsPage'
 import {
-  areAllSegmentAssetsReady,
+  deriveWorkspaceControls,
   isSegmentPreviewReady,
   nextPreviewIndex,
   previewPlaybackStartIndex,
@@ -184,6 +184,7 @@ export function WorkspacePage() {
   const workspaceRef = useRef(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
+  const [missingTask, setMissingTask] = useState(false)
   const [selectedIndex, setSelectedIndex] = useState(() => Number(localStorage.getItem(`insightcut:selected:${taskId}`) || 0))
   const [settingsOpen, setSettingsOpen] = useState(true)
   const [mobilePane, setMobilePane] = useState('preview')
@@ -227,9 +228,10 @@ export function WorkspacePage() {
     if (!quiet) {
       setLoading(true)
       setLoadError('')
+      setMissingTask(false)
     }
     try {
-      const data = applyPendingEdits(await getTaskWorkspace(taskId))
+      const data = applyPendingEdits(await getTaskWorkspace(taskId, { silent: true }))
       setWorkspace(data)
       workspaceRef.current = data
       const safeIndex = Math.max(0, Math.min(selectedIndex, Math.max((data.segments?.length || 1) - 1, 0)))
@@ -247,9 +249,24 @@ export function WorkspacePage() {
       localStorage.setItem(LAST_WORKSPACE_KEY, JSON.stringify({ taskId, name: data.name, path: `/workspace/${taskId}` }))
       window.dispatchEvent(new Event('insightcut:workspace'))
       setLoadError('')
+      setMissingTask(false)
       return data
     } catch (error) {
-      if (!quiet) setLoadError(error?.response?.data?.detail || '工作台加载失败')
+      if (error?.response?.status === 404) {
+        try {
+          const recent = JSON.parse(localStorage.getItem(LAST_WORKSPACE_KEY) || 'null')
+          if (recent?.taskId === taskId) {
+            localStorage.removeItem(LAST_WORKSPACE_KEY)
+            window.dispatchEvent(new Event('insightcut:workspace'))
+          }
+        } catch {
+          localStorage.removeItem(LAST_WORKSPACE_KEY)
+        }
+        setMissingTask(true)
+        setWorkspace(null)
+        workspaceRef.current = null
+        setLoadError('项目不存在或已经被删除')
+      } else if (!quiet) setLoadError(error?.response?.data?.detail || '工作台加载失败')
       return null
     } finally {
       if (!quiet) setLoading(false)
@@ -261,7 +278,7 @@ export function WorkspacePage() {
     Promise.all([
       loadWorkspace(),
       getVoices({ include_disabled: true }).catch(() => []),
-      getExportState(taskId).catch(() => null),
+      getExportState(taskId, { silent: true }).catch(() => null),
       getConfig().catch(() => null),
     ]).then(([, voiceList, nextExport, config]) => {
       if (!active) return
@@ -332,22 +349,14 @@ export function WorkspacePage() {
     && workspace?.ratio
     && segments.every(segment => segment.prompt_status === 'completed' && segment.image_prompt),
   )
-  const allAssetsReady = areAllSegmentAssetsReady(segments)
-  const assetIssueCount = segments.reduce((count, segment) => (
-    count
-    + (segment.image_status === 'completed' && segment.image_url ? 0 : 1)
-    + (segment.audio_status === 'completed' && segment.audio_url ? 0 : 1)
-  ), 0)
-  const isRecoverableStage = ['interrupted', 'failed'].includes(workspace?.stage)
-  const canEnterExport = allAssetsReady
-  const recoveryActionLabel = !segments.length
-    ? '重新开始生成'
-    : allAssetsReady
-      ? '完成生产并进入预览'
-      : `重试 ${assetIssueCount} 个缺失或失败素材`
-  const recoverySummary = !segments.length
-    ? '生成在文案阶段中断，可从原始内容重新开始'
-    : `图片 ${workspace?.progress?.images_ready || 0}/${segments.length} · 配音 ${workspace?.progress?.audio_ready || 0}/${segments.length}${allAssetsReady ? ' · 素材齐全，待完成生产' : ` · ${assetIssueCount} 项待重试`}`
+  const {
+    isRecoverable: isRecoverableStage,
+    canResume,
+    recoveryLabel: recoveryActionLabel,
+    recoverySummary,
+    canEnterExport,
+    canRenderFullVideo,
+  } = deriveWorkspaceControls(workspace || {})
   const isPlanning = workspace?.stage === 'planning'
   const editable = !isPlanning && workspace?.stage !== 'generating_assets'
   const staleSegments = useMemo(
@@ -678,7 +687,7 @@ export function WorkspacePage() {
   }
 
   if (loading) return <main className="workspace-loading"><div className="workspace-loading-card"><span className="workspace-orbit" /><strong>正在恢复生产工作台</strong><p>分镜、提示词和已有素材正在从本地任务中载入。</p></div></main>
-  if (loadError || !workspace) return <main className="workspace-loading"><div className="workspace-error-card"><CircleAlert size={24} /><strong>工作台暂时无法打开</strong><p>{loadError}</p><button type="button" className="button button-primary" onClick={() => loadWorkspace()}>重新加载</button></div></main>
+  if (loadError || !workspace) return <main className="workspace-loading"><div className="workspace-error-card"><CircleAlert size={24} /><strong>{missingTask ? '项目已不存在' : '工作台暂时无法打开'}</strong><p>{loadError}</p><div>{!missingTask ? <button type="button" className="button button-secondary" onClick={() => loadWorkspace()}>重新加载</button> : null}<button type="button" className="button button-primary" onClick={() => navigate('/assets')}>返回项目资产</button></div></div></main>
 
   const closeSettingsPanel = () => {
     if (window.matchMedia?.('(max-width: 780px)').matches) setMobilePane('storyboard')
@@ -844,10 +853,10 @@ export function WorkspacePage() {
           </> : <div className="workspace-inspector-skeleton"><i /><i /><i /><i /><i /></div>}
         </div> : <div className="workspace-settings-panel">
           <header><div><span>全片设置</span><h2>画面与配音</h2></div><button type="button" aria-label="收起设置" onClick={closeSettingsPanel}><PanelRightClose size={18} /></button></header>
-          <section className="workspace-setting-section"><div className="workspace-setting-heading"><strong>配音音色</strong><span>试听与最终配音使用同一组语速参数</span></div><VoicePicker voices={voices} value={selectedVoice} ttsOptions={ttsOptions} onChange={(id) => { stopVoicePreview(); setSelectedVoice(id); setTtsOptions(mergeTtsOptions({}, workspace.tts_options || {}, id.startsWith('doubao:') ? 'doubao' : 'mimo')) }} onOptionsChange={(options) => { stopVoicePreview(); setTtsOptions(options) }} onPreview={previewSelectedVoice} playingVoice={voicePreviewState.playingVoice} previewLoading={voicePreviewState.loading} previewError={voicePreviewState.error} compact /></section>
-          <button type="button" className="button button-primary workspace-confirm-voice" disabled={!selectedVoice || busyAction === 'settings'} onClick={confirmVoice}>{busyAction === 'settings' ? '正在保存…' : voiceReady ? '更新全片音色' : '确认音色并返回预案'}</button>
-          <section className="workspace-setting-section"><div className="workspace-setting-heading"><strong>画面风格</strong><span>修改后自动重算系统提示词</span></div><div className="workspace-style-grid">{visualStyles.map(style => <button type="button" key={style.value} className={workspace.visual_style === style.value ? 'is-selected' : ''} onClick={() => saveWorkspaceSettings({ visual_style: style.value, voice_confirmed: voiceReady })}><img src={style.image} alt="" /><span>{style.label}</span></button>)}</div></section>
-          <section className="workspace-setting-section"><div className="workspace-setting-heading"><strong>视频比例</strong><span>已有图片会标记为待更新</span></div><div className="workspace-ratio-control">{ratioOptions.map(ratio => <button type="button" key={ratio} className={workspace.ratio === ratio ? 'is-selected' : ''} onClick={() => saveWorkspaceSettings({ ratio, voice_confirmed: voiceReady })}>{ratio}</button>)}</div></section>
+          <section className="workspace-setting-section"><div className="workspace-setting-heading"><strong>配音音色</strong><span>试听与最终配音使用同一组语速参数</span></div><VoicePicker voices={voices} value={selectedVoice} ttsOptions={ttsOptions} onChange={(id) => { stopVoicePreview(); setSelectedVoice(id); setTtsOptions(mergeTtsOptions({}, workspace.tts_options || {}, id.startsWith('doubao:') ? 'doubao' : 'mimo')) }} onOptionsChange={(options) => { stopVoicePreview(); setTtsOptions(options) }} onPreview={previewSelectedVoice} playingVoice={voicePreviewState.playingVoice} previewLoading={voicePreviewState.loading} previewError={voicePreviewState.error} disabled={!editable} compact /></section>
+          <button type="button" className="button button-primary workspace-confirm-voice" disabled={!selectedVoice || busyAction === 'settings' || !editable} onClick={confirmVoice}>{busyAction === 'settings' ? '正在保存…' : !editable ? '预案生成完成后确认音色' : voiceReady ? '更新全片音色' : '确认音色并返回预案'}</button>
+          <section className="workspace-setting-section"><div className="workspace-setting-heading"><strong>画面风格</strong><span>修改后自动重算系统提示词</span></div><div className="workspace-style-grid">{visualStyles.map(style => <button type="button" key={style.value} disabled={!editable} className={workspace.visual_style === style.value ? 'is-selected' : ''} onClick={() => saveWorkspaceSettings({ visual_style: style.value, voice_confirmed: voiceReady })}><img src={style.image} alt="" /><span>{style.label}</span></button>)}</div></section>
+          <section className="workspace-setting-section"><div className="workspace-setting-heading"><strong>视频比例</strong><span>已有图片会标记为待更新</span></div><div className="workspace-ratio-control">{ratioOptions.map(ratio => <button type="button" key={ratio} disabled={!editable} className={workspace.ratio === ratio ? 'is-selected' : ''} onClick={() => saveWorkspaceSettings({ ratio, voice_confirmed: voiceReady })}>{ratio}</button>)}</div></section>
           <section className="workspace-setting-section"><div className="workspace-setting-heading"><strong>生成策略</strong><span>保存后作为下一批生成与失败重试的默认值</span></div><div className="workspace-runtime-grid"><label><span>提示词并发</span><input type="number" min="1" max="8" value={runtimeConfig.prompt_concurrency} onChange={event => setRuntimeConfig(current => ({ ...current, prompt_concurrency: event.target.value }))} onBlur={() => setRuntimeConfig(current => normalizeRuntimeConfig(current))} /></label><label><span>配音并发</span><input type="number" min="1" max="8" value={runtimeConfig.tts_concurrency} onChange={event => setRuntimeConfig(current => ({ ...current, tts_concurrency: event.target.value }))} onBlur={() => setRuntimeConfig(current => normalizeRuntimeConfig(current))} /></label><label><span>生图并发</span><input type="number" min="1" max="8" value={runtimeConfig.image_concurrency} onChange={event => setRuntimeConfig(current => ({ ...current, image_concurrency: event.target.value }))} onBlur={() => setRuntimeConfig(current => normalizeRuntimeConfig(current))} /></label><label><span>失败后重试</span><input type="number" min="0" max="5" value={runtimeConfig.retry_count} onChange={event => setRuntimeConfig(current => ({ ...current, retry_count: event.target.value }))} onBlur={() => setRuntimeConfig(current => normalizeRuntimeConfig(current))} /></label><label><span>重试间隔（秒）</span><input type="number" min="1" max="60" value={runtimeConfig.retry_interval_seconds} onChange={event => setRuntimeConfig(current => ({ ...current, retry_interval_seconds: event.target.value }))} onBlur={() => setRuntimeConfig(current => normalizeRuntimeConfig(current))} /></label></div><p className="workspace-runtime-note">普通失败按基础间隔逐次递增；限流优先遵循服务商等待时间。Agnes 默认 8 路并发，滚动 60 秒最多派发 20 个请求。</p><button type="button" className="button button-secondary workspace-runtime-save" disabled={busyAction === 'runtime'} onClick={saveRuntimeConfig}>{busyAction === 'runtime' ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}{busyAction === 'runtime' ? '正在保存…' : '保存生成策略'}</button></section>
           <button type="button" className="button button-secondary workspace-api-button" onClick={() => navigate(`/workspace/${taskId}/settings`)}><Settings2 size={16} />打开 API 配置</button>
         </div>}
@@ -866,11 +875,11 @@ export function WorkspacePage() {
           : <span>{isRecoverableStage ? recoverySummary : voiceReady ? `全片音色：${voiceName(voices, workspace.voice_type)}` : stage.description}</span>}
       </div>
       <div>
-        {isRecoverableStage && workspace.can_resume ? <button type="button" className="button button-secondary" disabled={busyAction === 'resume'} onClick={resumeGeneration}>{busyAction === 'resume' ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}{busyAction === 'resume' ? '正在恢复…' : recoveryActionLabel}</button> : null}
+        {isRecoverableStage && canResume ? <button type="button" className="button button-secondary" disabled={busyAction === 'resume'} onClick={resumeGeneration}>{busyAction === 'resume' ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}{busyAction === 'resume' ? '正在恢复…' : recoveryActionLabel}</button> : null}
         {staleSegments.length ? <button type="button" className="button button-secondary" disabled={busyAction === 'stale'} onClick={updateStaleAssets}><RefreshCw size={16} />更新 {staleSegments.length} 段受影响素材</button> : null}
         {workspace.stage === 'awaiting_confirmation' && !voiceReady ? <button type="button" className="button button-primary" onClick={() => { setSettingsOpen(true); if (window.matchMedia?.('(max-width: 780px)').matches) setMobilePane('settings') }}><Volume2 size={16} />先确认全片音色</button> : null}
         {workspace.stage === 'awaiting_confirmation' && voiceReady ? <button type="button" className="button button-primary" disabled={!visualPlanReady || savingCount > 0 || busyAction === 'generate'} onClick={startAssets}>{busyAction === 'generate' ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}确认画面方案并生成素材</button> : null}
-        {workspace.stage === 'ready' ? <button type="button" className="button button-secondary" disabled={isRenderingFullVideo} onClick={createFullVideoPreview}>{isRenderingFullVideo ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}{isRenderingFullVideo ? '正在生成完整视频…' : exportState?.preview?.valid ? '重新生成完整视频预览' : '生成完整视频预览'}</button> : null}
+        {canRenderFullVideo ? <button type="button" className="button button-secondary" disabled={isRenderingFullVideo} onClick={createFullVideoPreview}>{isRenderingFullVideo ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}{isRenderingFullVideo ? '正在生成完整视频…' : exportState?.preview?.valid ? '重新生成完整视频预览' : '生成完整视频预览'}</button> : null}
         <button type="button" className="button button-primary" disabled={!canEnterExport} onClick={() => navigate(`/export/${taskId}`)}><Download size={16} />进入导出中心</button>
       </div>
     </footer>

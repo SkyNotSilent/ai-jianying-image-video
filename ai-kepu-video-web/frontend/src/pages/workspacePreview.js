@@ -16,6 +16,40 @@ export function areAllSegmentAssetsReady(segments) {
   )
 }
 
+export function deriveWorkspaceControls(workspace = {}) {
+  const segments = Array.isArray(workspace.segments) ? workspace.segments : []
+  const isRecoverable = ['interrupted', 'failed'].includes(workspace.stage)
+  const allAssetsReady = areAllSegmentAssetsReady(segments)
+  const issueCount = segments.reduce((count, segment) => (
+    count
+    + (segment.image_status === 'completed' && segment.image_url ? 0 : 1)
+    + (segment.audio_status === 'completed' && segment.audio_url ? 0 : 1)
+  ), 0)
+  const recoveryLabel = workspace.recovery?.label || (
+    !segments.length
+      ? '重新开始生成'
+      : allAssetsReady
+        ? '完成生产并进入预览'
+        : `重试 ${issueCount} 个缺失或失败素材`
+  )
+  const recoverySummary = workspace.recovery?.description || (
+    !segments.length
+      ? '生成在文案阶段中断，可从原始内容重新开始'
+      : `图片 ${workspace.progress?.images_ready || 0}/${segments.length} · 配音 ${workspace.progress?.audio_ready || 0}/${segments.length}${allAssetsReady ? ' · 素材齐全，待完成生产' : ` · ${issueCount} 项待重试`}`
+  )
+
+  return {
+    isRecoverable,
+    canResume: Boolean(isRecoverable && (workspace.recovery?.allowed ?? workspace.can_resume)),
+    recoveryLabel,
+    recoverySummary,
+    canEnterExport: Boolean(workspace.capabilities?.enter_export ?? allAssetsReady),
+    canRenderFullVideo: Boolean(
+      workspace.capabilities?.full_video ?? (workspace.stage === 'ready' && allAssetsReady),
+    ),
+  }
+}
+
 export function nextPreviewIndex(segments, currentIndex) {
   const nextIndex = Number(currentIndex) + 1
   if (!Array.isArray(segments) || nextIndex >= segments.length) return null

@@ -1848,7 +1848,210 @@ def _workspace_stage(task_row: dict) -> str:
     return "planning"
 
 
+def _workspace_file_ready(path: Optional[str]) -> bool:
+    if not path:
+        return False
+    try:
+        candidate = Path(path)
+        if candidate.is_file():
+            return True
+        if not candidate.is_absolute():
+            return (Config.BASE_DIR / candidate).is_file()
+    except (OSError, RuntimeError):
+        return False
+    return False
+
+
+def _workspace_draft_ready(task_row: dict) -> bool:
+    result = task_row.get("result") or {}
+    draft_path = result.get("draft_path")
+    if not draft_path:
+        return False
+    try:
+        candidate = Path(draft_path)
+        if candidate.exists():
+            return True
+        if not candidate.is_absolute():
+            return (Config.BASE_DIR / candidate).exists()
+    except (OSError, RuntimeError):
+        return False
+    return False
+
+
+def _workspace_output_dir(task, segments: List[dict]) -> Path:
+    result = getattr(task, "result", None)
+    if result and result.draft_path:
+        return Path(result.draft_path)
+    for segment in segments:
+        for field in ("image_path", "audio_path"):
+            raw_path = segment.get(field)
+            if not raw_path:
+                continue
+            path = Path(raw_path)
+            if path.parent.name in {"images", "voiceovers", "audio"}:
+                return path.parent.parent
+    name = getattr(task, "name", None) or getattr(task, "theme", None) or task.task_id
+    return Config.BASE_DIR / "output" / task.task_id / _safe_draft_name(name, task.task_id)
+
+
+def _ensure_workspace_mutable(task_row: dict) -> None:
+    if task_row.get("status") == TaskStatus.PROCESSING.value:
+        raise HTTPException(status_code=409, detail="任务正在生成，请等待当前阶段完成后再修改")
+
+
+def _workspace_health(task_row: dict, segments: List[dict]) -> dict:
+    segment_count = len(segments)
+    prompts_ready = sum(
+        1 for segment in segments if str(segment.get("image_prompt") or "").strip()
+    )
+    images_ready = sum(
+        1
+        for segment in segments
+        if segment.get("image_status") == "completed"
+        and _workspace_file_ready(segment.get("image_path"))
+    )
+    audio_ready = sum(
+        1
+        for segment in segments
+        if segment.get("audio_status") == "completed"
+        and _workspace_file_ready(segment.get("audio_path"))
+    )
+    return {
+        "segments": segment_count,
+        "prompts_ready": prompts_ready,
+        "missing_prompts": max(0, segment_count - prompts_ready),
+        "images_ready": images_ready,
+        "missing_images": max(0, segment_count - images_ready),
+        "audio_ready": audio_ready,
+        "missing_audio": max(0, segment_count - audio_ready),
+        "plan_complete": bool(segment_count and prompts_ready == segment_count),
+        "assets_complete": bool(
+            segment_count
+            and images_ready == segment_count
+            and audio_ready == segment_count
+        ),
+        "draft_ready": _workspace_draft_ready(task_row),
+    }
+
+
+def _reconcile_workspace_state(task_row: dict, segments: List[dict]) -> dict:
+    """Repair impossible persisted states before exposing workspace actions."""
+    if task_row.get("execution_mode") != "review_first":
+        return task_row
+
+    task_id = task_row["task_id"]
+    status = task_row.get("status")
+    phase = str(task_row.get("workflow_phase") or "")
+    health = _workspace_health(task_row, segments)
+    next_phase = None
+    next_status = None
+    next_step = None
+    error = None
+
+    if status == TaskStatus.COMPLETED.value and not (
+        health["plan_complete"] and health["assets_complete"] and health["draft_ready"]
+    ):
+        next_status = TaskStatus.INTERRUPTED.value
+        if not health["plan_complete"]:
+            next_phase = "planning"
+            next_step = "image_prompt_generation" if segments else "text_generation"
+            error = "检测到预案内容不完整，已保留现有内容，可继续生成"
+        else:
+            next_phase = "generating_assets"
+            next_step = "draft_building" if health["assets_complete"] else "image_generation"
+            error = (
+                "检测到生产草稿缺失，可使用现有素材恢复"
+                if health["assets_complete"]
+                else "检测到本地素材缺失，可重新生成缺失部分"
+            )
+    elif status == TaskStatus.AWAITING_CONFIRMATION.value and not health["plan_complete"]:
+        next_status = TaskStatus.INTERRUPTED.value
+        next_phase = "planning"
+        next_step = "image_prompt_generation" if segments else "text_generation"
+        error = "预案尚未完整生成，已切换为可恢复状态"
+    elif (
+        status in {TaskStatus.FAILED.value, TaskStatus.INTERRUPTED.value}
+        and phase == "awaiting_confirmation"
+        and health["plan_complete"]
+    ):
+        next_status = TaskStatus.AWAITING_CONFIRMATION.value
+        next_phase = "awaiting_confirmation"
+        next_step = "awaiting_confirmation"
+        error = None
+
+    if not next_status:
+        return task_row
+
+    mysql_client.update_task_status(task_id, next_status, next_step, error)
+    mysql_client.update_task_workflow(
+        task_id,
+        next_phase,
+        status=next_status,
+        current_step=next_step,
+    )
+    task_manager.invalidate_task_cache(task_id)
+    return mysql_client.get_task(task_id) or task_row
+
+
+def _workspace_recovery(task_row: dict, stage: str, health: dict) -> dict:
+    can_resume = bool(
+        stage in {TaskStatus.FAILED.value, TaskStatus.INTERRUPTED.value}
+        and (task_row.get("theme") or task_row.get("script_text") or health["segments"])
+    )
+    if not can_resume:
+        return {"allowed": False, "mode": None, "label": None, "description": None}
+    if not health["segments"]:
+        return {
+            "allowed": True,
+            "mode": "restart_planning",
+            "label": "重新开始生成",
+            "description": "生成在文案阶段中断，可从原始内容重新开始",
+        }
+    if health["missing_prompts"]:
+        count = health["missing_prompts"]
+        return {
+            "allowed": True,
+            "mode": "resume_planning",
+            "label": f"继续生成 {count} 段提示词",
+            "description": f"已有内容已保存，仍有 {count} 段提示词待生成",
+        }
+    missing_assets = health["missing_images"] + health["missing_audio"]
+    if missing_assets:
+        return {
+            "allowed": True,
+            "mode": "retry_assets",
+            "label": f"重试 {missing_assets} 个缺失或失败素材",
+            "description": (
+                f"图片 {health['images_ready']}/{health['segments']} · "
+                f"配音 {health['audio_ready']}/{health['segments']} · "
+                f"{missing_assets} 项待重试"
+            ),
+        }
+    return {
+        "allowed": True,
+        "mode": "finalize",
+        "label": "完成生产并进入预览",
+        "description": "图片与配音均已齐全，待恢复生产草稿",
+    }
+
+
 def _workspace_segment_payload(segment: dict, request: Request) -> dict:
+    image_file_ready = _workspace_file_ready(segment.get("image_path"))
+    audio_file_ready = _workspace_file_ready(segment.get("audio_path"))
+    image_status = segment.get("image_status") or (
+        "completed" if image_file_ready else "pending"
+    )
+    audio_status = segment.get("audio_status") or (
+        "completed" if audio_file_ready else "pending"
+    )
+    image_error = segment.get("image_error")
+    audio_error = segment.get("audio_error")
+    if image_status == "completed" and not image_file_ready:
+        image_status = "failed"
+        image_error = image_error or "本地图片文件缺失，请重新生成"
+    if audio_status == "completed" and not audio_file_ready:
+        audio_status = "failed"
+        audio_error = audio_error or "本地音频文件缺失，请重新生成"
     payload = {
         "id": segment.get("id"),
         "task_id": segment.get("task_id"),
@@ -1861,12 +2064,18 @@ def _workspace_segment_payload(segment: dict, request: Request) -> dict:
         "prompt_error": segment.get("prompt_error"),
         "prompt_manual": bool(segment.get("prompt_manual")),
         "prompt_needs_review": bool(segment.get("prompt_needs_review")),
-        "image_url": _normalize_local_media_url(segment.get("image_url"), request),
-        "audio_url": _normalize_local_media_url(segment.get("audio_url"), request),
-        "image_status": segment.get("image_status") or "pending",
-        "image_error": segment.get("image_error"),
-        "audio_status": segment.get("audio_status") or "pending",
-        "audio_error": segment.get("audio_error"),
+        "image_url": (
+            _normalize_local_media_url(segment.get("image_url"), request)
+            or _local_media_url_from_path(segment.get("image_path"), request)
+        ) if image_file_ready else None,
+        "audio_url": (
+            _normalize_local_media_url(segment.get("audio_url"), request)
+            or _local_media_url_from_path(segment.get("audio_path"), request)
+        ) if audio_file_ready else None,
+        "image_status": image_status,
+        "image_error": image_error,
+        "audio_status": audio_status,
+        "audio_error": audio_error,
         "audio_voice_type": segment.get("audio_voice_type"),
         "audio_tts_options_json": segment.get("audio_tts_options_json"),
         "duration": segment.get("duration"),
@@ -1884,6 +2093,8 @@ async def get_task_workspace(task_id: str, request: Request):
     task_manager.fail_stale_task_data(task_row)
     task_row = mysql_client.get_task(task_id) or task_row
     segments = mysql_client.get_segments(task_id)
+    task_row = _reconcile_workspace_state(task_row, segments)
+    health = _workspace_health(task_row, segments)
     parsed_options = {}
     try:
         parsed_options = json.loads(task_row.get("tts_options_json") or "{}")
@@ -1954,16 +2165,26 @@ async def get_task_workspace(task_id: str, request: Request):
             "prompts_failed": sum(
                 1 for segment in segments if segment.get("prompt_status") == "failed"
             ),
-            "images_ready": sum(1 for segment in segments if segment.get("image_path")),
-            "audio_ready": sum(1 for segment in segments if segment.get("audio_path")),
+            "images_ready": health["images_ready"],
+            "audio_ready": health["audio_ready"],
+        },
+        "health": health,
+        "recovery": _workspace_recovery(task_row, stage, health),
+        "capabilities": {
+            "instant_preview": any(
+                segment.get("image_status") == "completed"
+                and _workspace_file_ready(segment.get("image_path"))
+                and segment.get("audio_status") == "completed"
+                and _workspace_file_ready(segment.get("audio_path"))
+                for segment in segments
+            ),
+            "full_video": bool(health["assets_complete"] and health["draft_ready"]),
+            "enter_export": bool(health["images_ready"] or health["audio_ready"]),
+            "material_export": bool(health["images_ready"] or health["audio_ready"]),
         },
         "draft_url": _normalize_local_media_url(result.get("draft_url"), request),
         "error": task_row.get("error"),
-        "can_resume": bool(
-            task_row.get("status")
-            in {TaskStatus.FAILED.value, TaskStatus.INTERRUPTED.value}
-            and (task_row.get("theme") or task_row.get("script_text") or segments)
-        ),
+        "can_resume": _workspace_recovery(task_row, stage, health)["allowed"],
     }
 
 
@@ -1972,6 +2193,7 @@ async def update_task_workspace_settings(task_id: str, payload: dict = Body(...)
     task_row = mysql_client.get_task(task_id)
     if not task_row:
         raise HTTPException(status_code=404, detail="任务不存在")
+    _ensure_workspace_mutable(task_row)
     expected_version = payload.get("expected_plan_version")
     old_voice = task_row.get("voice_type") or ""
     old_style = task_row.get("style") or ""
@@ -2080,6 +2302,7 @@ async def resegment_task_workspace(task_id: str, payload: dict = Body(...)):
     task_row = mysql_client.get_task(task_id)
     if not task_row:
         raise HTTPException(status_code=404, detail="任务不存在")
+    _ensure_workspace_mutable(task_row)
     script_text = str(payload.get("script_text") or "").strip()
     if not script_text:
         raise HTTPException(status_code=400, detail="完整文案不能为空")
@@ -2107,6 +2330,13 @@ async def resegment_task_workspace(task_id: str, payload: dict = Body(...)):
         raise HTTPException(status_code=409, detail="预案已在其他页面更新，请刷新后重试")
     if next_version is None:
         raise HTTPException(status_code=500, detail="重新拆分分镜失败")
+    if not mysql_client.update_task_workflow(
+        task_id,
+        "planning",
+        status=TaskStatus.INTERRUPTED.value,
+        current_step="image_prompt_generation",
+    ):
+        raise HTTPException(status_code=500, detail="重新拆分状态保存失败")
     task_manager.invalidate_task_cache(task_id)
     outcome = task_executor.resume_task(task_id)
     return {"message": "已开始重新拆分提示词", "plan_version": next_version, "outcome": outcome}
@@ -2817,6 +3047,7 @@ async def update_segment(
     task = task_manager.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
+    _ensure_workspace_mutable(mysql_client.get_task(task_id) or {})
 
     segments = mysql_client.get_segments(task_id)
     current = next((segment for segment in segments if segment.get("segment_index") == segment_index), None)
@@ -2889,23 +3120,28 @@ async def regenerate_image(task_id: str, segment_index: int):
     if not task:
         logger.error(f"[{task_id}] 任务不存在")
         raise HTTPException(status_code=404, detail="任务不存在")
+    _ensure_workspace_mutable(mysql_client.get_task(task_id) or {})
 
     logger.info(f"[{task_id}] 任务主题: {task.theme}")
-    logger.info(f"[{task_id}] 草稿路径: {task.result.draft_path}")
 
     segments = mysql_client.get_segments(task_id)
-    if segment_index >= len(segments):
-        logger.error(f"[{task_id}] 段落索引超出范围: {segment_index} >= {len(segments)}")
+    segment = next(
+        (item for item in segments if item.get("segment_index") == segment_index),
+        None,
+    )
+    if not segment:
+        logger.error(f"[{task_id}] 段落不存在: {segment_index}")
         raise HTTPException(status_code=404, detail="段落不存在")
-
-    segment = segments[segment_index]
+    output_dir = _workspace_output_dir(task, segments)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"[{task_id}] 工作目录: {output_dir}")
     logger.info(f"[{task_id}] 段落文本: {segment['text']}")
 
     # 重新生成图片
     from src.core.pipeline import VideoEditorPipeline
     logger.info(f"[{task_id}] 创建 VideoEditorPipeline...")
     canvas = _task_canvas(task)
-    pipeline = VideoEditorPipeline(theme=task.theme, output_dir=task.result.draft_path, canvas=canvas)
+    pipeline = VideoEditorPipeline(theme=task.theme, output_dir=str(output_dir), canvas=canvas)
 
     # 生成图像 prompt
     logger.info(f"[{task_id}] 生成图像描述...")
@@ -2962,7 +3198,9 @@ async def regenerate_image(task_id: str, segment_index: int):
     mysql_client.update_segment(task_id, segment_index, {
         'image_prompt': image_prompt,
         'image_path': image_path,
-        'image_url': image_url
+        'image_url': image_url,
+        'image_status': 'completed',
+        'image_error': None,
     })
     _record_asset(
         task_id,
@@ -3004,12 +3242,17 @@ async def regenerate_audio(
     task = task_manager.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
+    _ensure_workspace_mutable(mysql_client.get_task(task_id) or {})
 
     segments = mysql_client.get_segments(task_id)
-    if segment_index >= len(segments):
+    segment = next(
+        (item for item in segments if item.get("segment_index") == segment_index),
+        None,
+    )
+    if not segment:
         raise HTTPException(status_code=404, detail="段落不存在")
-
-    segment = segments[segment_index]
+    output_dir = _workspace_output_dir(task, segments)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     body_voice = payload.voice_type if payload else None
     requested_voice = body_voice or voice_type
@@ -3035,7 +3278,7 @@ async def regenerate_audio(
     # 重新生成音频
     from src.core.pipeline import VideoEditorPipeline
     logger.info(f"[{task_id}] 创建 VideoEditorPipeline...")
-    pipeline = VideoEditorPipeline(theme=task.theme, output_dir=task.result.draft_path, canvas=_task_canvas(task))
+    pipeline = VideoEditorPipeline(theme=task.theme, output_dir=str(output_dir), canvas=_task_canvas(task))
 
     import time
     timestamp = int(time.time())
@@ -3071,6 +3314,8 @@ async def regenerate_audio(
         'audio_url': audio_url,
         'audio_voice_type': effective_voice,
         'audio_tts_options_json': json.dumps(effective_options, ensure_ascii=False),
+        'audio_status': 'completed',
+        'audio_error': None,
     })
     _record_asset(
         task_id,
