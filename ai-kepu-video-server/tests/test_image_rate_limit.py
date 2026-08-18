@@ -1,5 +1,23 @@
+from types import SimpleNamespace
+
 from src.media import image_generator
 from src.media.image_generator import ImageGenerator
+
+
+def test_image_retry_delay_uses_configured_interval_for_regular_failures():
+    generator = object.__new__(ImageGenerator)
+    generator.retry_interval_seconds = 7
+
+    assert generator._retry_delay(None, attempt=0) == 7
+    assert generator._retry_delay(None, attempt=1) == 14
+
+
+def test_image_retry_delay_prefers_provider_retry_after_for_rate_limits():
+    generator = object.__new__(ImageGenerator)
+    generator.retry_interval_seconds = 7
+    response = SimpleNamespace(status_code=429, headers={"retry-after": "11"})
+
+    assert generator._retry_delay(response, attempt=2) == 11
 
 
 def test_image_rate_limiter_allows_measured_eight_request_burst(monkeypatch):

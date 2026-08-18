@@ -77,7 +77,11 @@ def _wait_for_llm_throttle() -> None:
 def _run_completion_with_retries(completion, kwargs):
     """Use sensitive request state internally and return only safe values."""
 
-    retry_count = int(Config.generation_config().get("retry_count", 2))
+    generation_config = Config.generation_config()
+    retry_count = int(generation_config.get("retry_count", 2))
+    retry_interval = max(
+        1, min(60, int(generation_config.get("retry_interval_seconds", 5)))
+    )
     max_attempts = max(1, min(6, retry_count + 1))
     for attempt in range(max_attempts):
         _wait_for_llm_throttle()
@@ -86,7 +90,7 @@ def _run_completion_with_retries(completion, kwargs):
             return response.choices[0].message.content, None
         except Exception as error:
             is_rate_limited = _error_status_code(error) == 429
-            wait_time = (attempt + 1) * 5
+            wait_time = (attempt + 1) * retry_interval
             if is_rate_limited:
                 wait_time = max(wait_time, _retry_after_seconds(error) or 0)
                 _pause_llm_requests(wait_time)

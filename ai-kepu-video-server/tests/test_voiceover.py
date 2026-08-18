@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from src.config import Config
 from src.draft.voice_preview import VoicePreviewService
 from src.draft.voiceover import VoiceOverGenerator
 
@@ -87,6 +88,34 @@ def test_routes_doubao_per_call_and_maps_speed_volume(tmp_path, monkeypatch, tts
         "speed_ratio": 1.75,
         "volume_ratio": 1.8,
     }
+
+
+def test_doubao_regular_retry_uses_configured_interval(tmp_path, monkeypatch, tts_config):
+    attempts = 0
+    sleeps = []
+
+    def fake_post(_url, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("temporary failure")
+        return FakeResponse({"code": 3000, "data": base64.b64encode(wav_bytes()).decode()})
+
+    monkeypatch.setattr(
+        Config,
+        "generation_config",
+        classmethod(
+            lambda cls: {"retry_count": 2, "retry_interval_seconds": 4}
+        ),
+    )
+    monkeypatch.setattr("src.draft.voiceover.requests.post", fake_post)
+    monkeypatch.setattr("src.draft.voiceover.time.sleep", sleeps.append)
+
+    generator = VoiceOverGenerator(str(tmp_path), tts_config=tts_config)
+    generator.generate("测试重试", filename="retry")
+
+    assert attempts == 2
+    assert sleeps == [4]
 
 
 def test_routes_mimo_and_combines_style_with_speed_instruction(tmp_path, monkeypatch, tts_config):

@@ -56,8 +56,13 @@ class VoiceOverGenerator:
         self.default_voice = self.tts_config.get("default_voice") or Config.DOUBAO_TTS_DEFAULT_VOICE
         self.mimo_config = self.tts_config.get("mimo") or {}
         self.clone_store = clone_store
-        retry_count = Config.generation_config().get("retry_count", 2)
+        generation_config = Config.generation_config()
+        retry_count = generation_config.get("retry_count", 2)
         self.max_attempts = max(1, min(6, int(retry_count) + 1))
+        self.retry_interval_seconds = max(
+            1,
+            min(60, int(generation_config.get("retry_interval_seconds", 5))),
+        )
 
     def _clone_store(self):
         if self.clone_store is None:
@@ -208,7 +213,7 @@ class VoiceOverGenerator:
             except Exception as e:
                 if attempt == self.max_attempts - 1:
                     raise
-                wait = 10 * (attempt + 1)
+                wait = self.retry_interval_seconds * (attempt + 1)
                 logger.warning(f"TTS 请求失败（第{attempt+1}次），{wait}s 后重试: {e}")
                 time.sleep(wait)
 
@@ -302,7 +307,7 @@ class VoiceOverGenerator:
             except Exception as e:
                 if attempt == self.max_attempts - 1:
                     raise
-                wait = 10 * (attempt + 1)
+                wait = self.retry_interval_seconds * (attempt + 1)
                 logger.warning(f"小米 MiMo TTS 请求失败（第{attempt+1}次），{wait}s 后重试: {e}")
                 time.sleep(wait)
 

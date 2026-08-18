@@ -195,7 +195,7 @@ export function ProductionSetupPage() {
     { label: '生文 API', description: missingApiItems.includes('生文 API') ? '缺少 Base URL、API Key 或模型名' : `${config?.llm?.model || config?.text?.model || '当前模型'} 已配置`, ready: !missingApiItems.includes('生文 API') },
     { label: '生图 API', description: missingApiItems.includes('生图 API') ? '缺少 API URL、API Key 或模型名' : `${config?.image?.model || '当前图像模型'} 已配置`, ready: !missingApiItems.includes('生图 API') },
     { label: 'TTS API', description: missingApiItems.some(item => item.includes('TTS')) ? '缺少当前配音 provider 的必要配置' : `${draft.voice_name || config?.tts?.provider || '自动匹配'} 已配置`, ready: !missingApiItems.some(item => item.includes('TTS')) },
-    { label: '生成策略', description: '生图串行生成，遇到限速会自动等待后重试', ready: false },
+    { label: '生成策略', description: '生图按配置并发，失败时按间隔等待后重试', ready: false },
   ]
 
   return (

@@ -42,6 +42,7 @@ import {
   normalizeConcurrency,
   normalizeConfig,
   normalizeRetryCount,
+  normalizeRetryInterval,
   restoreAgnesPreset,
   restoreMimoTechnicalPreset,
   validateConfig,
@@ -688,6 +689,7 @@ export function SettingsPage({ embedded = false, onClose }) {
             <Field label="配音并发" help="范围 1-8；调高更快，也更容易触发 provider 限流。"><input type="number" min="1" max="8" step="1" value={form.generation.tts_concurrency} onChange={event => updateSection('generation', 'tts_concurrency', event.target.value)} onBlur={() => updateSection('generation', 'tts_concurrency', normalizeConcurrency(form.generation.tts_concurrency))} /></Field>
             <Field label="生图并发" help="范围 1-8，默认 8；免费账号实测支持 8 路突发，滚动 60 秒最多请求 20 次。"><input type="number" min="1" max="8" step="1" value={form.generation.image_concurrency} onChange={event => updateSection('generation', 'image_concurrency', event.target.value)} onBlur={() => updateSection('generation', 'image_concurrency', normalizeConcurrency(form.generation.image_concurrency, 8))} /></Field>
             <Field label="失败重试" help="失败后额外重试 0-5 次，默认 2；限流时仍优先遵循服务商等待时间。"><input type="number" min="0" max="5" step="1" value={form.generation.retry_count} onChange={event => updateSection('generation', 'retry_count', event.target.value)} onBlur={() => updateSection('generation', 'retry_count', normalizeRetryCount(form.generation.retry_count))} /></Field>
+            <Field label="重试间隔" help="基础间隔 1-60 秒，默认 5 秒；普通失败逐次递增，限流时优先遵循服务商等待时间。"><input type="number" min="1" max="60" step="1" value={form.generation.retry_interval_seconds} onChange={event => updateSection('generation', 'retry_interval_seconds', event.target.value)} onBlur={() => updateSection('generation', 'retry_interval_seconds', normalizeRetryInterval(form.generation.retry_interval_seconds))} /></Field>
           </ConfigSection>
         </div>
       </div>
