@@ -1,7 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { isSegmentPreviewReady, nextPreviewIndex } from '../src/pages/workspacePreview.js'
+import {
+  isSegmentPreviewReady,
+  nextPreviewIndex,
+  previewPlaybackStartIndex,
+} from '../src/pages/workspacePreview.js'
 
 const readySegment = index => ({
   segment_index: index,
@@ -28,4 +32,11 @@ test('continuous preview stops instead of skipping a segment with missing media'
 
   assert.equal(isSegmentPreviewReady(segments[1]), false)
   assert.equal(nextPreviewIndex(segments, 0), null)
+})
+
+test('a naturally completed continuous preview restarts from the first segment', () => {
+  const segments = [readySegment(0), readySegment(1), readySegment(2)]
+
+  assert.equal(previewPlaybackStartIndex(segments, 2, true), 0)
+  assert.equal(previewPlaybackStartIndex(segments, 1, false), 1)
 })

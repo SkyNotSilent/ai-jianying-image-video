@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_DURATION_US = 4_000_000  # 4s fallback
 DEFAULT_FADE_SECONDS = 0.3
+RENDER_PIPELINE_VERSION = 2
 SUBTITLE_SAFE_WIDTH_RATIO = 0.86
 SUBTITLE_MIN_LINE_CHARS = 22
 
@@ -36,6 +37,7 @@ def _load_render_config(config_path: str = "config/settings.json", canvas_overri
     border_width = 0
 
     return {
+        "pipeline_version": RENDER_PIPELINE_VERSION,
         "canvas": {
             "width": width,
             "height": height,
@@ -355,8 +357,6 @@ class FFmpegExporter:
 
         drawtext = self._drawtext_expr(text)
 
-        fade_duration = self.render_config["fade"]["seconds"]
-
         # 视频滤镜链：先缩放覆盖工作区 → 居中裁切 → Ken Burns 动画 → 缩放到目标尺寸 → 字幕
         vf = (
             f"scale={zw}:{zh}:force_original_aspect_ratio=increase,"
@@ -383,13 +383,9 @@ class FFmpegExporter:
         ]
 
         if audio_path:
-            # 音频降噪 + 淡入淡出
-            af = (
-                f"highpass=f=80,afftdn=nf=-25,"
-                f"afade=t=in:st=0:d={fade_duration},"
-                f"afade=t=out:st={duration_s - fade_duration}:d={fade_duration}"
-            )
-            cmd += ["-map", "0:v", "-map", "1:a", "-af", af]
+            # TTS 已输出统一的 24 kHz 单声道干净音频。这里不再逐段添加
+            # 高通、频谱降噪或淡入淡出，避免不同句子产生可感知的音色漂移。
+            cmd += ["-map", "0:v", "-map", "1:a"]
 
         cmd += [
             "-c:v", self._encoder,

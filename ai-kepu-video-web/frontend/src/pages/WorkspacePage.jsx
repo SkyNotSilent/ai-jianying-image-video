@@ -43,7 +43,11 @@ import { ratioOptions, visualStyles } from '../utils/projectDrafts'
 import { ratioClassName } from '../utils/taskState'
 import { normalizeSubtitleText, secondsToLabel, segmentDuration } from './previewUtils'
 import { SettingsPage } from './SettingsPage'
-import { isSegmentPreviewReady, nextPreviewIndex } from './workspacePreview'
+import {
+  isSegmentPreviewReady,
+  nextPreviewIndex,
+  previewPlaybackStartIndex,
+} from './workspacePreview'
 import './workspace-page.css'
 
 const LAST_VOICE_KEY = 'insightcut:last-voice'
@@ -88,7 +92,7 @@ function stageMeta(workspace) {
   const states = {
     awaiting_confirmation: ['预案等待确认', '检查文案、提示词与音色后再生成素材', 'review'],
     generating_assets: ['正在生成图片与配音', '完成的素材会逐段填入左侧预览', 'working'],
-    ready: ['素材已就绪', '可以即时预览、继续修改或按需生成高保真视频', 'ready'],
+    ready: ['素材已就绪', '可以即时预览、继续修改或按需生成完整视频', 'ready'],
     interrupted: ['生成已暂停', error || '已有内容已保存，可以从检查点继续', 'warning'],
     failed: ['部分流程失败', error || '已有内容仍然保留，可以修正后重试', 'warning'],
   }
@@ -158,6 +162,8 @@ export function WorkspacePage() {
   const previewTokenRef = useRef(0)
   const playbackAudioRef = useRef(null)
   const playbackRunRef = useRef(0)
+  const playbackEndedNaturallyRef = useRef(false)
+  const fullVideoRef = useRef(null)
   const [playing, setPlaying] = useState(false)
   const [previewMode, setPreviewMode] = useState('content')
   const [exportState, setExportState] = useState(null)
@@ -244,11 +250,11 @@ export function WorkspacePage() {
           window.clearInterval(timer)
           const state = await getExportState(taskId)
           setExportState(state)
-          setPreviewMode('high')
-          toast.success('高保真预览已生成')
+          setPreviewMode('full')
+          toast.success('完整视频预览已生成')
         } else if (next.status === 'failed') {
           window.clearInterval(timer)
-          toast.error(next.error || '高保真预览生成失败')
+          toast.error(next.error || '完整视频预览生成失败')
         }
       } catch {
         window.clearInterval(timer)
@@ -261,13 +267,19 @@ export function WorkspacePage() {
     saveTimersRef.current.forEach(timer => window.clearTimeout(timer))
     playbackAudioRef.current?.pause()
     voiceAudioRef.current?.pause()
+    fullVideoRef.current?.pause()
   }, [])
 
   const segments = workspace?.segments || []
   const currentSegment = segments[selectedIndex] || null
   const imageUrl = normalizeMediaUrl(currentSegment?.image_url)
-  const highFidelityUrl = normalizeMediaUrl(
-    exportState?.render?.video_url || exportState?.preview?.manifest?.preview_url || exportState?.outputs?.mp4?.url,
+  const fullVideoUrl = normalizeMediaUrl(
+    exportState?.preview?.valid
+      ? exportState?.preview?.manifest?.preview_url || exportState?.render?.video_url
+      : exportState?.outputs?.mp4?.available ? exportState?.outputs?.mp4?.url : '',
+  )
+  const isRenderingFullVideo = Boolean(
+    busyAction === 'preview' || ['pending', 'processing'].includes(previewJob?.status),
   )
   const activeStyle = visualStyles.find(style => style.value === workspace?.visual_style) || visualStyles[0]
   const stage = stageMeta(workspace)
@@ -292,11 +304,13 @@ export function WorkspacePage() {
     const segmentCount = workspaceRef.current?.segments?.length || 0
     const safe = Math.max(0, Math.min(Number(index), Math.max(segmentCount - 1, 0)))
     setSelectedIndex(safe)
+    playbackEndedNaturallyRef.current = false
     localStorage.setItem(`insightcut:selected:${taskId}`, String(safe))
   }, [taskId])
 
-  const stopPlayback = useCallback(() => {
+  const stopPlayback = useCallback(({ naturalEnd = false } = {}) => {
     playbackRunRef.current += 1
+    playbackEndedNaturallyRef.current = naturalEnd
     playbackAudioRef.current?.pause()
     playbackAudioRef.current = null
     setPlaying(false)
@@ -326,7 +340,7 @@ export function WorkspacePage() {
 
     const next = () => {
       const all = workspaceRef.current?.segments || []
-      if (index + 1 >= all.length) return stopPlayback()
+      if (index + 1 >= all.length) return stopPlayback({ naturalEnd: true })
       const nextIndex = nextPreviewIndex(all, index)
       if (nextIndex === null) {
         toast.info(`第 ${index + 2} 段素材尚未完成，连续预览已停止`)
@@ -349,13 +363,37 @@ export function WorkspacePage() {
   }, [selectSegment, stopPlayback])
 
   const togglePlayback = () => {
+    if (previewMode === 'full' && fullVideoUrl) {
+      const video = fullVideoRef.current
+      if (!video) return
+      if (!video.paused) {
+        video.pause()
+        return
+      }
+      if (video.ended || video.currentTime >= video.duration) video.currentTime = 0
+      video.play().catch(() => toast.warning('浏览器阻止了视频播放，请再次点击播放'))
+      return
+    }
     if (playing) stopPlayback()
     else {
+      const startIndex = previewPlaybackStartIndex(segments, selectedIndex, playbackEndedNaturallyRef.current)
+      if (startIndex === null) return
       const runId = playbackRunRef.current + 1
       playbackRunRef.current = runId
+      playbackEndedNaturallyRef.current = false
       setPlaying(true)
-      void playFrom(selectedIndex, runId)
+      void playFrom(startIndex, runId)
     }
+  }
+
+  const changePreviewMode = nextMode => {
+    if (nextMode === previewMode) return
+    if (previewMode === 'content') stopPlayback()
+    else {
+      fullVideoRef.current?.pause()
+      setPlaying(false)
+    }
+    setPreviewMode(nextMode)
   }
 
   const updateLocalSegment = (segmentIndex, patch) => {
@@ -534,17 +572,20 @@ export function WorkspacePage() {
     }
   }
 
-  const createHighPreview = async () => {
+  const createFullVideoPreview = async () => {
     setBusyAction('preview')
+    setPreviewMode('full')
     try {
-      const job = await createExport(taskId, { target: 'mp4', use_preview: true, auto_download: false })
+      const forceRender = Boolean(exportState?.preview?.valid)
+      const job = await createExport(taskId, { target: 'mp4', use_preview: !forceRender, auto_download: false })
       setPreviewJob(job)
       if (job.status === 'completed') {
         setExportState(await getExportState(taskId))
-        setPreviewMode('high')
-      } else toast.success('已开始生成高保真预览')
+        setPreviewMode('full')
+      } else toast.success('已开始生成完整视频预览')
     } catch (error) {
-      toast.error(error?.response?.data?.detail || '高保真预览生成失败')
+      setPreviewMode(fullVideoUrl ? 'full' : 'content')
+      toast.error(error?.response?.data?.detail || '完整视频预览生成失败')
     } finally {
       setBusyAction('')
     }
@@ -585,8 +626,23 @@ export function WorkspacePage() {
         </header>
 
         <section className={`workspace-canvas ${ratioClassName(workspace.ratio)}`}>
-          {previewMode === 'high' && highFidelityUrl
-            ? <video controls preload="metadata" src={highFidelityUrl} aria-label="高保真视频预览" />
+          {previewMode === 'full' && isRenderingFullVideo
+            ? <div className="workspace-full-video-rendering" role="status" aria-live="polite">
+                <span className="workspace-render-orbit"><i /></span>
+                <strong>正在生成完整视频预览</strong>
+                <small>{previewJob?.message || '正在合成画面、字幕与配音，请稍候'}</small>
+              </div>
+            : previewMode === 'full' && fullVideoUrl
+              ? <video
+                  ref={fullVideoRef}
+                  controls
+                  preload="metadata"
+                  src={fullVideoUrl}
+                  aria-label="完整视频预览"
+                  onPlay={() => setPlaying(true)}
+                  onPause={() => setPlaying(false)}
+                  onEnded={event => { event.currentTarget.currentTime = 0; setPlaying(false) }}
+                />
             : imageUrl
               ? <img src={imageUrl} alt={`分镜 ${selectedIndex + 1} 画面`} />
               : <div className="workspace-image-pending" style={{ backgroundImage: `url(${activeStyle?.image || ''})` }}>
@@ -599,15 +655,15 @@ export function WorkspacePage() {
         </section>
 
         <div className="workspace-player-controls">
-          <button type="button" className="workspace-icon-button" onClick={() => selectSegment(selectedIndex - 1)} disabled={selectedIndex <= 0} aria-label="上一段"><ChevronLeft size={17} /></button>
-          <button type="button" className="workspace-play-button" onClick={togglePlayback} disabled={!segments.length} aria-label={playing ? '暂停即时预览' : '播放即时预览'}>{playing ? <Pause size={18} /> : <Play size={18} />}</button>
-          <button type="button" className="workspace-icon-button" onClick={() => selectSegment(selectedIndex + 1)} disabled={selectedIndex >= segments.length - 1} aria-label="下一段"><ChevronRight size={17} /></button>
+          <button type="button" className="workspace-icon-button" onClick={() => selectSegment(selectedIndex - 1)} disabled={previewMode === 'full' || selectedIndex <= 0} aria-label="上一段"><ChevronLeft size={17} /></button>
+          <button type="button" className="workspace-play-button" onClick={togglePlayback} disabled={previewMode === 'full' ? !fullVideoUrl || isRenderingFullVideo : !segments.length} aria-label={playing ? `暂停${previewMode === 'full' ? '完整视频' : '即时预览'}` : `播放${previewMode === 'full' ? '完整视频' : '即时预览'}`}>{playing ? <Pause size={18} /> : <Play size={18} />}</button>
+          <button type="button" className="workspace-icon-button" onClick={() => selectSegment(selectedIndex + 1)} disabled={previewMode === 'full' || selectedIndex >= segments.length - 1} aria-label="下一段"><ChevronRight size={17} /></button>
           <div><strong>{secondsToLabel(segments.slice(0, selectedIndex).reduce((sum, segment) => sum + segmentDuration(segment), 0))}</strong><span>/ {secondsToLabel(workspace.estimated_duration)}</span></div>
         </div>
 
         <div className="workspace-preview-tabs">
-          <button type="button" className={previewMode === 'content' ? 'is-active' : ''} onClick={() => setPreviewMode('content')}>即时预览</button>
-          <button type="button" className={previewMode === 'high' ? 'is-active' : ''} disabled={!highFidelityUrl} onClick={() => setPreviewMode('high')}>高保真</button>
+          <button type="button" className={previewMode === 'content' ? 'is-active' : ''} onClick={() => changePreviewMode('content')}>分段即时预览</button>
+          <button type="button" className={previewMode === 'full' ? 'is-active' : ''} disabled={!fullVideoUrl && !isRenderingFullVideo} onClick={() => changePreviewMode('full')}>完整视频预览</button>
         </div>
 
         <dl className="workspace-metrics">
@@ -740,7 +796,7 @@ export function WorkspacePage() {
         {staleSegments.length ? <button type="button" className="button button-secondary" disabled={busyAction === 'stale'} onClick={updateStaleAssets}><RefreshCw size={16} />更新 {staleSegments.length} 段受影响素材</button> : null}
         {workspace.stage === 'awaiting_confirmation' && !voiceReady ? <button type="button" className="button button-primary" onClick={() => { setSettingsOpen(true); if (window.matchMedia?.('(max-width: 780px)').matches) setMobilePane('settings') }}><Volume2 size={16} />先确认全片音色</button> : null}
         {workspace.stage === 'awaiting_confirmation' && voiceReady ? <button type="button" className="button button-primary" disabled={!visualPlanReady || savingCount > 0 || busyAction === 'generate'} onClick={startAssets}>{busyAction === 'generate' ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}确认画面方案并生成素材</button> : null}
-        {workspace.stage === 'ready' ? <button type="button" className="button button-secondary" disabled={busyAction === 'preview' || previewJob?.status === 'processing'} onClick={createHighPreview}><Play size={16} />{exportState?.preview?.valid ? '重新生成高保真预览' : '生成高保真预览'}</button> : null}
+        {workspace.stage === 'ready' ? <button type="button" className="button button-secondary" disabled={isRenderingFullVideo} onClick={createFullVideoPreview}>{isRenderingFullVideo ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}{isRenderingFullVideo ? '正在生成完整视频…' : exportState?.preview?.valid ? '重新生成完整视频预览' : '生成完整视频预览'}</button> : null}
         <button type="button" className="button button-primary" disabled={!canEnterExport} onClick={() => navigate(`/export/${taskId}`)}><Download size={16} />进入导出中心</button>
       </div>
     </footer>

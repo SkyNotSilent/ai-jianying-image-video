@@ -255,15 +255,15 @@ export function PreviewPage() {
           setPreviewJob(nextJob)
           setExportState(nextState)
           setPreviewMode('high')
-          toast.success('高保真预览已生成，可直接下载同一份 MP4')
+          toast.success('完整视频预览已生成，可直接下载同一份 MP4')
         } else if (nextJob.status === 'failed') {
           setPreviewJob(nextJob)
-          toast.error(nextJob.error || '高保真预览生成失败')
+          toast.error(nextJob.error || '完整视频预览生成失败')
         } else {
           setPreviewJob(nextJob)
         }
       } catch (error) {
-        if (!cancelled) console.error('轮询高保真预览失败', error)
+        if (!cancelled) console.error('轮询完整视频预览失败', error)
       } finally {
         polling = false
       }
@@ -481,9 +481,9 @@ export function PreviewPage() {
       const job = await createExport(taskId, { target: 'mp4', use_preview: !exportState?.preview?.valid, auto_download: false })
       if (!acceptsTaskRequest(requestToken)) return
       setPreviewJob(job)
-      toast.success(job.status === 'completed' ? '高保真预览已可用' : '已开始生成高保真预览')
+      toast.success(job.status === 'completed' ? '完整视频预览已可用' : '已开始生成完整视频预览')
     } catch (error) {
-      if (acceptsTaskRequest(requestToken)) toast.error(error?.response?.data?.detail || '生成高保真预览失败')
+      if (acceptsTaskRequest(requestToken)) toast.error(error?.response?.data?.detail || '生成完整视频预览失败')
     }
   }
 
@@ -530,10 +530,10 @@ export function PreviewPage() {
           {orderedSegments.length === 0 ? <EmptyState title="暂无分镜数据" description="任务可能仍在生成，或尚未保存分镜。已生成资产仍可从项目资产中恢复查看。" action={<Link className="button button-secondary" to="/assets"><FolderKanban size={16} />返回项目资产</Link>} /> : <>
             <section className="preview-player-panel">
               <header className="preview-mode-toolbar">
-                <div role="group" aria-label="预览模式"><button type="button" className={previewMode === 'content' ? 'is-active' : ''} onClick={() => setPreviewMode('content')}>内容预览</button><button type="button" className={previewMode === 'high' ? 'is-active' : ''} disabled={!exportState?.preview?.valid || !highFidelityUrl} onClick={() => setPreviewMode('high')}>高保真预览</button></div>
+                <div role="group" aria-label="预览模式"><button type="button" className={previewMode === 'content' ? 'is-active' : ''} onClick={() => setPreviewMode('content')}>内容预览</button><button type="button" className={previewMode === 'high' ? 'is-active' : ''} disabled={!exportState?.preview?.valid || !highFidelityUrl} onClick={() => setPreviewMode('high')}>完整视频预览</button></div>
                 <span className={`preview-render-state is-${exportState?.preview?.status || 'missing'}`}>{renderingPreview ? '正在渲染完整视频' : exportState?.preview?.valid ? '已与当前素材同步' : exportState?.preview?.reason === 'stale' ? '完整视频已过期' : '内容预览无需生成视频'}</span>
               </header>
-              {previewMode === 'high' && exportState?.preview?.valid && highFidelityUrl ? <div className={`preview-canvas preview-video-canvas ${ratioClassName(ratio)}`}><video controls preload="metadata" src={highFidelityUrl} aria-label="高保真完整视频预览" /></div> : <>
+              {previewMode === 'high' && exportState?.preview?.valid && highFidelityUrl ? <div className={`preview-canvas preview-video-canvas ${ratioClassName(ratio)}`}><video controls preload="metadata" src={highFidelityUrl} aria-label="完整视频预览" /></div> : <>
                 <div className={`preview-canvas ${ratioClassName(ratio)}`}>
                   {imageUrl ? <img src={imageUrl} alt={`分镜 ${selectedIndex + 1} 的画面`} /> : <ImagePlaceholder label="图片素材缺失，可上传替换或重新生成" />}
                   <p className="preview-subtitle" style={{ fontSize: `${subtitleFontSize(subtitle, ratio)}px` }}>{subtitle}</p>
@@ -573,7 +573,7 @@ export function PreviewPage() {
           </> : <EmptyState title="等待分镜" description="分镜写入后将在此处显示编辑控件。" />}
         </aside>
       </section>
-      {currentSegment ? <footer className="preview-editor-footer"><Link className="button button-secondary" to="/assets">返回项目资产</Link><button type="button" className="button button-secondary" disabled={renderingPreview} onClick={createFinalPreview}><LoaderCircle className={renderingPreview ? 'spin' : ''} size={16} />{renderingPreview ? '渲染中...' : exportState?.preview?.valid ? '重新生成高保真预览' : '生成高保真预览'}</button><button type="button" className={state.canExport ? 'button button-primary' : 'button button-secondary'} onClick={openExport}>{state.canExport ? '前往导出中心' : '查看导出状态'}</button></footer> : null}
+      {currentSegment ? <footer className="preview-editor-footer"><Link className="button button-secondary" to="/assets">返回项目资产</Link><button type="button" className="button button-secondary" disabled={renderingPreview} onClick={createFinalPreview}><LoaderCircle className={renderingPreview ? 'spin' : ''} size={16} />{renderingPreview ? '正在生成完整视频...' : exportState?.preview?.valid ? '重新生成完整视频预览' : '生成完整视频预览'}</button><button type="button" className={state.canExport ? 'button button-primary' : 'button button-secondary'} onClick={openExport}>{state.canExport ? '前往导出中心' : '查看导出状态'}</button></footer> : null}
     </main>
   )
 }

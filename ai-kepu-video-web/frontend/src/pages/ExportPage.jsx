@@ -292,7 +292,7 @@ export function ExportPage() {
       </header>
 
       <section className="delivery-status-strip" aria-label="交付状态">
-        <StatusMetric label="高保真预览" value={previewStatus} ready={state.preview?.valid} warning={state.preview?.exists && !state.preview?.valid} />
+        <StatusMetric label="完整视频预览" value={previewStatus} ready={state.preview?.valid} warning={state.preview?.exists && !state.preview?.valid} />
         <StatusMetric label="MP4 成片" value={isBusy(jobs.mp4) ? '生成中' : mp4Available ? '可下载' : state.outputs?.mp4?.stale ? '已过期' : '未生成'} ready={mp4Available} warning={state.outputs?.mp4?.stale} />
         <StatusMetric label="分镜素材" value={materialsSummary.statusLabel} ready={materialsSummary.complete} warning={materialsSummary.available && !materialsSummary.complete} />
         <StatusMetric label="剪映草稿" value={draftStatus} ready={jobs.draft_local?.status === 'completed' || draftAvailable} warning={jobs.draft_local?.status === 'failed'} />
@@ -300,7 +300,7 @@ export function ExportPage() {
 
       <div className="export-options">
         <section className={`export-option${defaultExport === 'mp4' ? ' is-preferred' : ''}`}>
-          <div className="export-option-title"><span><Film size={19} aria-hidden="true" /></span><div><h2>直接 MP4 视频</h2><p>{mp4Available ? '当前高保真预览就是这份 MP4，下载不会重复渲染。' : state.outputs?.mp4?.stale ? '素材已变更，需要重新渲染当前版本。' : '生成一次后会自动下载，并同时成为高保真预览。'}</p></div></div>
+          <div className="export-option-title"><span><Film size={19} aria-hidden="true" /></span><div><h2>直接 MP4 视频</h2><p>{mp4Available ? '当前完整视频预览就是这份 MP4，下载不会重复渲染。' : state.outputs?.mp4?.stale ? '素材已变更，需要重新渲染当前版本。' : '生成一次后会自动下载，并同时成为完整视频预览。'}</p></div></div>
           <JobState job={jobs.mp4} fallback="尚未创建 MP4 导出任务" />
           <div className="export-actions">
             <button className="button button-primary" type="button" disabled={isBusy(jobs.mp4) || (!mp4Available && !canBuildRenderedOutputs)} onClick={mp4Available ? downloadMp4 : () => startExport('mp4')}>{isBusy(jobs.mp4) ? <LoaderCircle className="spin" size={16} aria-hidden="true" /> : mp4Available ? <Download size={16} aria-hidden="true" /> : <Film size={16} aria-hidden="true" />}{isBusy(jobs.mp4) ? '生成中...' : mp4Available ? '下载 MP4' : state.outputs?.mp4?.stale ? '重新生成并下载' : '生成并下载 MP4'}</button>

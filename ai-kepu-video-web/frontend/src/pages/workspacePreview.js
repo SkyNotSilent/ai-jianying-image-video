@@ -13,3 +13,9 @@ export function nextPreviewIndex(segments, currentIndex) {
   if (!Array.isArray(segments) || nextIndex >= segments.length) return null
   return isSegmentPreviewReady(segments[nextIndex]) ? nextIndex : null
 }
+
+export function previewPlaybackStartIndex(segments, selectedIndex, endedNaturally) {
+  if (!Array.isArray(segments) || !segments.length) return null
+  if (endedNaturally) return 0
+  return Math.max(0, Math.min(Number(selectedIndex) || 0, segments.length - 1))
+}
