@@ -11,6 +11,8 @@ import {
   normalizeVoiceCatalog,
   reconcileTtsVoiceConfig,
   resolveEnabledVoiceDefaults,
+  speedLevelAtPosition,
+  speedLevelPosition,
 } from '../src/lib/voiceCatalog.js'
 
 const catalog = [
@@ -113,6 +115,16 @@ test('uses the same doubao speed multipliers as final TTS generation', () => {
   assert.equal(doubaoSpeedRatio('fast'), 1.5)
   assert.equal(doubaoSpeedRatio('very_fast'), 1.75)
   assert.equal(doubaoSpeedRatio('unknown'), 1.25)
+})
+
+test('maps the linked speed slider to the same five speed levels', () => {
+  assert.equal(speedLevelPosition('very_slow'), 0)
+  assert.equal(speedLevelPosition('normal'), 2)
+  assert.equal(speedLevelPosition('very_fast'), 4)
+  assert.equal(speedLevelPosition('unknown'), 2)
+  assert.equal(speedLevelAtPosition(0), 'very_slow')
+  assert.equal(speedLevelAtPosition(3), 'fast')
+  assert.equal(speedLevelAtPosition(99), 'very_fast')
 })
 
 test('preview state keeps one active voice and ignores stale completions', () => {
