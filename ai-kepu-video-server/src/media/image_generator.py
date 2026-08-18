@@ -46,6 +46,8 @@ class ImageGenerator:
         self.api_key = self.image_config.get("api_key") or Config.SEEDREAM_API_KEY
         self.model = self.image_config.get("model") or Config.SEEDREAM_MODEL
         self.size = self.image_config.get("size") or "auto"
+        retry_count = Config.generation_config().get("retry_count", 2)
+        self.max_attempts = max(1, min(6, int(retry_count) + 1))
 
     def generate(
         self,
@@ -98,20 +100,20 @@ class ImageGenerator:
             payload["stream"] = False
 
         resp = None
-        for attempt in range(3):
+        for attempt in range(self.max_attempts):
             try:
                 self._wait_for_rate_limit()
                 resp = requests.post(self.api_url, headers=headers, json=payload, timeout=90)
                 resp.raise_for_status()
                 break
             except requests.HTTPError as e:
-                if attempt == 2:
+                if attempt == self.max_attempts - 1:
                     raise
                 wait_seconds = self._retry_delay(resp)
                 logger.warning(f"图像生成失败（第{attempt+1}次），{wait_seconds:.0f}秒后重试: {e}")
                 time.sleep(wait_seconds)
             except Exception as e:
-                if attempt == 2:
+                if attempt == self.max_attempts - 1:
                     raise
                 logger.warning(f"图像生成失败（第{attempt+1}次），3秒后重试: {e}")
                 time.sleep(3)
@@ -151,14 +153,14 @@ class ImageGenerator:
     def _extract_image_bytes(self, data: dict) -> bytes:
         item = data["data"][0]
         if item.get("url"):
-            # 下载图片，超时 90 秒，失败后重试 1 次
-            for attempt in range(2):
+            # 下载阶段沿用统一失败重试次数。
+            for attempt in range(self.max_attempts):
                 try:
                     img_resp = requests.get(item["url"], timeout=90)
                     img_resp.raise_for_status()
                     return img_resp.content
                 except Exception as e:
-                    if attempt == 1:
+                    if attempt == self.max_attempts - 1:
                         raise
                     logger.warning(f"图片下载失败（第{attempt+1}次），3秒后重试: {e}")
                     time.sleep(3)

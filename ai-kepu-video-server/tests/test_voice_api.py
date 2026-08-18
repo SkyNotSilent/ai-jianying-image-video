@@ -125,7 +125,7 @@ def test_preset_preview_endpoint_uses_fixed_copy_and_options(tmp_path, temp_db, 
     )
     assert result["url"].endswith("one.wav")
     assert captured["text"] == PRESET_VOICE_PREVIEW_TEXT
-    assert captured["tts_options"] == {}
+    assert captured["tts_options"] == {"speed_level": "slow"}
     assert captured["config_override"] == {"mimo": {"style_prompt": "轻松"}}
 
 

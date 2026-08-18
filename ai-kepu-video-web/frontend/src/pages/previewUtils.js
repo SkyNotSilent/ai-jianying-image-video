@@ -57,9 +57,7 @@ export function appendPromptGuidance(value) {
 
 export function normalizeSubtitleText(value) {
   const compact = String(value || '').replace(/\s+/g, ' ').trim()
-  const clean = compact
-    .replace(/^[。！？!?…，,；;、：:]+/u, '')
-    .replace(/[。！？!?…，,；;、：:\s]+$/u, '')
+  const clean = compact.replace(/[。！？!?…，,；;、：:]/gu, '').trim()
   return clean || compact
 }
 

@@ -4,7 +4,7 @@ from src.draft import voice_preview
 from src.draft.voice_preview import PRESET_VOICE_PREVIEW_TEXT, VoicePreviewService
 
 
-def test_preset_preview_is_a_stable_prebuilt_file(tmp_path, monkeypatch):
+def test_preset_preview_is_cached_per_voice_and_tts_options(tmp_path, monkeypatch):
     calls = []
 
     class FakeGenerator:
@@ -38,13 +38,22 @@ def test_preset_preview_is_a_stable_prebuilt_file(tmp_path, monkeypatch):
     second = service.generate(
         "mimo:冰糖",
         "另一段文案",
+        {"speed_level": "very_fast", "style_prompt": "夸张"},
+    )
+    slower = service.generate(
+        "mimo:冰糖",
+        "仍然使用固定试听文案",
         {"speed_level": "slow", "style_prompt": "沉稳"},
     )
 
     assert first["url"] == second["url"]
+    assert slower["url"] != first["url"]
     assert first["cached"] is False
     assert second["cached"] is True
-    assert len(calls) == 1
+    assert slower["cached"] is False
+    assert len(calls) == 2
     assert calls[0]["text"] == PRESET_VOICE_PREVIEW_TEXT
-    assert calls[0]["speed_level"] == "normal"
-    assert calls[0]["style_prompt"] == ""
+    assert calls[0]["speed_level"] == "very_fast"
+    assert calls[0]["style_prompt"] == "夸张"
+    assert calls[1]["speed_level"] == "slow"
+    assert calls[1]["style_prompt"] == "沉稳"

@@ -37,8 +37,9 @@ test('trims subtitle punctuation and appends prompt guidance only once', () => {
   assert.equal(normalizeSubtitleText('  ，，这是字幕。  '), '这是字幕')
   assert.equal(
     normalizeSubtitleText('而是问“如果我连续做三年，它会把我带到哪里？”'),
-    '而是问“如果我连续做三年，它会把我带到哪里？”',
+    '而是问“如果我连续做三年它会把我带到哪里”',
   )
+  assert.equal(normalizeSubtitleText('推荐《小岛经济学》，真的很好。'), '推荐《小岛经济学》真的很好')
 
   const first = appendPromptGuidance('人物在书桌前讲解')
   assert.match(first, /字幕安全区/u)

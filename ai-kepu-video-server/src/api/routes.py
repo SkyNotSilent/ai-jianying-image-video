@@ -1516,7 +1516,7 @@ async def preview_voice(payload: dict = Body(...)):
         return service.generate(
             voice_type,
             text,
-            {} if selection.kind == "preset" else payload.get("tts_options") or {},
+            payload.get("tts_options") or {},
             config_override=payload.get("config_override"),
         )
     except ValueError as exc:

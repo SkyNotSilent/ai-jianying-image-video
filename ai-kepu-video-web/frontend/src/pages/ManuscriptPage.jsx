@@ -31,6 +31,15 @@ function normalizeLength(value) {
   return Math.max(50, Math.min(2000, Math.round(number / 50) * 50))
 }
 
+function readLastTtsOptions() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem('insightcut:last-tts-options') || '{}')
+    return parsed && typeof parsed === 'object' ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
 export function ManuscriptPage() {
   const { draftId } = useParams()
   const navigate = useNavigate()
@@ -125,6 +134,7 @@ export function ManuscriptPage() {
         ratio: prepared.ratio || '16:9',
         length: inputMode === 'theme' ? normalizeLength(prepared.length) : 0,
         voice_type: localStorage.getItem('insightcut:last-voice') || undefined,
+        tts_options: readLastTtsOptions(),
         execution_mode: 'review_first',
         script_policy: 'verbatim',
       })

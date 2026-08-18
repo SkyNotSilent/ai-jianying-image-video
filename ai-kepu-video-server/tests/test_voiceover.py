@@ -176,9 +176,9 @@ def test_preset_preview_cache_is_stable_per_voice(
 
     assert first["cached"] is False
     assert second == {**first, "cached": True}
-    assert len(calls) == 2
+    assert len(calls) == 4
     assert changed_text["path"] == first["path"]
-    assert changed_options["path"] == first["path"]
-    assert changed_model["path"] == first["path"]
+    assert changed_options["path"] != first["path"]
+    assert changed_model["path"] != first["path"]
     assert changed_voice["path"] != first["path"]
     assert first["url"].startswith("/media/_voice_previews/")

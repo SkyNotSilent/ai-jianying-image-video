@@ -77,7 +77,9 @@ def _wait_for_llm_throttle() -> None:
 def _run_completion_with_retries(completion, kwargs):
     """Use sensitive request state internally and return only safe values."""
 
-    for attempt in range(3):
+    retry_count = int(Config.generation_config().get("retry_count", 2))
+    max_attempts = max(1, min(6, retry_count + 1))
+    for attempt in range(max_attempts):
         _wait_for_llm_throttle()
         try:
             response = completion(**kwargs)
@@ -88,8 +90,8 @@ def _run_completion_with_retries(completion, kwargs):
             if is_rate_limited:
                 wait_time = max(wait_time, _retry_after_seconds(error) or 0)
                 _pause_llm_requests(wait_time)
-            if attempt == 2:
-                logger.error("API 调用失败，已重试 3 次")
+            if attempt == max_attempts - 1:
+                logger.error("API 调用失败，已尝试 %s 次", max_attempts)
                 return None, _SAFE_LLM_FAILURE
             logger.warning(
                 "API 调用失败（第 %s 次），%s 秒后重试",

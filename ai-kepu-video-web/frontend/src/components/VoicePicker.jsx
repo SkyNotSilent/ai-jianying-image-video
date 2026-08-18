@@ -83,7 +83,7 @@ export function VoicePicker({
     {showAdvanced && selected ? <section className="voice-advanced" aria-label="配音参数">
       <label><span>语速</span><select value={options.speed_level} onChange={event => updateOptions({ speed_level: event.target.value })}>{SPEED_OPTIONS.map(([key, label]) => <option value={key} key={key}>{label}</option>)}</select></label>
       {provider === 'doubao'
-        ? <label><span>音量 <strong>{options.volume_ratio.toFixed(1)}x</strong></span><input type="range" min="0.5" max="2" step="0.1" value={options.volume_ratio} onChange={event => updateOptions({ volume_ratio: Number(event.target.value) })} /></label>
+        ? <label><span>音量 <strong>{Math.round(options.volume_ratio * 100)}%</strong></span><input type="range" min="0.5" max="2" step="0.1" value={options.volume_ratio} onChange={event => updateOptions({ volume_ratio: Number(event.target.value) })} /></label>
         : <label className="voice-style-field"><span>风格指令</span><input value={options.style_prompt} maxLength="300" placeholder="例如：轻松、有感情，适合短视频旁白" onChange={event => updateOptions({ style_prompt: event.target.value })} /></label>}
     </section> : null}
   </div>

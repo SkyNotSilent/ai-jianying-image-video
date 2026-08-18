@@ -41,6 +41,7 @@ import {
   AGNES_PRESET,
   normalizeConcurrency,
   normalizeConfig,
+  normalizeRetryCount,
   restoreAgnesPreset,
   restoreMimoTechnicalPreset,
   validateConfig,
@@ -66,7 +67,7 @@ const SECTION_LINKS = [
   { id: 'settings-llm', label: '生文模型', icon: MessageSquareText },
   { id: 'settings-image', label: 'Agnes 生图', icon: Image },
   { id: 'settings-tts', label: '配音模型', icon: Volume2 },
-  { id: 'settings-runtime', label: '生成并发', icon: Cpu },
+  { id: 'settings-runtime', label: '生成策略', icon: Cpu },
 ]
 
 export function SettingsPage({ embedded = false, onClose }) {
@@ -434,6 +435,8 @@ export function SettingsPage({ embedded = false, onClose }) {
     try {
       const result = await previewVoice({
         voice_type: voice.id,
+        tts_options: providerOptions,
+        config_override: form.tts,
       })
       playPreviewUrl(voice.id, token, result.url)
     } catch (error) {
@@ -658,7 +661,7 @@ export function SettingsPage({ embedded = false, onClose }) {
             <Field label="固定试听文案" wide><span className="settings-fixed-summary">欢迎来到 InsightCut，让我们一起把灵感变成精彩视频。</span></Field>
             <div className="settings-voice-library">
               <header><div><strong>{providerTab === 'mimo' ? 'MiMo' : '豆包'} 音色库</strong><small>全部预置音色都会出现在第二阶段；这里只设置新任务的默认音色。</small></div></header>
-              <VoicePicker voices={providerVoices} value={defaultVoiceKey} ttsOptions={providerOptions} onChange={selectDefaultVoice} onOptionsChange={updateProviderOptions} onPreview={handleVoicePreview} playingVoice={previewState.playingVoice} previewLoading={previewState.loading} previewError={previewState.error} optionsProvider={providerTab} />
+              <VoicePicker voices={providerVoices} value={defaultVoiceKey} ttsOptions={providerOptions} onChange={selectDefaultVoice} onOptionsChange={options => { stopPreview(); updateProviderOptions(options) }} onPreview={handleVoicePreview} playingVoice={previewState.playingVoice} previewLoading={previewState.loading} previewError={previewState.error} optionsProvider={providerTab} />
             </div>
             {providerTab === 'mimo' ? <div className="settings-clone-library">
               <header><div><strong>MiMo 声音克隆</strong><small>参考音频只保存在本地，试听成功后才能启用。</small></div></header>
@@ -680,10 +683,11 @@ export function SettingsPage({ embedded = false, onClose }) {
             </div>
           </ConfigSection>
 
-          <ConfigSection id="settings-runtime" icon={Cpu} title="生成并发" badge="Runtime" description="并发值会在保存前按后端约束归一化。">
+          <ConfigSection id="settings-runtime" icon={Cpu} title="生成策略" badge="Runtime" description="并发和重试设置会保存为下次任务的默认值。">
             <Field label="提示词并发" help="范围 1-8，默认 4；每段仍独立生成，过高可能触发模型限流。"><input type="number" min="1" max="8" step="1" value={form.generation.prompt_concurrency} onChange={event => updateSection('generation', 'prompt_concurrency', event.target.value)} onBlur={() => updateSection('generation', 'prompt_concurrency', normalizeConcurrency(form.generation.prompt_concurrency, 4))} /></Field>
             <Field label="配音并发" help="范围 1-8；调高更快，也更容易触发 provider 限流。"><input type="number" min="1" max="8" step="1" value={form.generation.tts_concurrency} onChange={event => updateSection('generation', 'tts_concurrency', event.target.value)} onBlur={() => updateSection('generation', 'tts_concurrency', normalizeConcurrency(form.generation.tts_concurrency))} /></Field>
             <Field label="生图并发" help="Agnes 免费限速下固定为 1。"><input type="number" value="1" min="1" max="1" disabled readOnly /></Field>
+            <Field label="失败重试" help="失败后额外重试 0-5 次，默认 2；限流时仍优先遵循服务商等待时间。"><input type="number" min="0" max="5" step="1" value={form.generation.retry_count} onChange={event => updateSection('generation', 'retry_count', event.target.value)} onBlur={() => updateSection('generation', 'retry_count', normalizeRetryCount(form.generation.retry_count))} /></Field>
           </ConfigSection>
         </div>
       </div>

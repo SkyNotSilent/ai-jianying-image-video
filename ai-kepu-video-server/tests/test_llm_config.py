@@ -102,6 +102,7 @@ def test_save_model_config_persists_normalized_llm_and_other_defaults(
     assert persisted["image"]["model"] == Config.SEEDREAM_MODEL
     assert persisted["generation"]["prompt_concurrency"] == 4
     assert persisted["generation"]["image_concurrency"] == 1
+    assert persisted["generation"]["retry_count"] == 2
 
 
 @pytest.mark.parametrize(
@@ -114,3 +115,15 @@ def test_prompt_concurrency_is_normalized(value, expected):
     Config._normalize_generation_config(config)
 
     assert config["generation"]["prompt_concurrency"] == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(None, 2), (-1, 0), (0, 0), (3, 3), (8, 5), ("bad", 2)],
+)
+def test_generation_retry_count_is_normalized(value, expected):
+    config = {"generation": {"retry_count": value}}
+
+    Config._normalize_generation_config(config)
+
+    assert config["generation"]["retry_count"] == expected

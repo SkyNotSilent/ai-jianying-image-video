@@ -23,6 +23,7 @@ import { useLocation, useNavigate, useParams } from 'react-router'
 import {
   createExport,
   generateTaskWorkspaceAssets,
+  getConfig,
   getExportJob,
   getExportState,
   getTaskWorkspace,
@@ -33,9 +34,11 @@ import {
   resegmentTaskWorkspace,
   resumeTask,
   updateSegment,
+  updateConfig,
   updateTaskWorkspaceSettings,
 } from '../api/task'
 import { VoicePicker } from '../components/VoicePicker'
+import { normalizeConcurrency, normalizeRetryCount } from '../lib/settingsConfig'
 import { toast } from '../lib/toast'
 import { mergeTtsOptions, nextPreviewState, normalizeVoiceCatalog } from '../lib/voiceCatalog'
 import { normalizeMediaUrl } from '../utils/mediaUrl'
@@ -51,7 +54,35 @@ import {
 import './workspace-page.css'
 
 const LAST_VOICE_KEY = 'insightcut:last-voice'
+const LAST_TTS_OPTIONS_KEY = 'insightcut:last-tts-options'
 const LAST_WORKSPACE_KEY = 'insightcut:last-workspace'
+const LAST_RUNTIME_KEY = 'insightcut:last-generation-runtime'
+
+function normalizeRuntimeConfig(value = {}) {
+  return {
+    prompt_concurrency: normalizeConcurrency(value.prompt_concurrency, 4),
+    tts_concurrency: normalizeConcurrency(value.tts_concurrency, 1),
+    image_concurrency: 1,
+    retry_count: normalizeRetryCount(value.retry_count, 2),
+  }
+}
+
+function readRuntimeConfig() {
+  try {
+    return normalizeRuntimeConfig(JSON.parse(localStorage.getItem(LAST_RUNTIME_KEY) || '{}'))
+  } catch {
+    return normalizeRuntimeConfig()
+  }
+}
+
+function readLastTtsOptions() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(LAST_TTS_OPTIONS_KEY) || '{}')
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
 
 function pendingKey(taskId) {
   return `insightcut:workspace-pending:${taskId}`
@@ -157,6 +188,7 @@ export function WorkspacePage() {
   const [voices, setVoices] = useState([])
   const [selectedVoice, setSelectedVoice] = useState('')
   const [ttsOptions, setTtsOptions] = useState({ speed_level: 'normal' })
+  const [runtimeConfig, setRuntimeConfig] = useState(readRuntimeConfig)
   const [voicePreviewState, setVoicePreviewState] = useState(() => nextPreviewState())
   const voiceAudioRef = useRef(null)
   const previewTokenRef = useRef(0)
@@ -202,9 +234,11 @@ export function WorkspacePage() {
       if (safeIndex !== selectedIndex) setSelectedIndex(safeIndex)
       if (!quiet) {
         const rememberedVoice = localStorage.getItem(LAST_VOICE_KEY) || ''
-        setSelectedVoice(data.voice_type || rememberedVoice)
-        setTtsOptions(mergeTtsOptions({}, data.tts_options || {}, String(data.voice_type || rememberedVoice).startsWith('doubao:') ? 'doubao' : 'mimo'))
         const hasConfirmedVoice = Boolean(data.voice_confirmed && data.voice_type)
+        const initialVoice = data.voice_type || rememberedVoice
+        const initialOptions = hasConfirmedVoice ? data.tts_options || {} : readLastTtsOptions()
+        setSelectedVoice(initialVoice)
+        setTtsOptions(mergeTtsOptions({}, initialOptions, String(initialVoice).startsWith('doubao:') ? 'doubao' : 'mimo'))
         setSettingsOpen(!hasConfirmedVoice)
         if (!hasConfirmedVoice && window.matchMedia?.('(max-width: 780px)').matches) setMobilePane('settings')
       }
@@ -226,10 +260,16 @@ export function WorkspacePage() {
       loadWorkspace(),
       getVoices({ include_disabled: true }).catch(() => []),
       getExportState(taskId).catch(() => null),
-    ]).then(([, voiceList, nextExport]) => {
+      getConfig().catch(() => null),
+    ]).then(([, voiceList, nextExport, config]) => {
       if (!active) return
       setVoices(normalizeVoiceCatalog(voiceList))
       setExportState(nextExport)
+      if (config?.generation) {
+        const normalized = normalizeRuntimeConfig(config.generation)
+        setRuntimeConfig(normalized)
+        localStorage.setItem(LAST_RUNTIME_KEY, JSON.stringify(normalized))
+      }
     })
     return () => { active = false }
   }, [taskId]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -459,7 +499,7 @@ export function WorkspacePage() {
     const token = ++previewTokenRef.current
     setVoicePreviewState(current => nextPreviewState(current, { type: 'start', voiceId: voice.id, token }))
     try {
-      const result = await previewVoice({ voice_type: voice.id })
+      const result = await previewVoice({ voice_type: voice.id, tts_options: ttsOptions })
       const audio = new Audio(normalizeMediaUrl(result.url))
       voiceAudioRef.current = audio
       audio.onended = stopVoicePreview
@@ -479,6 +519,7 @@ export function WorkspacePage() {
         expected_plan_version: workspaceRef.current?.plan_version,
       })
       if (patch.voice_type) localStorage.setItem(LAST_VOICE_KEY, patch.voice_type)
+      if (patch.tts_options) localStorage.setItem(LAST_TTS_OPTIONS_KEY, JSON.stringify(patch.tts_options))
       await loadWorkspace({ quiet: true })
       setWorkspace(current => ({ ...current, plan_version: result.plan_version, snapshot_key: result.snapshot_key }))
       return true
@@ -498,6 +539,23 @@ export function WorkspacePage() {
       setSettingsOpen(false)
       if (window.matchMedia?.('(max-width: 780px)').matches) setMobilePane('preview')
       toast.success('全片音色已确认')
+    }
+  }
+
+  const saveRuntimeConfig = async () => {
+    const normalized = normalizeRuntimeConfig(runtimeConfig)
+    setRuntimeConfig(normalized)
+    setBusyAction('runtime')
+    try {
+      const saved = await updateConfig({ generation: normalized })
+      const next = normalizeRuntimeConfig(saved?.generation || normalized)
+      setRuntimeConfig(next)
+      localStorage.setItem(LAST_RUNTIME_KEY, JSON.stringify(next))
+      toast.success('生成策略已保存，将作为后续任务和重试的默认值')
+    } catch (error) {
+      toast.error(error?.response?.data?.detail || '生成策略保存失败')
+    } finally {
+      setBusyAction('')
     }
   }
 
@@ -688,7 +746,7 @@ export function WorkspacePage() {
             <div className="workspace-preview-row is-head"><span>#</span><span>文案</span><span>时长</span><span>提示词</span><span>图片</span><span>配音</span></div>
             {!segments.length ? Array.from({ length: 4 }, (_, index) => <div className="workspace-preview-row is-skeleton" key={index}><i /><i /><i /><i /><i /><i /></div>) : segments.map((segment, index) => <button type="button" key={segment.id || segment.segment_index} className={`workspace-preview-row${index === selectedIndex ? ' is-selected' : ''}`} onClick={() => selectSegment(index)}>
               <strong>{String(index + 1).padStart(2, '0')}</strong>
-              <span>{segment.text || '等待文案'}</span>
+              <span>{normalizeSubtitleText(segment.text || '等待文案')}</span>
               <span><Clock3 size={12} />{secondsToLabel(segmentDuration(segment))}</span>
               <span className={`is-${segment.prompt_status}`}>{assetStatusLabel(segment.prompt_status)}</span>
               <span className={`is-${segment.image_status}`}>{assetStatusLabel(segment.image_status)}</span>
@@ -732,7 +790,7 @@ export function WorkspacePage() {
                 <div><strong>分镜 {index + 1}</strong><span><Clock3 size={13} />{segment.duration ? '真实' : '预计'} {secondsToLabel(segmentDuration(segment))}</span></div>
                 <span className={`workspace-segment-state is-${state.tone}`}>{state.label}</span>
               </header>
-              <p className="workspace-segment-summary">{segment.text || '等待文案'}</p>
+              <p className="workspace-segment-summary">{normalizeSubtitleText(segment.text || '等待文案')}</p>
               <div className="workspace-segment-fields">
                 <label><span>配音文案</span><textarea value={segment.text} readOnly={!editable} onClick={event => event.stopPropagation()} onChange={event => enqueueSave(segment.segment_index, { text: event.target.value })} /></label>
                 <label className={segment.prompt_status !== 'completed' ? 'is-loading' : ''}><span>生图提示词 {segment.prompt_manual ? <em>手工编辑</em> : null}</span>{segment.prompt_status === 'completed'
@@ -771,10 +829,11 @@ export function WorkspacePage() {
           </> : <div className="workspace-inspector-skeleton"><i /><i /><i /><i /><i /></div>}
         </div> : <div className="workspace-settings-panel">
           <header><div><span>全片设置</span><h2>画面与配音</h2></div><button type="button" aria-label="收起设置" onClick={closeSettingsPanel}><PanelRightClose size={18} /></button></header>
-          <section className="workspace-setting-section"><div className="workspace-setting-heading"><strong>配音音色</strong><span>选择一次作用全片，分镜可单独覆盖</span></div><VoicePicker voices={voices} value={selectedVoice} ttsOptions={ttsOptions} onChange={(id) => { setSelectedVoice(id); setTtsOptions(mergeTtsOptions({}, workspace.tts_options || {}, id.startsWith('doubao:') ? 'doubao' : 'mimo')) }} onOptionsChange={setTtsOptions} onPreview={previewSelectedVoice} playingVoice={voicePreviewState.playingVoice} previewLoading={voicePreviewState.loading} previewError={voicePreviewState.error} compact /></section>
+          <section className="workspace-setting-section"><div className="workspace-setting-heading"><strong>配音音色</strong><span>试听与最终配音使用同一组语速参数</span></div><VoicePicker voices={voices} value={selectedVoice} ttsOptions={ttsOptions} onChange={(id) => { stopVoicePreview(); setSelectedVoice(id); setTtsOptions(mergeTtsOptions({}, workspace.tts_options || {}, id.startsWith('doubao:') ? 'doubao' : 'mimo')) }} onOptionsChange={(options) => { stopVoicePreview(); setTtsOptions(options) }} onPreview={previewSelectedVoice} playingVoice={voicePreviewState.playingVoice} previewLoading={voicePreviewState.loading} previewError={voicePreviewState.error} compact /></section>
           <button type="button" className="button button-primary workspace-confirm-voice" disabled={!selectedVoice || busyAction === 'settings'} onClick={confirmVoice}>{busyAction === 'settings' ? '正在保存…' : voiceReady ? '更新全片音色' : '确认音色并返回预案'}</button>
           <section className="workspace-setting-section"><div className="workspace-setting-heading"><strong>画面风格</strong><span>修改后自动重算系统提示词</span></div><div className="workspace-style-grid">{visualStyles.map(style => <button type="button" key={style.value} className={workspace.visual_style === style.value ? 'is-selected' : ''} onClick={() => saveWorkspaceSettings({ visual_style: style.value, voice_confirmed: voiceReady })}><img src={style.image} alt="" /><span>{style.label}</span></button>)}</div></section>
           <section className="workspace-setting-section"><div className="workspace-setting-heading"><strong>视频比例</strong><span>已有图片会标记为待更新</span></div><div className="workspace-ratio-control">{ratioOptions.map(ratio => <button type="button" key={ratio} className={workspace.ratio === ratio ? 'is-selected' : ''} onClick={() => saveWorkspaceSettings({ ratio, voice_confirmed: voiceReady })}>{ratio}</button>)}</div></section>
+          <section className="workspace-setting-section"><div className="workspace-setting-heading"><strong>生成策略</strong><span>保存后作为下一批生成与失败重试的默认值</span></div><div className="workspace-runtime-grid"><label><span>提示词并发</span><input type="number" min="1" max="8" value={runtimeConfig.prompt_concurrency} onChange={event => setRuntimeConfig(current => ({ ...current, prompt_concurrency: event.target.value }))} onBlur={() => setRuntimeConfig(current => normalizeRuntimeConfig(current))} /></label><label><span>配音并发</span><input type="number" min="1" max="8" value={runtimeConfig.tts_concurrency} onChange={event => setRuntimeConfig(current => ({ ...current, tts_concurrency: event.target.value }))} onBlur={() => setRuntimeConfig(current => normalizeRuntimeConfig(current))} /></label><label><span>生图并发</span><input type="number" value="1" disabled readOnly /></label><label><span>失败后重试</span><input type="number" min="0" max="5" value={runtimeConfig.retry_count} onChange={event => setRuntimeConfig(current => ({ ...current, retry_count: event.target.value }))} onBlur={() => setRuntimeConfig(current => normalizeRuntimeConfig(current))} /></label></div><p className="workspace-runtime-note">并发范围 1–8；失败重试为额外尝试 0–5 次。Agnes 免费通道的生图并发固定为 1。</p><button type="button" className="button button-secondary workspace-runtime-save" disabled={busyAction === 'runtime'} onClick={saveRuntimeConfig}>{busyAction === 'runtime' ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}{busyAction === 'runtime' ? '正在保存…' : '保存生成策略'}</button></section>
           <button type="button" className="button button-secondary workspace-api-button" onClick={() => navigate(`/workspace/${taskId}/settings`)}><Settings2 size={16} />打开 API 配置</button>
         </div>}
       </aside>

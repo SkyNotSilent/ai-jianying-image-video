@@ -56,6 +56,8 @@ class VoiceOverGenerator:
         self.default_voice = self.tts_config.get("default_voice") or Config.DOUBAO_TTS_DEFAULT_VOICE
         self.mimo_config = self.tts_config.get("mimo") or {}
         self.clone_store = clone_store
+        retry_count = Config.generation_config().get("retry_count", 2)
+        self.max_attempts = max(1, min(6, int(retry_count) + 1))
 
     def _clone_store(self):
         if self.clone_store is None:
@@ -189,11 +191,13 @@ class VoiceOverGenerator:
             },
         }
 
-        for attempt in range(5):
+        for attempt in range(self.max_attempts):
             try:
                 resp = requests.post(self.api_url, headers=headers, json=payload, timeout=30)
                 if resp.status_code == 429:
                     wait = int(resp.headers.get("Retry-After", 30 * (attempt + 1)))
+                    if attempt == self.max_attempts - 1:
+                        resp.raise_for_status()
                     logger.warning(f"TTS 限流 429（第{attempt+1}次），等待 {wait}s 后重试")
                     time.sleep(wait)
                     continue
@@ -202,7 +206,7 @@ class VoiceOverGenerator:
             except requests.exceptions.HTTPError:
                 raise
             except Exception as e:
-                if attempt == 4:
+                if attempt == self.max_attempts - 1:
                     raise
                 wait = 10 * (attempt + 1)
                 logger.warning(f"TTS 请求失败（第{attempt+1}次），{wait}s 后重试: {e}")
@@ -281,12 +285,12 @@ class VoiceOverGenerator:
         )
 
         resp = None
-        for attempt in range(5):
+        for attempt in range(self.max_attempts):
             try:
                 resp = requests.post(endpoint, headers=headers, json=payload, timeout=90)
                 if resp.status_code == 429:
                     wait = int(resp.headers.get("Retry-After", 60))
-                    if attempt == 4:
+                    if attempt == self.max_attempts - 1:
                         resp.raise_for_status()
                     logger.warning(f"小米 MiMo TTS 限流 429（第{attempt+1}次），等待 {wait}s 后重试")
                     time.sleep(wait)
@@ -296,7 +300,7 @@ class VoiceOverGenerator:
             except requests.exceptions.HTTPError:
                 raise
             except Exception as e:
-                if attempt == 4:
+                if attempt == self.max_attempts - 1:
                     raise
                 wait = 10 * (attempt + 1)
                 logger.warning(f"小米 MiMo TTS 请求失败（第{attempt+1}次），{wait}s 后重试: {e}")
