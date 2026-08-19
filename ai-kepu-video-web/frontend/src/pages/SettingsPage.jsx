@@ -34,9 +34,11 @@ import {
   updateVoiceClone,
 } from '../api/task'
 import { AdvancedSettings } from '../components/AdvancedSettings'
+import { ConfirmDialog } from '../components/Modal'
 import { LlmProviderSettings } from '../components/LlmProviderSettings'
 import { VoicePicker } from '../components/VoicePicker'
 import { EmptyState, LoadingState } from '../components/StatusStates'
+import { EmptyStateCard } from '../components/ui/EmptyStateCard'
 import {
   AGNES_PRESET,
   normalizeConcurrency,
@@ -91,6 +93,7 @@ export function SettingsPage({ embedded = false, onClose }) {
   const [cloneConsent, setCloneConsent] = useState(false)
   const [cloneFile, setCloneFile] = useState(null)
   const [cloneBusy, setCloneBusy] = useState('')
+  const [cloneToDelete, setCloneToDelete] = useState(null)
   const [recording, setRecording] = useState(false)
   const audioRef = useRef(null)
   const previewTokenRef = useRef(0)
@@ -534,12 +537,14 @@ export function SettingsPage({ embedded = false, onClose }) {
     }
   }
 
-  const removeClone = async cloneId => {
-    if (!window.confirm('确定删除这个克隆音色吗？已被任务引用的音色会改为隐藏。')) return
+  const removeClone = async () => {
+    const cloneId = cloneToDelete?.clone_id
+    if (!cloneId || cloneBusy === `delete:${cloneId}`) return
     setCloneBusy(`delete:${cloneId}`)
     try {
       await deleteVoiceClone(cloneId)
       await refreshVoiceData()
+      setCloneToDelete(null)
       toast.success('克隆音色已处理')
     } catch (error) {
       toast.error(error?.response?.data?.detail || '删除克隆音色失败')
@@ -607,7 +612,7 @@ export function SettingsPage({ embedded = false, onClose }) {
   }
 
   if (loading) return <main className="delivery-loading"><LoadingState label="正在读取 API 配置..." /></main>
-  if (loadError) return <main className="delivery-loading"><EmptyState title="API 配置不可用" description={loadError} action={<button className="button button-primary" type="button" onClick={loadConfig}>重试</button>} /></main>
+  if (loadError) return <main className="delivery-loading"><EmptyState variant="configuration" eyebrow="配置连接" title="API 配置不可用" description={loadError} action={<button className="button button-primary" type="button" onClick={loadConfig}>重试</button>} /></main>
 
   return (
     <main className={`settings-page${embedded ? ' is-embedded' : ''}`}>
@@ -652,16 +657,16 @@ export function SettingsPage({ embedded = false, onClose }) {
             </AdvancedSettings>
           </ConfigSection>
 
-          <ConfigSection id="settings-tts" icon={Volume2} title="配音模型" badge="2 Providers" description="豆包与 MiMo 可同时启用；任务保存音色和参数快照。">
+          <ConfigSection id="settings-tts" icon={Volume2} title="配音模型" badge="2 Providers" description="豆包与 MiMo 可同时启用；每个项目会保存音色和参数快照。">
             <div className="settings-provider-switches"><label><input type="checkbox" checked={form.tts.enabled_providers.includes('doubao')} onChange={event => setProviderEnabled('doubao', event.target.checked)} /><span><strong>豆包 TTS</strong><small>预置 10 个本地音色</small></span></label><label><input type="checkbox" checked={form.tts.enabled_providers.includes('mimo')} onChange={event => setProviderEnabled('mimo', event.target.checked)} /><span><strong>小米 MiMo</strong><small>9 个预置 + 本地声音克隆</small></span></label></div>
-            <Field label="新任务默认 Provider" wide group><Segmented value={form.tts.provider} onChange={value => form.tts.enabled_providers.includes(value) ? updateTts('provider', value) : toast.warning('请先启用该 Provider')} options={[['doubao', '豆包 TTS'], ['mimo', '小米 MiMo TTS']]} /></Field>
+            <Field label="新项目默认 Provider" wide group><Segmented value={form.tts.provider} onChange={value => form.tts.enabled_providers.includes(value) ? updateTts('provider', value) : toast.warning('请先启用该 Provider')} options={[['doubao', '豆包 TTS'], ['mimo', '小米 MiMo TTS']]} /></Field>
             <Field label="当前编辑" wide group><Segmented value={providerTab} onChange={setProviderTab} options={[['doubao', '豆包配置'], ['mimo', 'MiMo 配置']]} /></Field>
             {providerTab === 'doubao'
               ? <DoubaoFields form={form} updateTts={updateTts} />
               : <MimoFields form={form} updateMimo={updateMimo} onRestore={() => setForm(current => restoreMimoTechnicalPreset(current))} />}
             <Field label="固定试听文案" wide><span className="settings-fixed-summary">欢迎来到 InsightCut，让我们一起把灵感变成精彩视频。</span></Field>
             <div className="settings-voice-library">
-              <header><div><strong>{providerTab === 'mimo' ? 'MiMo' : '豆包'} 音色库</strong><small>全部预置音色都会出现在第二阶段；这里只设置新任务的默认音色。</small></div></header>
+              <header><div><strong>{providerTab === 'mimo' ? 'MiMo' : '豆包'} 音色库</strong><small>全部预置音色都会出现在第二阶段；这里只设置新项目的默认音色。</small></div></header>
               <VoicePicker voices={providerVoices} value={defaultVoiceKey} ttsOptions={providerOptions} onChange={selectDefaultVoice} onOptionsChange={options => { stopPreview(); updateProviderOptions(options) }} onPreview={handleVoicePreview} playingVoice={previewState.playingVoice} previewLoading={previewState.loading} previewError={previewState.error} optionsProvider={providerTab} />
             </div>
             {providerTab === 'mimo' ? <div className="settings-clone-library">
@@ -674,8 +679,8 @@ export function SettingsPage({ embedded = false, onClose }) {
                 <button className="button button-primary" type="button" disabled={cloneBusy === 'create'} onClick={createClone}>{cloneBusy === 'create' ? <LoaderCircle className="spin" size={15} /> : <Upload size={15} />}创建并生成试听</button>
               </div>
               <div className="clone-record-list">
-                {clones.filter(clone => clone.status !== 'hidden').map(clone => <article key={clone.clone_id}><div><strong>{clone.name}</strong><small>{clone.status === 'ready' ? '已就绪' : clone.status === 'failed' ? `试听失败·${clone.error_message || '可重试'}` : '待生成试听'}{clone.duration ? ` · ${Number(clone.duration).toFixed(1)}s` : ''}</small></div><span className="clone-record-actions"><button type="button" disabled={cloneBusy === `preview:${clone.clone_id}`} onClick={() => retryClonePreview(clone)}><Volume2 size={14} />试听</button><button type="button" disabled={clone.status !== 'ready'} onClick={() => patchClone(clone.clone_id, { is_enabled: !clone.is_enabled })}>{clone.is_enabled ? '停用' : '启用'}</button><button type="button" onClick={() => { const name = window.prompt('修改音色名称', clone.name); if (name?.trim()) patchClone(clone.clone_id, { name: name.trim() }) }}><Pencil size={14} />重命名</button><label><RefreshCw size={14} />替换<input type="file" accept="audio/wav,audio/mpeg,audio/webm,.wav,.mp3,.webm" onChange={event => replaceClone(clone.clone_id, event.target.files?.[0])} /></label><button type="button" onClick={() => removeClone(clone.clone_id)}><Trash2 size={14} />删除</button></span></article>)}
-                {!clones.filter(clone => clone.status !== 'hidden').length ? <p>还没有克隆音色。上传或录制一段参考音频即可创建。</p> : null}
+                {clones.filter(clone => clone.status !== 'hidden').map(clone => <article key={clone.clone_id}><div><strong>{clone.name}</strong><small>{clone.status === 'ready' ? '已就绪' : clone.status === 'failed' ? `试听失败·${clone.error_message || '可重试'}` : '待生成试听'}{clone.duration ? ` · ${Number(clone.duration).toFixed(1)}s` : ''}</small></div><span className="clone-record-actions"><button type="button" disabled={cloneBusy === `preview:${clone.clone_id}`} onClick={() => retryClonePreview(clone)}><Volume2 size={14} />试听</button><button type="button" disabled={clone.status !== 'ready'} onClick={() => patchClone(clone.clone_id, { is_enabled: !clone.is_enabled })}>{clone.is_enabled ? '停用' : '启用'}</button><button type="button" onClick={() => { const name = window.prompt('修改音色名称', clone.name); if (name?.trim()) patchClone(clone.clone_id, { name: name.trim() }) }}><Pencil size={14} />重命名</button><label><RefreshCw size={14} />替换<input type="file" accept="audio/wav,audio/mpeg,audio/webm,.wav,.mp3,.webm" onChange={event => replaceClone(clone.clone_id, event.target.files?.[0])} /></label><button type="button" onClick={() => setCloneToDelete(clone)}><Trash2 size={14} />删除</button></span></article>)}
+                {!clones.filter(clone => clone.status !== 'hidden').length ? <EmptyStateCard variant="voice" eyebrow="本地音色" title="还没有克隆音色" description="使用上方表单上传或录制一段已获授权的参考音频。" compact /> : null}
               </div>
             </div> : null}
             <div className="settings-test-row">
@@ -684,7 +689,7 @@ export function SettingsPage({ embedded = false, onClose }) {
             </div>
           </ConfigSection>
 
-          <ConfigSection id="settings-runtime" icon={Cpu} title="生成策略" badge="Runtime" description="并发和重试设置会保存为下次任务的默认值。">
+          <ConfigSection id="settings-runtime" icon={Cpu} title="生成策略" badge="Runtime" description="并发和重试设置会保存为下个项目的默认值。">
             <Field label="提示词并发" help="范围 1-8，默认 4；每段仍独立生成，过高可能触发模型限流。"><input type="number" min="1" max="8" step="1" value={form.generation.prompt_concurrency} onChange={event => updateSection('generation', 'prompt_concurrency', event.target.value)} onBlur={() => updateSection('generation', 'prompt_concurrency', normalizeConcurrency(form.generation.prompt_concurrency, 4))} /></Field>
             <Field label="配音并发" help="范围 1-8；调高更快，也更容易触发 provider 限流。"><input type="number" min="1" max="8" step="1" value={form.generation.tts_concurrency} onChange={event => updateSection('generation', 'tts_concurrency', event.target.value)} onBlur={() => updateSection('generation', 'tts_concurrency', normalizeConcurrency(form.generation.tts_concurrency))} /></Field>
             <Field label="生图并发" help="范围 1-8，默认 8；免费账号实测支持 8 路突发，滚动 60 秒最多请求 20 次。"><input type="number" min="1" max="8" step="1" value={form.generation.image_concurrency} onChange={event => updateSection('generation', 'image_concurrency', event.target.value)} onBlur={() => updateSection('generation', 'image_concurrency', normalizeConcurrency(form.generation.image_concurrency, 8))} /></Field>
@@ -695,6 +700,16 @@ export function SettingsPage({ embedded = false, onClose }) {
       </div>
 
       <footer className="settings-actions"><button className="button button-secondary" type="button" disabled={saving} onClick={loadConfig}><RefreshCw size={16} aria-hidden="true" />重置</button><button className="button button-primary" type="button" disabled={saving} onClick={saveConfig}>{saving ? <LoaderCircle className="spin" size={16} aria-hidden="true" /> : <Save size={16} aria-hidden="true" />}{saving ? '保存中...' : '保存配置'}</button></footer>
+      <ConfirmDialog
+        open={Boolean(cloneToDelete)}
+        title="删除克隆音色"
+        message={`确定处理“${cloneToDelete?.name || '这个音色'}”吗？未被项目使用的参考文件会删除；已被项目引用的音色只会隐藏，历史项目仍可正常播放。`}
+        confirmLabel={cloneBusy === `delete:${cloneToDelete?.clone_id}` ? '正在处理…' : '确认删除'}
+        confirmDisabled={cloneBusy === `delete:${cloneToDelete?.clone_id}`}
+        danger
+        onConfirm={removeClone}
+        onClose={() => { if (cloneBusy !== `delete:${cloneToDelete?.clone_id}`) setCloneToDelete(null) }}
+      />
     </main>
   )
 }

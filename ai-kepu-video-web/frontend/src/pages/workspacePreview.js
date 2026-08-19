@@ -1,8 +1,8 @@
 export function isSegmentPreviewReady(segment) {
   return Boolean(
     segment
-    && segment.image_status === 'completed'
-    && segment.audio_status === 'completed'
+    && ['completed', 'stale'].includes(segment.image_status)
+    && ['completed', 'stale'].includes(segment.audio_status)
     && segment.image_url
     && segment.audio_url,
   )
@@ -12,13 +12,21 @@ export function areAllSegmentAssetsReady(segments) {
   return Boolean(
     Array.isArray(segments)
     && segments.length
-    && segments.every(isSegmentPreviewReady),
+    && segments.every(segment => (
+      segment?.image_status === 'completed'
+      && segment?.audio_status === 'completed'
+      && segment?.image_url
+      && segment?.audio_url
+    )),
   )
 }
 
 export function deriveWorkspaceControls(workspace = {}) {
   const segments = Array.isArray(workspace.segments) ? workspace.segments : []
-  const isRecoverable = ['interrupted', 'failed'].includes(workspace.stage)
+  const isRecoverable = Boolean(
+    workspace.recovery?.allowed
+    || ['interrupted', 'failed', 'awaiting_finalization'].includes(workspace.stage),
+  )
   const allAssetsReady = areAllSegmentAssetsReady(segments)
   const issueCount = segments.reduce((count, segment) => (
     count
@@ -48,6 +56,14 @@ export function deriveWorkspaceControls(workspace = {}) {
       workspace.capabilities?.full_video ?? (workspace.stage === 'ready' && allAssetsReady),
     ),
   }
+}
+
+export function recoveryActionForWorkspace(workspace = {}) {
+  const mode = workspace.recovery?.mode
+  if (mode === 'retry_assets') return 'retry_assets'
+  if (mode === 'update_stale_assets') return 'update_stale_assets'
+  if (mode === 'finalize' || mode === 'finalize_failed') return 'finalize'
+  return 'resume_planning'
 }
 
 export function nextPreviewIndex(segments, currentIndex) {

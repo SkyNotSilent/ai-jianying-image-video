@@ -37,6 +37,7 @@ request.interceptors.request.use(
   },
   error => {
     const safeError = toSafeApiError(error)
+    if (safeError.kind === 'cancelled') return Promise.reject(safeError)
     console.error(...safeApiLogArgs('[API Request Error]', safeError))
     return Promise.reject(safeError)
   }
@@ -51,6 +52,7 @@ request.interceptors.response.use(
   error => {
     const suppressToast = Boolean(error?.config?.suppressToast)
     const safeError = toSafeApiError(error)
+    if (safeError.kind === 'cancelled') return Promise.reject(safeError)
     console.error(...safeApiLogArgs('[API Response Error]', safeError))
 
     if (suppressToast) return Promise.reject(safeError)

@@ -7,6 +7,7 @@ import {
   isSegmentPreviewReady,
   nextPreviewIndex,
   previewPlaybackStartIndex,
+  recoveryActionForWorkspace,
 } from '../src/pages/workspacePreview.js'
 
 const readySegment = index => ({
@@ -78,13 +79,14 @@ test('workspace controls cover planning restart, partial retry, finalization, an
   assert.equal(partial.canEnterExport, false)
 
   const finalize = deriveWorkspaceControls({
-    stage: 'interrupted',
+    stage: 'awaiting_finalization',
     can_resume: true,
     segments: [readySegment(0)],
     recovery: { label: '完成生产并进入预览', description: '素材齐全，待完成草稿' },
     capabilities: { enter_export: true, full_video: false },
   })
   assert.equal(finalize.recoveryLabel, '完成生产并进入预览')
+  assert.equal(finalize.isRecoverable, true)
   assert.equal(finalize.canEnterExport, true)
   assert.equal(finalize.canRenderFullVideo, false)
 
@@ -96,4 +98,41 @@ test('workspace controls cover planning restart, partial retry, finalization, an
   })
   assert.equal(ready.isRecoverable, false)
   assert.equal(ready.canRenderFullVideo, true)
+})
+
+test('workspace recovery actions never route asset repair through task resume', () => {
+  assert.equal(recoveryActionForWorkspace({ recovery: { mode: 'retry_assets' } }), 'retry_assets')
+  assert.equal(recoveryActionForWorkspace({ recovery: { mode: 'update_stale_assets' } }), 'update_stale_assets')
+  assert.equal(recoveryActionForWorkspace({ recovery: { mode: 'finalize' } }), 'finalize')
+  assert.equal(recoveryActionForWorkspace({ recovery: { mode: 'finalize_failed' } }), 'finalize')
+  assert.equal(recoveryActionForWorkspace({ recovery: { mode: 'resume_planning' } }), 'resume_planning')
+})
+
+test('stale local media remains available for comparison preview', () => {
+  const stale = {
+    image_status: 'stale',
+    audio_status: 'completed',
+    image_url: '/media/old.png',
+    audio_url: '/media/ready.wav',
+  }
+
+  assert.equal(isSegmentPreviewReady(stale), true)
+  assert.equal(areAllSegmentAssetsReady([stale]), false)
+})
+
+test('backend stale recovery is the only primary recovery action even outside failed stages', () => {
+  const controls = deriveWorkspaceControls({
+    stage: 'ready',
+    segments: [],
+    recovery: {
+      allowed: true,
+      mode: 'update_stale_assets',
+      label: '更新 1 个受影响素材',
+      description: '旧素材仍可查看',
+    },
+  })
+
+  assert.equal(controls.isRecoverable, true)
+  assert.equal(controls.canResume, true)
+  assert.equal(controls.recoveryLabel, '更新 1 个受影响素材')
 })

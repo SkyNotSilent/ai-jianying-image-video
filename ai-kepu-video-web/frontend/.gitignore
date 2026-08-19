@@ -12,6 +12,8 @@ dist
 dist-ssr
 *.local
 .vite
+playwright-report
+test-results
 .env
 .env.*
 !.env.example

@@ -91,7 +91,7 @@ export function ProjectAssetsPage() {
     } catch (error) {
       console.warn('加载任务列表失败', error)
       setRemoteTasks([])
-      toast.error('加载项目任务失败，本地草稿仍可使用')
+      toast.error('加载云端项目失败，本地草稿仍可使用')
     } finally {
       setLoading(false)
     }
@@ -127,12 +127,12 @@ export function ProjectAssetsPage() {
       return {
         id: task.task_id,
         type: 'task',
-        name: task.name || task.result?.theme || task.theme || `视频任务 ${task.task_id?.slice(0, 6)}`,
+        name: task.name || task.result?.theme || task.theme || `视频项目 ${task.task_id?.slice(0, 6)}`,
         status: state.key,
         statusLabel: state.label,
         tone: state.tone,
         actionLabel: state.actionLabel,
-        provider: task.voice_type ? `TTS · ${task.voice_type}` : '生成任务',
+        provider: task.voice_type ? `TTS · ${task.voice_type}` : '生成项目',
         duration: durationSeconds ? secondsToLabel(durationSeconds) : '--:--',
         durationSeconds,
         updatedAt: formatLocalTime(task.updated_at || task.created_at || task.result?.created_at),
@@ -252,6 +252,7 @@ export function ProjectAssetsPage() {
   const deleteConfirmation = getDeleteConfirmation(projectToDelete || {})
 
   const sectionTitle = STATUS_FILTERS.find(item => item.key === statusFilter)?.label || '全部项目'
+  const isProjectLibraryEmpty = projects.length === 0
 
   return (
     <main className="assets-page">
@@ -272,7 +273,7 @@ export function ProjectAssetsPage() {
           </div>
         </header>
 
-        {loading ? <LoadingState label="正在汇总本地草稿和任务..." /> : filteredProjects.length === 0 ? <EmptyState title="暂无匹配项目" description="调整筛选条件，或创建一份新文稿。" action={<button className="button button-primary" type="button" onClick={createProject}><Plus size={16} aria-hidden="true" />新建文稿</button>} /> : (
+        {loading ? <LoadingState label="正在汇总本地草稿和项目..." /> : filteredProjects.length === 0 ? <EmptyState variant="projects" eyebrow={isProjectLibraryEmpty ? '项目档案' : '筛选结果'} title={isProjectLibraryEmpty ? '还没有项目' : '没有匹配的项目'} description={isProjectLibraryEmpty ? '从一份文稿开始，后续的分镜、素材和导出会按项目归档在这里。' : '当前筛选条件下没有结果，可以调整左侧筛选，或直接开始新文稿。'} action={<button className="button button-primary" type="button" onClick={createProject}><Plus size={16} aria-hidden="true" />新建文稿</button>} /> : (
           <div className="asset-project-grid">
             {filteredProjects.map(project => {
               const usableCover = Boolean(project.cover && !brokenCovers[project.id])

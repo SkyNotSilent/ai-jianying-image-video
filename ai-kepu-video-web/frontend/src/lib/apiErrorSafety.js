@@ -92,11 +92,20 @@ function safeCorrelationId(response, secrets = []) {
   return normalized
 }
 
+function isRequestCancellation(error) {
+  return Boolean(
+    error?.code === 'ERR_CANCELED'
+    || error?.name === 'CanceledError'
+    || error?.__CANCEL__ === true
+    || error?.kind === 'cancelled'
+  )
+}
+
 export class SafeApiError extends Error {
-  constructor({ status = null, detail = '', method = 'UNKNOWN', path = '/', correlationId = '' } = {}) {
-    super(status === null ? '网络异常' : detail || '请求失败')
+  constructor({ status = null, detail = '', method = 'UNKNOWN', path = '/', correlationId = '', cancelled = false } = {}) {
+    super(cancelled ? '请求已取消' : status === null ? '网络异常' : detail || '请求失败')
     this.name = 'SafeApiError'
-    this.kind = status === null ? 'network' : 'http'
+    this.kind = cancelled ? 'cancelled' : status === null ? 'network' : 'http'
     this.status = status
     this.method = method
     this.path = path
@@ -119,6 +128,7 @@ export function toSafeApiError(rawError) {
     method: safeMethod(config),
     path: safePath(config, secrets),
     correlationId: safeCorrelationId(response, secrets),
+    cancelled: isRequestCancellation(rawError),
   })
 }
 

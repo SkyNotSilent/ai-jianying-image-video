@@ -107,6 +107,17 @@ export function updateConfig(data) {
   })
 }
 
+export function getConfigReadiness({ voiceType, signal } = {}) {
+  return request({
+    url: '/ai/native/video/kepu/config/readiness',
+    method: 'get',
+    params: voiceType ? { voice_type: voiceType } : {},
+    suppressToast: true,
+    signal,
+    timeout: 10000,
+  })
+}
+
 export function fetchConfigModels(data) {
   return request({
     url: '/ai/native/video/kepu/config/models',
@@ -198,18 +209,21 @@ export function createTaskFromImages(formData) {
  * @param {string} taskId - 任务ID
  * @returns {Promise<Object>} 任务详情
  */
-export function getTaskStatus(taskId) {
+export function getTaskStatus(taskId, { silent = false, signal } = {}) {
   return request({
     url: `/ai/native/video/kepu/tasks/${taskId}`,
-    method: 'get'
+    method: 'get',
+    suppressToast: silent,
+    signal,
   })
 }
 
-export function getTaskWorkspace(taskId, { silent = false } = {}) {
+export function getTaskWorkspace(taskId, { silent = false, signal } = {}) {
   return request({
     url: `/ai/native/video/kepu/tasks/${taskId}/workspace`,
     method: 'get',
     suppressToast: silent,
+    signal,
   })
 }
 
@@ -241,6 +255,30 @@ export function resumeTask(taskId) {
   return request({
     url: `/ai/native/video/kepu/tasks/${taskId}/resume`,
     method: 'post'
+  })
+}
+
+export function retryTaskAssets(taskId, data) {
+  return request({
+    url: `/ai/native/video/kepu/tasks/${taskId}/retry-assets`,
+    method: 'post',
+    data
+  })
+}
+
+export function regenerateSegmentPrompt(taskId, segmentIndex, data) {
+  return request({
+    url: `/ai/native/video/kepu/tasks/${taskId}/segments/${segmentIndex}/regenerate-prompt`,
+    method: 'post',
+    data,
+  })
+}
+
+export function finalizeTaskWorkspace(taskId, data) {
+  return request({
+    url: `/ai/native/video/kepu/tasks/${taskId}/finalize`,
+    method: 'post',
+    data
   })
 }
 
@@ -285,11 +323,12 @@ export function renderPreview(taskId, segmentIndex = null) {
   })
 }
 
-export function getExportState(taskId, { silent = false } = {}) {
+export function getExportState(taskId, { silent = false, signal } = {}) {
   return request({
     url: `/ai/native/video/kepu/tasks/${taskId}/export-state`,
     method: 'get',
     suppressToast: silent,
+    signal,
   })
 }
 
@@ -301,10 +340,19 @@ export function createExport(taskId, data) {
   })
 }
 
-export function getExportJob(taskId, jobId) {
+export function getExportJob(taskId, jobId, { silent = false, signal } = {}) {
   return request({
     url: `/ai/native/video/kepu/tasks/${taskId}/exports/${jobId}`,
-    method: 'get'
+    method: 'get',
+    suppressToast: silent,
+    signal,
+  })
+}
+
+export function cancelExportJob(taskId, jobId) {
+  return request({
+    url: `/ai/native/video/kepu/tasks/${taskId}/exports/${jobId}/cancel`,
+    method: 'post',
   })
 }
 
