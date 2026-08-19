@@ -3,6 +3,7 @@ FastAPI 路由
 定义 API 端点
 """
 
+import asyncio
 import io
 import json
 import logging
@@ -32,6 +33,14 @@ from .models import (
 )
 from .task_manager import task_manager, TaskStatus
 from .task_executor import task_executor
+from .task_runtime import task_runtime
+from .error_model import (
+    ErrorCode,
+    SafeError,
+    classify_exception,
+    make_safe_error,
+    normalize_error_metadata,
+)
 from src.config import Config
 from src.database import mysql_client
 from src.export.asset_package import (
@@ -79,6 +88,10 @@ MAX_DOCUMENT_UPLOAD_BYTES = 20 * 1024 * 1024
 MAX_VOICE_REFERENCE_UPLOAD_BYTES = 20 * 1024 * 1024
 
 
+class ExportJobCancelled(RuntimeError):
+    """Internal control flow used to finish a cancelled export safely."""
+
+
 def _voice_clone_store() -> VoiceCloneStore:
     return VoiceCloneStore(Config.BASE_DIR, mysql_client)
 
@@ -89,6 +102,22 @@ def _model_dict(model, exclude_none: bool = False) -> dict:
     if hasattr(model, "model_dump"):
         return model.model_dump(exclude_none=exclude_none)
     return model.dict(exclude_none=exclude_none)
+
+
+def _public_error(
+    error: Optional[str],
+    error_code: Optional[str],
+    error_meta: Optional[dict],
+) -> tuple:
+    """Return only normalized, credential-safe error fields to clients."""
+
+    if not (error or error_code or error_meta):
+        return None, None, None
+    code = error_code or ErrorCode.UNKNOWN.value
+    if isinstance(code, ErrorCode):
+        code = code.value
+    meta = normalize_error_metadata(code, error_meta)
+    return meta["safe_message"], str(code), meta
 
 
 def _snapshot_tts_options(voice_type: str, options: Optional[dict] = None) -> dict:
@@ -292,10 +321,11 @@ def _normalize_local_media_url(url: Optional[str], request: Request) -> Optional
 
 
 def _local_media_url_from_path(path: Optional[str], request: Request) -> Optional[str]:
-    if not path:
+    resolved_file = _workspace_resolve_file(path)
+    if resolved_file is None:
         return None
     try:
-        resolved = Path(path).resolve()
+        resolved = resolved_file.resolve()
     except (OSError, RuntimeError):
         return None
 
@@ -344,8 +374,13 @@ def _file_signature(raw_path: Optional[str]) -> dict:
 def _media_fingerprint(task, segments: List[dict]) -> str:
     from src.export.ffmpeg_exporter import FFmpegExporter
 
+    task_row = mysql_client.get_task(getattr(task, "task_id", "")) or {}
     payload = {
         "ratio": _task_ratio(task),
+        "plan_version": int(task_row.get("plan_version") or 0),
+        "style": task_row.get("style") or getattr(task, "style", "") or "",
+        "voice_type": task_row.get("voice_type") or getattr(task, "voice_type", "") or "",
+        "tts_options_json": task_row.get("tts_options_json") or "",
         "canvas": _task_canvas(task),
         "render_config": FFmpegExporter.get_render_config(canvas=_task_canvas(task)),
         "settings": _file_signature(str(Config.BASE_DIR / "config" / "settings.json")),
@@ -354,6 +389,10 @@ def _media_fingerprint(task, segments: List[dict]) -> str:
             {
                 "text": seg.get("text") or "",
                 "segment_index": seg.get("segment_index"),
+                "image_prompt": seg.get("image_prompt") or "",
+                "prompt_status": seg.get("prompt_status") or "",
+                "image_status": seg.get("image_status") or "",
+                "audio_status": seg.get("audio_status") or "",
                 "image": _file_signature(seg.get("image_path")),
                 "audio": _file_signature(seg.get("audio_path")),
                 "audio_voice_type": seg.get("audio_voice_type"),
@@ -390,8 +429,17 @@ def _plan_fingerprint(task_row: dict, segments: List[dict]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _task_draft_path(task) -> Path:
+    raw_path = getattr(getattr(task, "result", None), "draft_path", None)
+    resolved = _workspace_resolve_directory(raw_path)
+    if resolved is not None:
+        return resolved
+    candidates = _workspace_storage_candidates(raw_path)
+    return candidates[0] if candidates else Path(raw_path or "")
+
+
 def _preview_manifest_path(task) -> Path:
-    return Path(task.result.draft_path) / "previews" / "manifest_full.json"
+    return _task_draft_path(task) / "previews" / "manifest_full.json"
 
 
 def _read_preview_manifest(task) -> Optional[dict]:
@@ -403,7 +451,12 @@ def _read_preview_manifest(task) -> Optional[dict]:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
-        logger.warning(f"[{task.task_id}] 读取最终预览 manifest 失败: {e}")
+        safe = classify_exception(e, provider="local_storage")
+        logger.warning(
+            "[%s] 读取最终预览 manifest 失败: %s",
+            task.task_id,
+            safe.safe_message,
+        )
         return None
 
 
@@ -414,12 +467,12 @@ def _preview_state(task, segments: List[dict]) -> dict:
     valid = False
     reason = "missing"
     if manifest:
-        video_path = Path(manifest.get("video_path") or "")
+        video_path = _workspace_resolve_file(manifest.get("video_path"))
         if manifest.get("fingerprint") != fingerprint:
             reason = "stale"
         elif normalize_ratio(manifest.get("ratio")) != ratio:
             reason = "ratio_mismatch"
-        elif not video_path.exists():
+        elif video_path is None:
             reason = "file_missing"
         else:
             valid = True
@@ -452,7 +505,7 @@ def _write_preview_manifest(task, video_path: Path, preview_url: str, segments: 
 
 
 def _official_video_path(task) -> Path:
-    draft_path = Path(task.result.draft_path)
+    draft_path = _task_draft_path(task)
     return draft_path / f"{draft_path.name}.mp4"
 
 
@@ -466,7 +519,7 @@ def _ensure_legacy_render_manifest(task, segments: List[dict]) -> None:
 
 
 def _draft_zip_path(task) -> Path:
-    draft_path = Path(task.result.draft_path)
+    draft_path = _task_draft_path(task)
     return draft_path / f"{draft_path.name}.zip"
 
 
@@ -520,7 +573,8 @@ def _pick_local_folder() -> Optional[str]:
         root.destroy()
         return folder or None
     except Exception as e:
-        logger.warning(f"系统目录选择器不可用: {e}")
+        safe = classify_exception(e, provider="local_storage")
+        logger.warning("系统目录选择器不可用: %s", safe.safe_message)
         return None
 
 
@@ -1019,7 +1073,7 @@ def _ensure_task_assets(task, segments: List[dict]):
 def _asset_to_response(asset: dict, request: Request) -> dict:
     asset_id = asset.get("asset_id")
     path = asset.get("path")
-    has_file = bool(path and Path(path).is_file())
+    has_file = _workspace_resolve_file(path) is not None
     file_url = str(request.url_for("download_task_asset_file", task_id=asset["task_id"], asset_id=asset_id)) if has_file else None
     return {
         "asset_id": asset_id,
@@ -1054,6 +1108,17 @@ def _update_export_job(job_id: str, **updates):
         job["updated_at"] = datetime.now().isoformat()
 
 
+def _safe_export_params(payload: Optional[dict]) -> dict:
+    """Persist only operational export fields, never the caller's full body."""
+
+    source = payload if isinstance(payload, dict) else {}
+    return {
+        key: source[key]
+        for key in ("draft_root", "target_os", "use_preview", "auto_download", "overwrite")
+        if key in source and isinstance(source[key], (str, bool))
+    }
+
+
 def _create_export_job(task_id: str, target: str, payload: Optional[dict] = None) -> dict:
     job_id = uuid.uuid4().hex
     now = datetime.now().isoformat()
@@ -1065,7 +1130,10 @@ def _create_export_job(task_id: str, target: str, payload: Optional[dict] = None
         "message": "等待开始",
         "result": None,
         "error": None,
-        "params": payload or {},
+        "error_code": None,
+        "error_meta": None,
+        "cancel_requested": False,
+        "params": _safe_export_params(payload),
         "created_at": now,
         "updated_at": now,
     }
@@ -1096,7 +1164,10 @@ def _create_or_reuse_export_job(task_id: str, target: str, payload: Optional[dic
             "message": "等待开始",
             "result": None,
             "error": None,
-            "params": payload or {},
+            "error_code": None,
+            "error_meta": None,
+            "cancel_requested": False,
+            "params": _safe_export_params(payload),
             "created_at": now,
             "updated_at": now,
         }
@@ -1121,11 +1192,23 @@ def _latest_export_jobs(task_id: str) -> List[dict]:
     return list(latest.values())
 
 
+def _export_cancel_requested(job_id: str) -> bool:
+    with EXPORT_JOBS_LOCK:
+        job = EXPORT_JOBS.get(job_id)
+        return bool(job and job.get("cancel_requested"))
+
+
+def _raise_if_export_cancelled(job_id: str) -> None:
+    if _export_cancel_requested(job_id):
+        raise ExportJobCancelled("导出已取消")
+
+
 def _run_export_job(job_id: str, target: str, use_preview: bool, payload: Optional[dict] = None):
     _update_export_job(job_id, status="processing", message="正在准备导出")
     job = _export_job_snapshot(job_id)
     task_id = job.get("task_id")
     try:
+        _raise_if_export_cancelled(job_id)
         task = task_manager.get_task(task_id)
         if not task:
             raise RuntimeError("任务不存在")
@@ -1137,7 +1220,12 @@ def _run_export_job(job_id: str, target: str, use_preview: bool, payload: Option
             raise RuntimeError("段落数据不存在")
 
         if target == "mp4":
-            result = _export_mp4(task, segments, use_preview)
+            result = _export_mp4(
+                task,
+                segments,
+                use_preview,
+                should_cancel=lambda: _export_cancel_requested(job_id),
+            )
         elif target == "draft":
             result = _export_draft(task, segments)
         elif target == "draft_local":
@@ -1156,46 +1244,100 @@ def _run_export_job(job_id: str, target: str, use_preview: bool, payload: Option
         else:
             raise RuntimeError("不支持的导出类型")
 
+        _raise_if_export_cancelled(job_id)
         _update_export_job(job_id, status="completed", message="导出完成", result=result)
+    except ExportJobCancelled:
+        cancelled = make_safe_error(ErrorCode.CANCELLED, provider="export")
+        _update_export_job(
+            job_id,
+            status="cancelled",
+            message="已取消",
+            error=None,
+            error_code=cancelled.code.value,
+            error_meta=cancelled.metadata(),
+        )
     except Exception as e:
-        logger.exception(f"[{task_id}] 导出任务失败: {e}")
-        _update_export_job(job_id, status="failed", message="导出失败", error=str(e))
+        safe = classify_exception(e, provider="export")
+        logger.error("[%s] 导出任务失败: %s", task_id, safe.safe_message)
+        _update_export_job(
+            job_id,
+            status="failed",
+            message="导出失败",
+            error=safe.safe_message,
+            error_code=safe.code.value,
+            error_meta=safe.metadata(),
+        )
 
 
-def _export_mp4(task, segments: List[dict], use_preview: bool) -> dict:
-    from src.export.ffmpeg_exporter import FFmpegExporter
+def _export_mp4(
+    task,
+    segments: List[dict],
+    use_preview: bool,
+    should_cancel=None,
+) -> dict:
+    from src.export.ffmpeg_exporter import FFmpegExporter, RenderCancelled
     from src.utils.local_uploader import LocalUploader
 
     output_path = _official_video_path(task)
+    render_path: Optional[Path] = None
     snapshot_before = _media_fingerprint(task, segments)
     preview = _preview_state(task, segments)
     source = "rendered"
 
+    def raise_if_cancelled() -> None:
+        if should_cancel and should_cancel():
+            raise ExportJobCancelled("导出已取消")
+
+    raise_if_cancelled()
+
     if use_preview and preview["valid"]:
         manifest = preview["manifest"]
-        preview_path = Path(manifest["video_path"])
+        preview_path = _workspace_resolve_file(manifest["video_path"])
+        if preview_path is None:
+            raise RuntimeError("完整视频缓存文件不存在")
         if preview_path.resolve() != output_path.resolve():
-            shutil.copy2(preview_path, output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            render_path = output_path.with_name(
+                f".{output_path.stem}.{uuid.uuid4().hex}.cached.mp4"
+            )
+            shutil.copy2(preview_path, render_path)
         source = "cached"
     else:
         segment_texts = [seg.get("text") or "" for seg in segments]
-        media_paths = [seg.get("image_path") for seg in segments]
-        voiceover_files = [seg.get("audio_path") for seg in segments]
-        missing = [path for path in media_paths if not path or not Path(path).exists()]
-        if missing:
+        resolved_images = [_workspace_resolve_file(seg.get("image_path")) for seg in segments]
+        resolved_audio = [_workspace_resolve_file(seg.get("audio_path")) for seg in segments]
+        if any(path is None for path in resolved_images):
             raise RuntimeError("分镜图片文件不存在，无法导出 MP4")
-        FFmpegExporter(canvas=_task_canvas(task)).export(
-            segments=segment_texts,
-            media_paths=media_paths,
-            voiceover_files=voiceover_files,
-            output_path=str(output_path),
-            animation_seed=_task_animation_seed(task.task_id),
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        render_path = output_path.with_name(
+            f".{output_path.stem}.{uuid.uuid4().hex}.render.mp4"
         )
+        try:
+            FFmpegExporter(canvas=_task_canvas(task)).export(
+                segments=segment_texts,
+                media_paths=[str(path) for path in resolved_images],
+                voiceover_files=[str(path) if path else None for path in resolved_audio],
+                output_path=str(render_path),
+                animation_seed=_task_animation_seed(task.task_id),
+                should_cancel=should_cancel,
+            )
+        except RenderCancelled as error:
+            render_path.unlink(missing_ok=True)
+            raise ExportJobCancelled("导出已取消") from error
 
-    current_segments = mysql_client.get_segments(task.task_id)
-    if _media_fingerprint(task, current_segments) != snapshot_before:
-        output_path.unlink(missing_ok=True)
-        raise RuntimeError("渲染期间素材已变化，本次结果已作废，请重新生成")
+    try:
+        raise_if_cancelled()
+        current_segments = mysql_client.get_segments(task.task_id)
+        if _media_fingerprint(task, current_segments) != snapshot_before:
+            raise RuntimeError("渲染期间素材已变化，本次结果已作废，请重新生成")
+        # Rendering is staged beside the final file. The existing usable MP4 is
+        # only replaced after the complete render and snapshot checks succeed.
+        if render_path is not None:
+            os.replace(render_path, output_path)
+            render_path = None
+    finally:
+        if render_path is not None:
+            render_path.unlink(missing_ok=True)
 
     video_url = LocalUploader().upload(
         str(output_path),
@@ -1307,6 +1449,166 @@ async def get_config():
     return Config.load_model_config()
 
 
+def _readiness_item(
+    key: str,
+    label: str,
+    status: str,
+    *,
+    provider: Optional[str] = None,
+    missing: Optional[List[str]] = None,
+    message: str = "",
+) -> dict:
+    return {
+        "key": key,
+        "label": label,
+        "status": status,
+        "provider": provider,
+        "missing": list(missing or []),
+        "message": message,
+        "settings_anchor": f"settings-{key}",
+    }
+
+
+def _config_readiness(voice_type: Optional[str] = None) -> dict:
+    """Return secret-free local readiness for the providers this task will use."""
+    config = Config.load_model_config()
+    llm = config.get("llm") or {}
+    provider_id = str(llm.get("provider") or "custom").lower()
+    provider_record = get_provider(provider_id) or get_provider("custom") or {}
+    provider_options = llm.get("provider_options") or {}
+    llm_missing = []
+    credential_fields = provider_record.get("credential_fields") or []
+    credential_ids = {field.get("id") for field in credential_fields}
+    if "model" not in credential_ids and not str(llm.get("model") or "").strip():
+        llm_missing.append("模型 ID")
+    for field in credential_fields:
+        if not field.get("required"):
+            continue
+        field_id = field.get("id")
+        value = llm.get(field_id)
+        if value is None or value == "":
+            value = provider_options.get(field_id)
+        if value is None or value == "":
+            llm_missing.append(str(field.get("label") or field_id))
+    if llm_missing:
+        llm_status = "not_ready"
+        llm_message = "请先补全当前生文服务商的本地配置"
+    elif provider_record.get("config_status") == "advanced":
+        llm_status = "unknown"
+        llm_message = "当前服务商需要在生成时验证部署映射"
+    else:
+        llm_status = "ready"
+        llm_message = "生文和提示词配置已齐全"
+
+    image = config.get("image") or {}
+    image_missing = [
+        label for field, label in (
+            ("api_url", "API URL"),
+            ("api_key", "API Key"),
+            ("model", "模型 ID"),
+        )
+        if not str(image.get(field) or "").strip()
+    ]
+    image_status = "not_ready" if image_missing else "ready"
+
+    tts = config.get("tts") or {}
+    default_provider = str(tts.get("provider") or "doubao").lower()
+    if voice_type:
+        selection = parse_voice_key(voice_type, default_provider=default_provider)
+    elif default_provider == "mimo":
+        default_voice = (tts.get("mimo") or {}).get("default_voice") or "冰糖"
+        selection = parse_voice_key(
+            default_voice if str(default_voice).startswith("mimo-clone:")
+            else build_voice_key("mimo", default_voice)
+        )
+    else:
+        selection = parse_voice_key(build_voice_key(
+            "doubao",
+            tts.get("default_voice") or "zh_male_jieshuoxiaoming_moon_bigtts",
+        ))
+    tts_missing = []
+    enabled_providers = tts.get("enabled_providers") or ["doubao", "mimo"]
+    if selection.provider not in enabled_providers:
+        tts_missing.append("当前配音服务商未启用")
+    if selection.provider == "mimo":
+        mimo = tts.get("mimo") or {}
+        for field, label in (
+            ("base_url", "Base URL"),
+            ("api_key", "API Key"),
+            ("model", "模型 ID"),
+        ):
+            if not str(mimo.get(field) or "").strip():
+                tts_missing.append(label)
+        if selection.kind == "clone":
+            clone = mysql_client.get_voice_clone(selection.voice_id)
+            if not clone or clone.get("status") != "ready" or not clone.get("is_enabled"):
+                tts_missing.append("克隆音色尚未试听成功并启用")
+    else:
+        auth_method = str(tts.get("auth_method") or "access_token").lower()
+        if not str(tts.get("api_url") or "").strip():
+            tts_missing.append("API URL")
+        if auth_method == "api_key":
+            if not str(tts.get("api_key") or "").strip():
+                tts_missing.append("API Key")
+        else:
+            if not str(tts.get("appid") or "").strip():
+                tts_missing.append("App ID")
+            if not str(tts.get("token") or "").strip():
+                tts_missing.append("Access Token")
+    tts_status = "not_ready" if tts_missing else "ready"
+
+    items = [
+        _readiness_item(
+            "llm",
+            "文案与提示词",
+            llm_status,
+            provider=provider_id,
+            missing=llm_missing,
+            message=llm_message,
+        ),
+        _readiness_item(
+            "image",
+            "图片生成",
+            image_status,
+            provider="agnes",
+            missing=image_missing,
+            message=(
+                "生图配置已齐全"
+                if image_status == "ready"
+                else "请先补全 Agnes 生图配置"
+            ),
+        ),
+        _readiness_item(
+            "tts",
+            "配音",
+            tts_status,
+            provider=selection.provider,
+            missing=tts_missing,
+            message=(
+                "当前音色所需的配音配置已齐全"
+                if tts_status == "ready"
+                else "请先补全当前音色所属服务商的配置"
+            ),
+        ),
+    ]
+    statuses = {item["status"] for item in items}
+    overall = (
+        "not_ready" if "not_ready" in statuses
+        else "unknown" if "unknown" in statuses
+        else "ready"
+    )
+    return {
+        "status": overall,
+        "can_continue": overall != "not_ready",
+        "items": items,
+    }
+
+
+@router.get("/config/readiness")
+async def get_config_readiness(voice_type: Optional[str] = Query(None)):
+    return _config_readiness(voice_type)
+
+
 @router.put("/config")
 async def update_config(config: dict = Body(...)):
     """更新模型配置"""
@@ -1338,8 +1640,13 @@ async def test_tts_config(request: Request, payload: dict = Body(...)):
         generator = VoiceOverGenerator(output_dir=str(output_dir), tts_config=model_config["tts"])
         audio_path = Path(generator.generate(test_text, filename=filename, voice_type=voice_type))
     except Exception as exc:
-        logger.exception("TTS 配置测试失败")
-        raise HTTPException(status_code=502, detail=f"TTS 配置测试失败: {exc}") from exc
+        safe = classify_exception(exc, provider="tts")
+        logger.error("TTS 配置测试失败: %s", safe.safe_message)
+        raise HTTPException(
+            status_code=502,
+            detail=safe.safe_message,
+            headers={"X-Error-Code": safe.code.value},
+        ) from None
 
     media_path = f"_config_tests/{audio_path.name}"
     return {
@@ -1520,15 +1827,25 @@ async def preview_voice(payload: dict = Body(...)):
             config_override=payload.get("config_override"),
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        safe = classify_exception(exc, provider="tts")
+        raise HTTPException(
+            status_code=400,
+            detail=safe.safe_message,
+            headers={"X-Error-Code": safe.code.value},
+        ) from None
     except Exception as exc:
-        logger.exception("TTS 音色试听失败")
+        safe = classify_exception(exc, provider="tts")
+        logger.error("TTS 音色试听失败: %s", safe.safe_message)
         if getattr(getattr(exc, "response", None), "status_code", None) == 403:
             raise HTTPException(
                 status_code=409,
                 detail="当前 TTS 账号未授权该音色，请先在服务商控制台开通",
-            ) from exc
-        raise HTTPException(status_code=502, detail=f"音色试听失败: {exc}") from exc
+            ) from None
+        raise HTTPException(
+            status_code=502,
+            detail=safe.safe_message,
+            headers={"X-Error-Code": safe.code.value},
+        ) from None
 
 
 @router.get("/voice-clones")
@@ -1614,9 +1931,14 @@ async def preview_voice_clone(clone_id: str, payload: dict = Body(default={})):
         ready = store.mark_ready(clone_id, Path(preview["path"]))
         return {"clone": ready, "preview": preview}
     except Exception as exc:
-        store.mark_failed(clone_id, str(exc))
-        logger.exception("MiMo 克隆音色试听失败")
-        raise HTTPException(status_code=502, detail=f"克隆音色试听失败: {exc}") from exc
+        safe = classify_exception(exc, provider="mimo")
+        store.mark_failed(clone_id, safe.safe_message)
+        logger.error("MiMo 克隆音色试听失败: %s", safe.safe_message)
+        raise HTTPException(
+            status_code=502,
+            detail=safe.safe_message,
+            headers={"X-Error-Code": safe.code.value},
+        ) from None
 
 
 @router.delete("/voice-clones/{clone_id}")
@@ -1806,9 +2128,15 @@ async def create_task_from_images(
         task_manager.set_task_error(task_id, "上传图片创建任务失败")
         raise
     except Exception as e:
-        logger.exception(f"[{task_id}] 从本地图片创建任务失败: {e}")
-        task_manager.set_task_error(task_id, str(e))
-        raise HTTPException(status_code=500, detail=f"创建图片任务失败: {e}")
+        safe = classify_exception(e, provider="local_storage")
+        logger.error("[%s] 从本地图片创建任务失败: %s", task_id, safe.safe_message)
+        task_manager.set_task_error(
+            task_id,
+            safe.safe_message,
+            error_code=safe.code.value,
+            error_meta=safe.metadata(),
+        )
+        raise HTTPException(status_code=500, detail=safe.safe_message)
 
 
 @router.get("/tasks/{task_id}", response_model=TaskResponse)
@@ -1831,6 +2159,8 @@ def _workspace_stage(task_row: dict) -> str:
     # A stopped task must expose its recovery state even when the last persisted
     # workflow phase still says planning/generating_assets. Otherwise the
     # workspace keeps showing a non-running progress state and hides resume.
+    if status == TaskStatus.AWAITING_FINALIZATION.value:
+        return "awaiting_finalization"
     if status in {TaskStatus.FAILED.value, TaskStatus.INTERRUPTED.value}:
         return status
     phase = str(task_row.get("workflow_phase") or "").strip()
@@ -1848,18 +2178,70 @@ def _workspace_stage(task_row: dict) -> str:
     return "planning"
 
 
-def _workspace_file_ready(path: Optional[str]) -> bool:
+def _workspace_storage_candidates(path: Optional[str]) -> List[Path]:
+    """Resolve persisted local paths without depending on the process cwd."""
     if not path:
-        return False
+        return []
     try:
         candidate = Path(path)
-        if candidate.is_file():
-            return True
-        if not candidate.is_absolute():
-            return (Config.BASE_DIR / candidate).is_file()
+        if candidate.is_absolute():
+            return [candidate.resolve()]
+
+        base_dir = Config.BASE_DIR.resolve()
+        parts = candidate.parts
+        already_rooted = bool(
+            (parts and parts[0] == "output")
+            or (len(parts) >= 2 and parts[0] == "data" and parts[1] == "media")
+        )
+        raw_candidates = (
+            [base_dir / candidate]
+            if already_rooted
+            else [
+                base_dir / "output" / candidate,
+                base_dir / "data" / "media" / candidate,
+                base_dir / candidate,
+            ]
+        )
+        resolved = []
+        seen = set()
+        for raw_candidate in raw_candidates:
+            normalized = raw_candidate.resolve()
+            try:
+                normalized.relative_to(base_dir)
+            except ValueError:
+                continue
+            key = str(normalized)
+            if key in seen:
+                continue
+            seen.add(key)
+            resolved.append(normalized)
+        return resolved
     except (OSError, RuntimeError):
-        return False
-    return False
+        return []
+
+
+def _workspace_resolve_file(path: Optional[str]) -> Optional[Path]:
+    for candidate in _workspace_storage_candidates(path):
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _workspace_resolve_directory(path: Optional[str]) -> Optional[Path]:
+    for candidate in _workspace_storage_candidates(path):
+        try:
+            if candidate.is_dir():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _workspace_file_ready(path: Optional[str]) -> bool:
+    return _workspace_resolve_file(path) is not None
 
 
 def _workspace_draft_ready(task_row: dict) -> bool:
@@ -1867,28 +2249,25 @@ def _workspace_draft_ready(task_row: dict) -> bool:
     draft_path = result.get("draft_path")
     if not draft_path:
         return False
-    try:
-        candidate = Path(draft_path)
-        if candidate.exists():
-            return True
-        if not candidate.is_absolute():
-            return (Config.BASE_DIR / candidate).exists()
-    except (OSError, RuntimeError):
-        return False
-    return False
+    return _workspace_resolve_directory(draft_path) is not None
 
 
 def _workspace_output_dir(task, segments: List[dict]) -> Path:
     result = getattr(task, "result", None)
     if result and result.draft_path:
-        return Path(result.draft_path)
+        resolved_draft = _workspace_resolve_directory(result.draft_path)
+        if resolved_draft:
+            return resolved_draft
+        candidates = _workspace_storage_candidates(result.draft_path)
+        if candidates:
+            return candidates[0]
     for segment in segments:
         for field in ("image_path", "audio_path"):
             raw_path = segment.get(field)
             if not raw_path:
                 continue
-            path = Path(raw_path)
-            if path.parent.name in {"images", "voiceovers", "audio"}:
+            path = _workspace_resolve_file(raw_path)
+            if path and path.parent.name in {"images", "voiceovers", "audio"}:
                 return path.parent.parent
     name = getattr(task, "name", None) or getattr(task, "theme", None) or task.task_id
     return Config.BASE_DIR / "output" / task.task_id / _safe_draft_name(name, task.task_id)
@@ -1916,14 +2295,28 @@ def _workspace_health(task_row: dict, segments: List[dict]) -> dict:
         if segment.get("audio_status") == "completed"
         and _workspace_file_ready(segment.get("audio_path"))
     )
+
+    def count_asset_state(asset_type: str, expected_state: str) -> int:
+        return sum(
+            1
+            for segment in segments
+            if _workspace_asset_state(segment, asset_type) == expected_state
+        )
+
     return {
         "segments": segment_count,
         "prompts_ready": prompts_ready,
         "missing_prompts": max(0, segment_count - prompts_ready),
         "images_ready": images_ready,
         "missing_images": max(0, segment_count - images_ready),
+        "stale_images": count_asset_state("image", "stale"),
+        "failed_images": count_asset_state("image", "failed"),
+        "pending_images": count_asset_state("image", "missing"),
         "audio_ready": audio_ready,
         "missing_audio": max(0, segment_count - audio_ready),
+        "stale_audio": count_asset_state("audio", "stale"),
+        "failed_audio": count_asset_state("audio", "failed"),
+        "pending_audio": count_asset_state("audio", "missing"),
         "plan_complete": bool(segment_count and prompts_ready == segment_count),
         "assets_complete": bool(
             segment_count
@@ -1932,6 +2325,71 @@ def _workspace_health(task_row: dict, segments: List[dict]) -> dict:
         ),
         "draft_ready": _workspace_draft_ready(task_row),
     }
+
+
+def _workspace_asset_state(segment: dict, asset_type: str) -> str:
+    """Classify persisted media without conflating stale with failed/missing."""
+    status = str(segment.get(f"{asset_type}_status") or "pending")
+    file_ready = _workspace_file_ready(segment.get(f"{asset_type}_path"))
+    if status == "completed" and file_ready:
+        return "ready"
+    if status == "stale" and file_ready:
+        return "stale"
+    if status == "failed" or (status in {"completed", "stale"} and not file_ready):
+        return "failed"
+    return "missing"
+
+
+def _workspace_recovery_targets(segments: List[dict]) -> List[dict]:
+    targets = []
+    for segment in segments:
+        segment_index = int(segment.get("segment_index") or 0)
+        for asset_type, label in (("image", "图片"), ("audio", "配音")):
+            status = segment.get(f"{asset_type}_status") or "pending"
+            state = _workspace_asset_state(segment, asset_type)
+            if state in {"ready", "stale"}:
+                continue
+            if segment.get(f"{asset_type}_error"):
+                reason, error_code, error_meta = _public_error(
+                    segment.get(f"{asset_type}_error"),
+                    segment.get(f"{asset_type}_error_code"),
+                    segment.get(f"{asset_type}_error_meta"),
+                )
+            else:
+                missing = SafeError(
+                    code=ErrorCode.DISK,
+                    retryable=False,
+                    safe_message=f"{label}文件缺失",
+                    provider="local_storage",
+                )
+                reason = missing.safe_message
+                error_code = missing.code.value
+                error_meta = missing.metadata()
+            targets.append({
+                "segment_index": segment_index,
+                "asset_type": asset_type,
+                "status": status,
+                "reason": reason,
+                "error_code": error_code,
+                "error_meta": error_meta,
+            })
+    return targets
+
+
+def _workspace_stale_targets(segments: List[dict]) -> List[dict]:
+    targets = []
+    for segment in segments:
+        segment_index = int(segment.get("segment_index") or 0)
+        for asset_type, label in (("image", "图片"), ("audio", "配音")):
+            if _workspace_asset_state(segment, asset_type) != "stale":
+                continue
+            targets.append({
+                "segment_index": segment_index,
+                "asset_type": asset_type,
+                "status": "stale",
+                "reason": f"{label}与当前预案不一致，需要更新",
+            })
+    return targets
 
 
 def _reconcile_workspace_state(task_row: dict, segments: List[dict]) -> dict:
@@ -1957,13 +2415,36 @@ def _reconcile_workspace_state(task_row: dict, segments: List[dict]) -> dict:
             next_step = "image_prompt_generation" if segments else "text_generation"
             error = "检测到预案内容不完整，已保留现有内容，可继续生成"
         else:
-            next_phase = "generating_assets"
-            next_step = "draft_building" if health["assets_complete"] else "image_generation"
+            next_phase = "awaiting_finalization" if health["assets_complete"] else "generating_assets"
+            next_status = (
+                TaskStatus.AWAITING_FINALIZATION.value
+                if health["assets_complete"]
+                else TaskStatus.INTERRUPTED.value
+            )
+            next_step = "awaiting_finalization" if health["assets_complete"] else "image_generation"
             error = (
                 "检测到生产草稿缺失，可使用现有素材恢复"
                 if health["assets_complete"]
+                else "检测到素材与当前预案不一致，可精确更新受影响部分"
+                if health["stale_images"] or health["stale_audio"]
                 else "检测到本地素材缺失，可重新生成缺失部分"
             )
+    elif (
+        status in {TaskStatus.FAILED.value, TaskStatus.INTERRUPTED.value}
+        and health["plan_complete"]
+        and health["assets_complete"]
+        and not health["draft_ready"]
+        and task_row.get("current_step") != "finalize_failed"
+    ):
+        next_status = TaskStatus.AWAITING_FINALIZATION.value
+        next_phase = "awaiting_finalization"
+        next_step = "awaiting_finalization"
+        error = None
+    elif status == TaskStatus.AWAITING_FINALIZATION.value and not health["assets_complete"]:
+        next_status = TaskStatus.INTERRUPTED.value
+        next_phase = "generating_assets"
+        next_step = "asset_repair"
+        error = "检测到素材不完整，请先修复缺失素材"
     elif status == TaskStatus.AWAITING_CONFIRMATION.value and not health["plan_complete"]:
         next_status = TaskStatus.INTERRUPTED.value
         next_phase = "planning"
@@ -1993,30 +2474,42 @@ def _reconcile_workspace_state(task_row: dict, segments: List[dict]) -> dict:
     return mysql_client.get_task(task_id) or task_row
 
 
-def _workspace_recovery(task_row: dict, stage: str, health: dict) -> dict:
+def _workspace_recovery(
+    task_row: dict,
+    stage: str,
+    health: dict,
+    targets: Optional[List[dict]] = None,
+    stale_targets: Optional[List[dict]] = None,
+) -> dict:
+    targets = targets or []
+    stale_targets = stale_targets or []
     can_resume = bool(
         stage in {TaskStatus.FAILED.value, TaskStatus.INTERRUPTED.value}
         and (task_row.get("theme") or task_row.get("script_text") or health["segments"])
     )
-    if not can_resume:
-        return {"allowed": False, "mode": None, "label": None, "description": None}
-    if not health["segments"]:
+    if can_resume and not health["segments"]:
         return {
             "allowed": True,
             "mode": "restart_planning",
             "label": "重新开始生成",
             "description": "生成在文案阶段中断，可从原始内容重新开始",
+            "targets": [],
         }
-    if health["missing_prompts"]:
+    if can_resume and health["missing_prompts"]:
         count = health["missing_prompts"]
         return {
             "allowed": True,
             "mode": "resume_planning",
             "label": f"继续生成 {count} 段提示词",
             "description": f"已有内容已保存，仍有 {count} 段提示词待生成",
+            "targets": [],
         }
-    missing_assets = health["missing_images"] + health["missing_audio"]
-    if missing_assets:
+    asset_recovery_stage = stage in {
+        TaskStatus.FAILED.value,
+        TaskStatus.INTERRUPTED.value,
+    }
+    if targets and asset_recovery_stage:
+        missing_assets = len(targets)
         return {
             "allowed": True,
             "mode": "retry_assets",
@@ -2026,12 +2519,57 @@ def _workspace_recovery(task_row: dict, stage: str, health: dict) -> dict:
                 f"配音 {health['audio_ready']}/{health['segments']} · "
                 f"{missing_assets} 项待重试"
             ),
+            "targets": targets,
         }
+    if stale_targets and (asset_recovery_stage or stage == "ready"):
+        count = len(stale_targets)
+        return {
+            "allowed": True,
+            "mode": "update_stale_assets",
+            "label": f"更新 {count} 个受影响素材",
+            "description": "旧素材仍可查看，但需要更新后才能完成生产或生成完整视频",
+            "targets": stale_targets,
+        }
+    if (
+        health["assets_complete"]
+        and not health["draft_ready"]
+        and (asset_recovery_stage or stage == "awaiting_finalization")
+    ):
+        finalize_failed = task_row.get("current_step") == "finalize_failed"
+        return {
+            "allowed": True,
+            "mode": "finalize_failed" if finalize_failed else "finalize",
+            "label": "重新完成生产" if finalize_failed else "完成生产并进入预览",
+            "description": (
+                "素材均已保留；请处理草稿构建问题后重新完成生产"
+                if finalize_failed
+                else "图片与配音均已齐全，等待构建生产草稿"
+            ),
+            "targets": [],
+        }
+    return {"allowed": False, "mode": None, "label": None, "description": None, "targets": []}
+
+
+def _workspace_operation_payload(operation: Optional[dict]) -> Optional[dict]:
+    if not operation:
+        return None
+    targets = operation.get("targets") or []
+    error, error_code, error_meta = _public_error(
+        operation.get("error"),
+        operation.get("error_code"),
+        operation.get("error_meta"),
+    )
     return {
-        "allowed": True,
-        "mode": "finalize",
-        "label": "完成生产并进入预览",
-        "description": "图片与配音均已齐全，待恢复生产草稿",
+        "operation_id": operation.get("operation_id"),
+        "kind": operation.get("kind"),
+        "status": operation.get("state"),
+        "total": len(targets),
+        "completed": int(operation.get("completed_count") or 0),
+        "failed": int(operation.get("failed_count") or 0),
+        "targets": targets,
+        "error": error,
+        "error_code": error_code,
+        "error_meta": error_meta,
     }
 
 
@@ -2046,12 +2584,51 @@ def _workspace_segment_payload(segment: dict, request: Request) -> dict:
     )
     image_error = segment.get("image_error")
     audio_error = segment.get("audio_error")
+    prompt_error, prompt_error_code, prompt_error_meta = _public_error(
+        segment.get("prompt_error"),
+        segment.get("prompt_error_code"),
+        segment.get("prompt_error_meta"),
+    )
+    image_error, image_error_code, image_error_meta = _public_error(
+        image_error,
+        segment.get("image_error_code"),
+        segment.get("image_error_meta"),
+    )
+    audio_error, audio_error_code, audio_error_meta = _public_error(
+        audio_error,
+        segment.get("audio_error_code"),
+        segment.get("audio_error_meta"),
+    )
     if image_status == "completed" and not image_file_ready:
         image_status = "failed"
         image_error = image_error or "本地图片文件缺失，请重新生成"
+        missing = SafeError(
+            code=ErrorCode.DISK,
+            retryable=False,
+            safe_message=image_error,
+            provider="local_storage",
+        )
+        image_error_code = missing.code.value
+        image_error_meta = missing.metadata()
     if audio_status == "completed" and not audio_file_ready:
         audio_status = "failed"
         audio_error = audio_error or "本地音频文件缺失，请重新生成"
+        missing = SafeError(
+            code=ErrorCode.DISK,
+            retryable=False,
+            safe_message=audio_error,
+            provider="local_storage",
+        )
+        audio_error_code = missing.code.value
+        audio_error_meta = missing.metadata()
+    image_storage_warning = None
+    audio_storage_warning = None
+    if image_status in {"completed", "stale"} and image_file_ready and image_error:
+        image_storage_warning = image_error_meta
+        image_error = image_error_code = image_error_meta = None
+    if audio_status in {"completed", "stale"} and audio_file_ready and audio_error:
+        audio_storage_warning = audio_error_meta
+        audio_error = audio_error_code = audio_error_meta = None
     payload = {
         "id": segment.get("id"),
         "task_id": segment.get("task_id"),
@@ -2061,7 +2638,9 @@ def _workspace_segment_payload(segment: dict, request: Request) -> dict:
         "prompt_status": segment.get("prompt_status") or (
             "completed" if segment.get("image_prompt") else "pending"
         ),
-        "prompt_error": segment.get("prompt_error"),
+        "prompt_error": prompt_error,
+        "prompt_error_code": prompt_error_code,
+        "prompt_error_meta": prompt_error_meta,
         "prompt_manual": bool(segment.get("prompt_manual")),
         "prompt_needs_review": bool(segment.get("prompt_needs_review")),
         "image_url": (
@@ -2074,11 +2653,18 @@ def _workspace_segment_payload(segment: dict, request: Request) -> dict:
         ) if audio_file_ready else None,
         "image_status": image_status,
         "image_error": image_error,
+        "image_error_code": image_error_code,
+        "image_error_meta": image_error_meta,
+        "image_storage_warning": image_storage_warning,
         "audio_status": audio_status,
         "audio_error": audio_error,
+        "audio_error_code": audio_error_code,
+        "audio_error_meta": audio_error_meta,
+        "audio_storage_warning": audio_storage_warning,
         "audio_voice_type": segment.get("audio_voice_type"),
         "audio_tts_options_json": segment.get("audio_tts_options_json"),
         "duration": segment.get("duration"),
+        "created_at": segment.get("created_at"),
         "updated_at": segment.get("updated_at"),
     }
     return payload
@@ -2090,11 +2676,28 @@ async def get_task_workspace(task_id: str, request: Request):
     task_row = mysql_client.get_task(task_id)
     if not task_row:
         raise HTTPException(status_code=404, detail="任务不存在")
+    active_operation = mysql_client.get_active_task_operation(task_id)
+    if active_operation and not task_runtime.is_running(task_id):
+        orphan_kind = active_operation.get("kind")
+        mysql_client.interrupt_orphaned_task_operation(task_id)
+        orphan_phase = "finalizing" if orphan_kind == "finalize" else "generating_assets"
+        orphan_step = "finalize_failed" if orphan_kind == "finalize" else "asset_repair"
+        mysql_client.update_task_workflow(
+            task_id,
+            orphan_phase,
+            status=TaskStatus.INTERRUPTED.value,
+            current_step=orphan_step,
+        )
+        task_manager.invalidate_task_cache(task_id)
+        active_operation = {}
+        task_row = mysql_client.get_task(task_id) or task_row
     task_manager.fail_stale_task_data(task_row)
     task_row = mysql_client.get_task(task_id) or task_row
     segments = mysql_client.get_segments(task_id)
     task_row = _reconcile_workspace_state(task_row, segments)
     health = _workspace_health(task_row, segments)
+    recovery_targets = _workspace_recovery_targets(segments)
+    stale_targets = _workspace_stale_targets(segments)
     parsed_options = {}
     try:
         parsed_options = json.loads(task_row.get("tts_options_json") or "{}")
@@ -2112,6 +2715,9 @@ async def get_task_workspace(task_id: str, request: Request):
     )
     segment_count = len(segments)
     stage = _workspace_stage(task_row)
+    recovery = _workspace_recovery(
+        task_row, stage, health, recovery_targets, stale_targets
+    )
     current_step = str(task_row.get("current_step") or "")
     if stage == "planning":
         if current_step == "image_prompt_generation":
@@ -2126,6 +2732,24 @@ async def get_task_workspace(task_id: str, request: Request):
     generation_max = max(60, segment_count * 8)
     parts = str(task_row.get("style") or "").split("|", 2)
     result = task_row.get("result") or {}
+    workspace_segments = [
+        _workspace_segment_payload(segment, request) for segment in segments
+    ]
+    storage_warnings = [
+        {
+            "segment_index": segment["segment_index"],
+            "asset_type": asset_type,
+            "warning": segment.get(f"{asset_type}_storage_warning"),
+        }
+        for segment in workspace_segments
+        for asset_type in ("image", "audio")
+        if segment.get(f"{asset_type}_storage_warning")
+    ]
+    task_error, task_error_code, task_error_meta = _public_error(
+        task_row.get("error"),
+        task_row.get("error_code"),
+        task_row.get("error_meta"),
+    )
     return {
         "task_id": task_id,
         "name": task_row.get("name") or task_row.get("theme") or "未命名项目",
@@ -2153,9 +2777,8 @@ async def get_task_workspace(task_id: str, request: Request):
             "min_seconds": generation_min,
             "max_seconds": generation_max,
         },
-        "segments": [
-            _workspace_segment_payload(segment, request) for segment in segments
-        ],
+        "segments": workspace_segments,
+        "storage_warnings": storage_warnings,
         "progress": {
             "prompts_ready": sum(1 for segment in segments if segment.get("image_prompt")),
             "prompts_total": segment_count,
@@ -2169,22 +2792,36 @@ async def get_task_workspace(task_id: str, request: Request):
             "audio_ready": health["audio_ready"],
         },
         "health": health,
-        "recovery": _workspace_recovery(task_row, stage, health),
+        "recovery": recovery,
+        "active_operation": _workspace_operation_payload(active_operation),
         "capabilities": {
             "instant_preview": any(
-                segment.get("image_status") == "completed"
+                segment.get("image_status") in {"completed", "stale"}
                 and _workspace_file_ready(segment.get("image_path"))
-                and segment.get("audio_status") == "completed"
+                and segment.get("audio_status") in {"completed", "stale"}
                 and _workspace_file_ready(segment.get("audio_path"))
                 for segment in segments
             ),
             "full_video": bool(health["assets_complete"] and health["draft_ready"]),
             "enter_export": bool(health["images_ready"] or health["audio_ready"]),
             "material_export": bool(health["images_ready"] or health["audio_ready"]),
+            "retry_failed_assets": bool(
+                recovery.get("mode") == "retry_assets" and not active_operation
+            ),
+            "update_stale_assets": bool(
+                recovery.get("mode") == "update_stale_assets" and not active_operation
+            ),
+            "retry_selected_asset": not bool(active_operation),
+            "finalize": bool(
+                recovery.get("mode") in {"finalize", "finalize_failed"}
+                and not active_operation
+            ),
         },
         "draft_url": _normalize_local_media_url(result.get("draft_url"), request),
-        "error": task_row.get("error"),
-        "can_resume": _workspace_recovery(task_row, stage, health)["allowed"],
+        "error": task_error,
+        "error_code": task_error_code,
+        "error_meta": task_error_meta,
+        "can_resume": recovery["allowed"],
     }
 
 
@@ -2266,7 +2903,6 @@ async def update_task_workspace_settings(task_id: str, payload: dict = Body(...)
             current_step="image_prompt_generation",
         )
         task_manager.invalidate_task_cache(task_id)
-        task_executor.resume_task(task_id)
     refreshed = mysql_client.get_task(task_id) or task_row
     refreshed_segments = mysql_client.get_segments(task_id)
     return {
@@ -2295,6 +2931,327 @@ async def generate_task_workspace_assets(task_id: str, response: Response, paylo
         response.status_code = 202 if outcome == "started" else 200
         return {"task_id": task_id, "outcome": outcome, "stage": "generating_assets"}
     raise HTTPException(status_code=409, detail="当前任务不能从预案阶段继续生成")
+
+
+def _operation_idempotency_key(
+    kind: str,
+    task_row: dict,
+    snapshot_key: str,
+    targets: List[dict],
+) -> str:
+    payload = {
+        "kind": kind,
+        "task_id": task_row.get("task_id"),
+        "snapshot_key": snapshot_key,
+        "task_updated_at": str(task_row.get("updated_at") or ""),
+        "targets": [
+            {
+                "segment_index": item.get("segment_index"),
+                "asset_type": item.get("asset_type"),
+                "mode": item.get("mode"),
+                "version": item.get("version"),
+                "voice_type": item.get("voice_type"),
+                "tts_options": item.get("tts_options"),
+                "plan_version": item.get("plan_version"),
+            }
+            for item in targets
+        ],
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _resolve_retry_targets(
+    segments: List[dict],
+    scope: str,
+    requested_targets: Optional[List[dict]],
+) -> List[dict]:
+    by_index = {int(item.get("segment_index") or 0): item for item in segments}
+    if scope == "failed":
+        requested_targets = _workspace_recovery_targets(segments)
+    elif scope != "selected":
+        raise HTTPException(status_code=400, detail="scope 仅支持 failed 或 selected")
+    if not requested_targets:
+        raise HTTPException(status_code=409, detail="当前没有需要重试的素材")
+
+    resolved = []
+    seen = set()
+    for requested in requested_targets:
+        try:
+            segment_index = int(requested.get("segment_index"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="分镜索引无效")
+        asset_type = str(requested.get("asset_type") or "")
+        if asset_type not in {"image", "audio"}:
+            raise HTTPException(status_code=400, detail="asset_type 仅支持 image 或 audio")
+        key = (segment_index, asset_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        segment = by_index.get(segment_index)
+        if not segment:
+            raise HTTPException(status_code=404, detail=f"分镜 {segment_index + 1} 不存在")
+        if asset_type == "image" and not str(segment.get("image_prompt") or "").strip():
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "needs_prompt",
+                    "message": f"分镜 {segment_index + 1} 缺少图片提示词，请先恢复预案",
+                },
+            )
+        has_existing_file = _workspace_file_ready(segment.get(f"{asset_type}_path"))
+        ready = segment.get(f"{asset_type}_status") == "completed" and has_existing_file
+        if scope == "failed" and ready:
+            continue
+        resolved_target = {
+            "segment_index": segment_index,
+            "asset_type": asset_type,
+            "mode": "replace" if has_existing_file else "retry",
+            "status": "pending",
+            "error": None,
+            "version": str(segment.get("updated_at") or ""),
+        }
+        if asset_type == "audio":
+            if requested.get("voice_type"):
+                resolved_target["voice_type"] = str(requested["voice_type"])
+            if isinstance(requested.get("tts_options"), dict):
+                resolved_target["tts_options"] = dict(requested["tts_options"])
+        resolved.append(resolved_target)
+    if not resolved:
+        raise HTTPException(status_code=409, detail="当前没有需要重试的素材")
+    return sorted(resolved, key=lambda item: (item["segment_index"], item["asset_type"]))
+
+
+@router.post("/tasks/{task_id}/segments/{segment_index}/regenerate-prompt")
+async def regenerate_segment_prompt(
+    task_id: str,
+    segment_index: int,
+    response: Response,
+    payload: dict = Body(...),
+):
+    """Regenerate one image prompt without invoking image or TTS generation."""
+    task_row = mysql_client.get_task(task_id)
+    if not task_row:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    segments = mysql_client.get_segments(task_id)
+    segment = next(
+        (
+            item
+            for item in segments
+            if int(item.get("segment_index") or 0) == int(segment_index)
+        ),
+        None,
+    )
+    if not segment:
+        raise HTTPException(status_code=404, detail="分镜不存在")
+    snapshot_key = str((payload or {}).get("snapshot_key") or "")
+    if snapshot_key != _plan_fingerprint(task_row, segments):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "conflict",
+                "message": "预案已发生变化，请刷新后再重新生成提示词",
+            },
+        )
+    target = {
+        "segment_index": int(segment_index),
+        "asset_type": "prompt",
+        "mode": "regenerate",
+        "status": "pending",
+        "error": None,
+        "version": str(segment.get("updated_at") or ""),
+        "plan_version": int(task_row.get("plan_version") or 0),
+        "origin_status": task_row.get("status"),
+        "origin_phase": task_row.get("workflow_phase"),
+    }
+    active = mysql_client.get_active_task_operation(task_id)
+    if active:
+        active_targets = active.get("targets") or []
+        active_target = active_targets[0] if len(active_targets) == 1 else {}
+        if (
+            active.get("kind") == "regenerate_prompt"
+            and active.get("snapshot_key") == snapshot_key
+            and active_target.get("asset_type") == "prompt"
+            and int(active_target.get("segment_index", -1)) == int(segment_index)
+        ):
+            response.status_code = 200
+            return _workspace_operation_payload(active)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "operation_running",
+                "message": "当前已有其他项目操作正在执行",
+                "operation_id": active.get("operation_id"),
+            },
+        )
+    if task_runtime.is_running(task_id):
+        raise HTTPException(status_code=409, detail="当前已有项目操作正在执行")
+    idempotency_key = _operation_idempotency_key(
+        "regenerate_prompt", task_row, snapshot_key, [target]
+    )
+    created = mysql_client.create_task_operation(
+        task_id,
+        "regenerate_prompt",
+        idempotency_key,
+        snapshot_key,
+        [target],
+    )
+    if created.get("outcome") == "conflict":
+        raise HTTPException(status_code=409, detail="当前已有项目操作正在执行")
+    if created.get("outcome") == "error":
+        raise HTTPException(status_code=500, detail="创建提示词操作失败")
+    operation = created.get("operation") or {}
+    if created.get("outcome") == "duplicate":
+        response.status_code = 200
+        return _workspace_operation_payload(operation)
+    outcome = task_executor.regenerate_prompt(
+        task_id, operation["operation_id"], target
+    )
+    if outcome != "started":
+        mysql_client.update_task_operation(
+            operation["operation_id"], state="failed", error="提示词操作启动失败"
+        )
+        raise HTTPException(status_code=409, detail="当前项目无法重新生成提示词")
+    response.status_code = 202
+    return _workspace_operation_payload(
+        mysql_client.get_task_operation(operation["operation_id"])
+    )
+
+
+@router.post("/tasks/{task_id}/retry-assets")
+async def retry_task_assets(task_id: str, response: Response, payload: dict = Body(...)):
+    task_row = mysql_client.get_task(task_id)
+    if not task_row:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    segments = mysql_client.get_segments(task_id)
+    snapshot_key = str(payload.get("snapshot_key") or "")
+    if snapshot_key != _plan_fingerprint(task_row, segments):
+        raise HTTPException(status_code=409, detail="预案已发生变化，请刷新后再重试")
+    requested_scope = str(payload.get("scope") or "failed")
+    targets = _resolve_retry_targets(
+        segments,
+        requested_scope,
+        payload.get("targets"),
+    )
+    active = mysql_client.get_active_task_operation(task_id)
+    if active:
+        requested_keys = {
+            (int(item["segment_index"]), item["asset_type"]) for item in targets
+        }
+        active_keys = {
+            (int(item["segment_index"]), item["asset_type"])
+            for item in active.get("targets") or []
+            if item.get("asset_type") in {"image", "audio"}
+        }
+        if (
+            active.get("kind") == "retry_assets"
+            and active.get("snapshot_key") == snapshot_key
+            and requested_keys == active_keys
+        ):
+            response.status_code = 200
+            return _workspace_operation_payload(active)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "operation_running",
+                "message": "当前已有素材操作正在执行",
+                "operation_id": active.get("operation_id") if active else None,
+            },
+        )
+    if task_runtime.is_running(task_id):
+        raise HTTPException(status_code=409, detail="当前已有任务操作正在执行")
+    idempotency_key = _operation_idempotency_key(
+        "retry_assets", task_row, snapshot_key, targets
+    )
+    created = mysql_client.create_task_operation(
+        task_id,
+        "retry_assets",
+        idempotency_key,
+        snapshot_key,
+        targets,
+    )
+    if created.get("outcome") == "conflict":
+        raise HTTPException(status_code=409, detail="当前已有素材操作正在执行")
+    if created.get("outcome") == "error":
+        raise HTTPException(status_code=500, detail="创建素材重试操作失败")
+    operation = created.get("operation") or {}
+    if created.get("outcome") == "duplicate":
+        response.status_code = 200
+        return _workspace_operation_payload(operation)
+    outcome = task_executor.retry_assets(task_id, operation["operation_id"], targets)
+    if outcome != "started":
+        mysql_client.update_task_operation(
+            operation["operation_id"], state="failed", error="素材重试启动失败"
+        )
+        raise HTTPException(status_code=409, detail="当前任务无法启动素材重试")
+    response.status_code = 202
+    return _workspace_operation_payload(
+        mysql_client.get_task_operation(operation["operation_id"])
+    )
+
+
+@router.post("/tasks/{task_id}/finalize")
+async def finalize_task_workspace(task_id: str, response: Response, payload: dict = Body(...)):
+    task_row = mysql_client.get_task(task_id)
+    if not task_row:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    segments = mysql_client.get_segments(task_id)
+    snapshot_key = str(payload.get("snapshot_key") or "")
+    force_rebuild = bool(payload.get("force"))
+    if snapshot_key != _plan_fingerprint(task_row, segments):
+        raise HTTPException(status_code=409, detail="预案已发生变化，请刷新后再完成生产")
+    health = _workspace_health(task_row, segments)
+    if not health["assets_complete"]:
+        raise HTTPException(status_code=409, detail="素材尚未齐全，请先修复失败素材")
+    if health["draft_ready"] and not force_rebuild:
+        response.status_code = 200
+        return {"task_id": task_id, "status": "ready", "outcome": "already_ready"}
+    active = mysql_client.get_active_task_operation(task_id)
+    if active:
+        if (
+            active.get("kind") == "finalize"
+            and active.get("snapshot_key") == snapshot_key
+        ):
+            response.status_code = 200
+            return _workspace_operation_payload(active)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "operation_running",
+                "message": "当前已有其他版本的任务操作正在执行",
+                "operation_id": active.get("operation_id"),
+            },
+        )
+    if task_runtime.is_running(task_id):
+        raise HTTPException(status_code=409, detail="当前已有任务操作正在执行")
+    target = [{
+        "asset_type": "draft",
+        "mode": "rebuild" if force_rebuild else "finalize",
+        "status": "pending",
+        "version": str(task_row.get("updated_at") or ""),
+    }]
+    key = _operation_idempotency_key("finalize", task_row, snapshot_key, target)
+    created = mysql_client.create_task_operation(
+        task_id, "finalize", key, snapshot_key, target
+    )
+    if created.get("outcome") == "conflict":
+        raise HTTPException(status_code=409, detail="当前已有任务操作正在执行")
+    if created.get("outcome") == "error":
+        raise HTTPException(status_code=500, detail="创建草稿构建操作失败")
+    operation = created.get("operation") or {}
+    if created.get("outcome") == "duplicate":
+        response.status_code = 200
+        return _workspace_operation_payload(operation)
+    outcome = task_executor.finalize_task(task_id, operation["operation_id"])
+    if outcome != "started":
+        mysql_client.update_task_operation(
+            operation["operation_id"], state="failed", error="草稿构建启动失败"
+        )
+        raise HTTPException(status_code=409, detail="当前任务无法构建草稿")
+    response.status_code = 202
+    return _workspace_operation_payload(
+        mysql_client.get_task_operation(operation["operation_id"])
+    )
 
 
 @router.post("/tasks/{task_id}/resegment")
@@ -2349,6 +3306,31 @@ async def resume_task(task_id: str, response: Response):
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
 
+    task_row = mysql_client.get_task(task_id) or {}
+    segments = mysql_client.get_segments(task_id)
+    health = _workspace_health(task_row, segments)
+    recovery = _workspace_recovery(
+        task_row,
+        _workspace_stage(task_row),
+        health,
+        _workspace_recovery_targets(segments),
+        _workspace_stale_targets(segments),
+    )
+    if recovery.get("mode") in {
+        "retry_assets",
+        "update_stale_assets",
+        "finalize",
+        "finalize_failed",
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": recovery["mode"],
+                "message": recovery["description"],
+                "recovery": recovery,
+            },
+        )
+
     outcome = task_executor.resume_task(task_id)
     if outcome == "started":
         response.status_code = 202
@@ -2363,6 +3345,43 @@ async def resume_task(task_id: str, response: Response):
         response.status_code = 409
         status = task.status.value if isinstance(task.status, TaskStatus) else str(task.status)
     return {"task_id": task_id, "status": status, "outcome": outcome}
+
+
+@router.post("/tasks/{task_id}/cancel")
+async def cancel_task(task_id: str, response: Response):
+    """Stop future provider dispatch while letting in-flight work checkpoint."""
+
+    task_row = mysql_client.get_task(task_id)
+    if not task_row:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task_row.get("status") == TaskStatus.DELETING.value:
+        raise HTTPException(status_code=409, detail="任务正在删除")
+
+    was_running = task_runtime.is_running(task_id)
+    if not was_running:
+        return {
+            "task_id": task_id,
+            "status": task_row.get("status"),
+            "outcome": "already_stopped",
+            "message": "当前没有正在执行的生成操作",
+        }
+
+    stopped = await asyncio.to_thread(task_executor.cancel_task, task_id, 30)
+    refreshed = mysql_client.get_task(task_id) or task_row
+    if not stopped:
+        response.status_code = 202
+        return {
+            "task_id": task_id,
+            "status": refreshed.get("status"),
+            "outcome": "cancel_requested",
+            "message": "已停止新请求，正在等待已开始的生成完成并保存",
+        }
+    return {
+        "task_id": task_id,
+        "status": refreshed.get("status"),
+        "outcome": "cancelled",
+        "message": "生成已停止，已完成的内容已保存",
+    }
 
 
 @router.delete("/tasks/{task_id}")
@@ -2420,8 +3439,9 @@ async def download_task(
         try:
             zip_path = _pack_draft_zip(task)
         except Exception as e:
-            logger.exception(f"准备浏览器下载草稿失败: {e}")
-            raise HTTPException(status_code=500, detail=f"准备浏览器下载失败: {e}")
+            safe = classify_exception(e, provider="local_storage")
+            logger.error("准备浏览器下载草稿失败: %s", safe.safe_message)
+            raise HTTPException(status_code=500, detail=safe.safe_message)
 
     draft_name = draft_path.name
     target_os = "mac" if target_os == "mac" else "windows"
@@ -2459,8 +3479,9 @@ async def download_task(
 
         buf.seek(0)
     except Exception as e:
-        logger.exception(f"生成下载 ZIP 失败: {e}")
-        raise HTTPException(status_code=500, detail=f"生成下载文件失败: {e}")
+        safe = classify_exception(e, provider="local_storage")
+        logger.error("生成下载 ZIP 失败: %s", safe.safe_message)
+        raise HTTPException(status_code=500, detail=safe.safe_message)
 
     if normalized_extract_path:
         task_manager.update_extract_path(task_id, normalized_extract_path)
@@ -2552,33 +3573,9 @@ async def get_segments(task_id: str, request: Request):
 
     segments = mysql_client.get_segments(task_id)
 
-    # 只返回 URL 字段，不返回本地路径
-    result = []
-    for seg in segments:
-        result.append({
-            'id': seg.get('id'),
-            'task_id': seg.get('task_id'),
-            'segment_index': seg.get('segment_index'),
-            'text': seg.get('text'),
-            'image_prompt': seg.get('image_prompt') or '',
-            'prompt_status': seg.get('prompt_status') or ('completed' if seg.get('image_prompt') else 'pending'),
-            'prompt_error': seg.get('prompt_error'),
-            'prompt_manual': bool(seg.get('prompt_manual')),
-            'prompt_needs_review': bool(seg.get('prompt_needs_review')),
-            'image_url': _normalize_local_media_url(seg.get('image_url'), request),
-            'audio_url': _normalize_local_media_url(seg.get('audio_url'), request),
-            'image_status': seg.get('image_status') or 'completed',
-            'image_error': seg.get('image_error'),
-            'audio_status': seg.get('audio_status') or 'completed',
-            'audio_error': seg.get('audio_error'),
-            'audio_voice_type': seg.get('audio_voice_type'),
-            'audio_tts_options_json': seg.get('audio_tts_options_json'),
-            'duration': seg.get('duration'),
-            'created_at': seg.get('created_at'),
-            'updated_at': seg.get('updated_at'),
-        })
-
-    return result
+    # Reuse the workspace serializer so legacy callers receive the same safe
+    # structured errors and storage-warning semantics.
+    return [_workspace_segment_payload(seg, request) for seg in segments]
 
 
 @router.get("/tasks/{task_id}/render-config")
@@ -2707,6 +3704,8 @@ async def get_export_state(task_id: str, request: Request):
         render_status = "stale"
     elif latest_mp4_job and latest_mp4_job.get("status") == "failed":
         render_status = "failed"
+    elif latest_mp4_job and latest_mp4_job.get("status") == "cancelled":
+        render_status = "cancelled"
     else:
         render_status = "missing"
 
@@ -2734,6 +3733,8 @@ async def get_export_state(task_id: str, request: Request):
             "video_url": manifest.get("preview_url"),
             "created_at": manifest.get("created_at"),
             "error": latest_mp4_job.get("error") if latest_mp4_job else None,
+            "error_code": latest_mp4_job.get("error_code") if latest_mp4_job else None,
+            "error_meta": latest_mp4_job.get("error_meta") if latest_mp4_job else None,
         },
         "outputs": {
             "mp4": {
@@ -2823,6 +3824,21 @@ async def get_export_job(task_id: str, job_id: str):
     if not job or job.get("task_id") != task_id:
         raise HTTPException(status_code=404, detail="导出任务不存在")
     return job
+
+
+@router.post("/tasks/{task_id}/exports/{job_id}/cancel")
+async def cancel_export_job(task_id: str, job_id: str):
+    """Request cooperative cancellation without discarding prior valid output."""
+    with EXPORT_JOBS_LOCK:
+        job = EXPORT_JOBS.get(job_id)
+        if not job or job.get("task_id") != task_id:
+            raise HTTPException(status_code=404, detail="导出任务不存在")
+        if job.get("status") not in {"pending", "processing"}:
+            return dict(job)
+        job["cancel_requested"] = True
+        job["message"] = "正在取消；已开始的片段会安全收尾"
+        job["updated_at"] = datetime.now().isoformat()
+        return dict(job)
 
 
 @router.get("/tasks/{task_id}/download-materials", name="download_material_package")
@@ -2921,8 +3937,8 @@ async def download_task_assets(
         used_names = set()
         used_paths = set()
         for asset in assets:
-            path = Path(asset.get("path") or "")
-            if not path.is_file():
+            path = _workspace_resolve_file(asset.get("path"))
+            if path is None:
                 continue
             path_key = str(path.resolve())
             if path_key in used_paths:
@@ -2961,8 +3977,8 @@ async def download_task_asset_file(task_id: str, asset_id: str):
         asset = mysql_client.get_task_asset(task_id, asset_id)
     if not asset:
         raise HTTPException(status_code=404, detail="素材不存在")
-    path = Path(asset.get("path") or "")
-    if not path.is_file():
+    path = _workspace_resolve_file(asset.get("path"))
+    if path is None:
         raise HTTPException(status_code=404, detail="素材文件不存在")
     media_type = {
         ".jpg": "image/jpeg",
@@ -2982,23 +3998,37 @@ async def select_segment_image(task_id: str, segment_index: int, request: Reques
     task = task_manager.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
+    task_row = mysql_client.get_task(task_id) or {}
+    _ensure_workspace_mutable(task_row)
+    if mysql_client.get_active_task_operation(task_id) or task_runtime.is_running(task_id):
+        raise HTTPException(status_code=409, detail="当前已有项目操作正在执行")
     segments = mysql_client.get_segments(task_id)
-    if segment_index >= len(segments):
+    previous = next(
+        (item for item in segments if int(item.get("segment_index") or 0) == int(segment_index)),
+        None,
+    )
+    if not previous:
         raise HTTPException(status_code=404, detail="段落不存在")
     _ensure_task_assets(task, segments)
     asset_id = (payload or {}).get("asset_id")
     asset = mysql_client.get_task_asset(task_id, asset_id)
     if not asset or asset.get("asset_type") != "image":
         raise HTTPException(status_code=404, detail="图片素材不存在")
+    asset_segment_index = asset.get("segment_index")
+    if asset_segment_index is not None and int(asset_segment_index) != int(segment_index):
+        raise HTTPException(status_code=409, detail="图片版本不属于当前分镜")
     image_path = asset.get("path")
     image_url = asset.get("url") or str(request.url_for("download_task_asset_file", task_id=task_id, asset_id=asset_id))
-    if image_path and not Path(image_path).exists():
+    if _workspace_resolve_file(image_path) is None:
         raise HTTPException(status_code=404, detail="图片文件不存在")
-    previous = segments[segment_index]
     success = mysql_client.update_segment(task_id, segment_index, {
         "image_path": image_path,
         "image_url": image_url,
         "image_prompt": asset.get("prompt") or previous.get("image_prompt") or "",
+        "image_status": "completed",
+        "image_error": None,
+        "image_error_code": None,
+        "image_error_meta": None,
     })
     if not success:
         raise HTTPException(status_code=500, detail="切换图片失败")
@@ -3012,6 +4042,8 @@ async def select_segment_image(task_id: str, segment_index: int, request: Reques
         prompt=asset.get("prompt"),
         text=previous.get("text"),
     )
+    updated_task = mysql_client.get_task(task_id) or task_row
+    updated_segments = mysql_client.get_segments(task_id)
     return {
         "message": "图片已切换",
         "image_path": image_path,
@@ -3019,6 +4051,7 @@ async def select_segment_image(task_id: str, segment_index: int, request: Reques
         "image_prompt": asset.get("prompt") or previous.get("image_prompt") or "",
         "previous_image_path": previous.get("image_path"),
         "previous_image_url": previous.get("image_url"),
+        "snapshot_key": _plan_fingerprint(updated_task, updated_segments),
     }
 
 
@@ -3105,130 +4138,46 @@ async def update_segment(
     }
 
 
-@router.post("/tasks/{task_id}/segments/{segment_index}/regenerate-image")
-async def regenerate_image(task_id: str, segment_index: int):
+@router.post(
+    "/tasks/{task_id}/segments/{segment_index}/regenerate-image",
+    deprecated=True,
+)
+async def regenerate_image(task_id: str, segment_index: int, response: Response):
     """
     重新生成段落图片
 
     - **task_id**: 任务ID
     - **segment_index**: 段落索引
     """
-    logger.info(f"[{task_id}] ========== 开始重新生成图片 ==========")
-    logger.info(f"[{task_id}] 段落索引: {segment_index}")
-
-    task = task_manager.get_task(task_id)
-    if not task:
-        logger.error(f"[{task_id}] 任务不存在")
+    response.headers["Deprecation"] = "true"
+    response.headers["Warning"] = (
+        '299 - "regenerate-image is deprecated; use retry-assets with an exact target"'
+    )
+    logger.warning("[%s] 调用已废弃 regenerate-image 兼容入口", task_id)
+    task_row = mysql_client.get_task(task_id)
+    if not task_row:
         raise HTTPException(status_code=404, detail="任务不存在")
-    _ensure_workspace_mutable(mysql_client.get_task(task_id) or {})
-
-    logger.info(f"[{task_id}] 任务主题: {task.theme}")
-
     segments = mysql_client.get_segments(task_id)
-    segment = next(
-        (item for item in segments if item.get("segment_index") == segment_index),
-        None,
-    )
-    if not segment:
-        logger.error(f"[{task_id}] 段落不存在: {segment_index}")
-        raise HTTPException(status_code=404, detail="段落不存在")
-    output_dir = _workspace_output_dir(task, segments)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    logger.info(f"[{task_id}] 工作目录: {output_dir}")
-    logger.info(f"[{task_id}] 段落文本: {segment['text']}")
-
-    # 重新生成图片
-    from src.core.pipeline import VideoEditorPipeline
-    logger.info(f"[{task_id}] 创建 VideoEditorPipeline...")
-    canvas = _task_canvas(task)
-    pipeline = VideoEditorPipeline(theme=task.theme, output_dir=str(output_dir), canvas=canvas)
-
-    # 生成图像 prompt
-    logger.info(f"[{task_id}] 生成图像描述...")
-    parts = (task.style or "").split("|", 2)
-    visual_style = parts[1] if len(parts) > 1 and parts[1] else "写实风格"
-    visual_style_suffix = parts[2] if len(parts) > 2 and parts[2] else None
-    summary = task.theme[:100]
-    image_prompt = (segment.get("image_prompt") or "").strip()
-    if not image_prompt:
-        image_prompt = pipeline.image_prompt_agent.generate_prompt(
-            segment['text'],
-            summary,
-            visual_style_suffix or visual_style,
-        )
-    logger.info(f"[{task_id}] 图像描述: {image_prompt}")
-
-    # 生成图片
-    logger.info(f"[{task_id}] 开始生成图片...")
-    import time
-    timestamp = int(time.time())
-    image_path = pipeline.image_generator.generate(
-        image_prompt,
-        index=segment_index,
-        style=visual_style,
-        style_suffix=visual_style_suffix,
-        filename=f"seg_{segment_index:03d}_regen_{timestamp}",
-        width=canvas["width"],
-        height=canvas["height"],
-    )
-    logger.info(f"[{task_id}] 图片生成完成: {image_path}")
-
-    # 保存到本地媒体目录
-    from src.utils.local_uploader import LocalUploader
-    from pathlib import Path
-
-    image_url = None
-    if image_path and Path(image_path).exists():
-        logger.info(f"[{task_id}] 图片文件存在，开始保存到本地媒体目录...")
-        try:
-            local_uploader = LocalUploader()
-            image_filename = Path(image_path).name
-            storage_path = f"{task_id}/images/{image_filename}"
-            logger.info(f"[{task_id}] 本地媒体路径: {storage_path}")
-            image_url = local_uploader.upload(image_path, storage_path)
-            logger.info(f"[{task_id}] 图片保存成功: {image_url}")
-        except Exception as e:
-            logger.error(f"[{task_id}] 图片保存失败: {e}")
-            logger.exception(f"[{task_id}] 保存错误详情:")
-    else:
-        logger.error(f"[{task_id}] 图片文件不存在: {image_path}")
-
-    # 更新数据库
-    logger.info(f"[{task_id}] 更新数据库...")
-    mysql_client.update_segment(task_id, segment_index, {
-        'image_prompt': image_prompt,
-        'image_path': image_path,
-        'image_url': image_url,
-        'image_status': 'completed',
-        'image_error': None,
-    })
-    _record_asset(
+    return await retry_task_assets(
         task_id,
-        "image",
-        "regenerated",
-        path=image_path,
-        url=image_url,
-        segment_index=segment_index,
-        prompt=image_prompt,
-        text=segment.get("text"),
+        response,
+        {
+            "snapshot_key": _plan_fingerprint(task_row, segments),
+            "scope": "selected",
+            "targets": [
+                {"segment_index": segment_index, "asset_type": "image"}
+            ],
+        },
     )
-    logger.info(f"[{task_id}] 数据库更新完成")
 
-    logger.info(f"[{task_id}] ========== 图片重新生成完成 ==========")
-    return {
-        "message": "图片重新生成成功",
-        "image_path": image_path,
-        "image_url": image_url,
-        "image_prompt": image_prompt,
-        "previous_image_path": segment.get("image_path"),
-        "previous_image_url": segment.get("image_url"),
-    }
-
-
-@router.post("/tasks/{task_id}/segments/{segment_index}/regenerate-audio")
+@router.post(
+    "/tasks/{task_id}/segments/{segment_index}/regenerate-audio",
+    deprecated=True,
+)
 async def regenerate_audio(
     task_id: str,
     segment_index: int,
+    response: Response,
     payload: Optional[RegenerateAudioRequest] = Body(None),
     voice_type: Optional[str] = Query(None),
 ):
@@ -3239,11 +4188,15 @@ async def regenerate_audio(
     - **segment_index**: 段落索引
     - **voice_type**: TTS 音色 ID（可选，如果不提供则使用任务创建时的音色）
     """
+    response.headers["Deprecation"] = "true"
+    response.headers["Warning"] = (
+        '299 - "regenerate-audio is deprecated; use retry-assets with an exact target"'
+    )
+    logger.warning("[%s] 调用已废弃 regenerate-audio 兼容入口", task_id)
     task = task_manager.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
-    _ensure_workspace_mutable(mysql_client.get_task(task_id) or {})
-
+    task_row = mysql_client.get_task(task_id) or {}
     segments = mysql_client.get_segments(task_id)
     segment = next(
         (item for item in segments if item.get("segment_index") == segment_index),
@@ -3251,8 +4204,6 @@ async def regenerate_audio(
     )
     if not segment:
         raise HTTPException(status_code=404, detail="段落不存在")
-    output_dir = _workspace_output_dir(task, segments)
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     body_voice = payload.voice_type if payload else None
     requested_voice = body_voice or voice_type
@@ -3262,7 +4213,6 @@ async def regenerate_audio(
         effective_voice = segment.get("audio_voice_type") or task.voice_type
     if not effective_voice:
         effective_voice = _resolve_new_task_voice(None)
-
     inherited_options = (
         _parse_options_json(segment.get("audio_tts_options_json"))
         or dict(getattr(task, "tts_options", {}) or {})
@@ -3272,71 +4222,22 @@ async def regenerate_audio(
         effective_voice,
         body_options or inherited_options,
     )
-
-    logger.info(f"[{task_id}] 使用音色: {effective_voice}")
-
-    # 重新生成音频
-    from src.core.pipeline import VideoEditorPipeline
-    logger.info(f"[{task_id}] 创建 VideoEditorPipeline...")
-    pipeline = VideoEditorPipeline(theme=task.theme, output_dir=str(output_dir), canvas=_task_canvas(task))
-
-    import time
-    timestamp = int(time.time())
-    logger.info(f"[{task_id}] 开始生成音频...")
-    audio_path = pipeline.voiceover_generator.generate(
-        segment['text'],
-        filename=f"seg_{segment_index:03d}_regen_{timestamp}",
-        voice_type=effective_voice,
-        speed_level=effective_options.get("speed_level"),
-        volume_ratio=effective_options.get("volume_ratio"),
-        style_prompt=effective_options.get("style_prompt"),
-    )
-    logger.info(f"[{task_id}] 音频生成完成: {audio_path}")
-
-    # 保存到本地媒体目录
-    from src.utils.local_uploader import LocalUploader
-    from pathlib import Path
-
-    audio_url = None
-    if audio_path and Path(audio_path).exists():
-        try:
-            local_uploader = LocalUploader()
-            audio_filename = Path(audio_path).name
-            storage_path = f"{task_id}/audio/{audio_filename}"
-            audio_url = local_uploader.upload(audio_path, storage_path)
-            logger.info(f"[{task_id}] 段落 {segment_index} 音频重新生成并保存成功: {audio_url}")
-        except Exception as e:
-            logger.warning(f"[{task_id}] 段落 {segment_index} 音频保存失败: {e}")
-
-    # 更新数据库
-    mysql_client.update_segment(task_id, segment_index, {
-        'audio_path': audio_path,
-        'audio_url': audio_url,
-        'audio_voice_type': effective_voice,
-        'audio_tts_options_json': json.dumps(effective_options, ensure_ascii=False),
-        'audio_status': 'completed',
-        'audio_error': None,
-    })
-    _record_asset(
+    return await retry_task_assets(
         task_id,
-        "audio",
-        "regenerated",
-        path=audio_path,
-        url=audio_url,
-        segment_index=segment_index,
-        text=segment.get("text"),
-        voice_type=effective_voice,
-        metadata={"tts_options": effective_options},
+        response,
+        {
+            "snapshot_key": _plan_fingerprint(task_row, segments),
+            "scope": "selected",
+            "targets": [
+                {
+                    "segment_index": segment_index,
+                    "asset_type": "audio",
+                    "voice_type": effective_voice,
+                    "tts_options": effective_options,
+                }
+            ],
+        },
     )
-
-    return {
-        "message": "音频重新生成成功",
-        "audio_path": audio_path,
-        "audio_url": audio_url,
-        "voice_type": effective_voice,
-        "tts_options": effective_options,
-    }
-
 
 @router.post("/tasks/{task_id}/segments/{segment_index}/upload-image")
 async def upload_image(task_id: str, segment_index: int, file: UploadFile = File(...)):
@@ -3360,11 +4261,18 @@ async def upload_image(task_id: str, segment_index: int, file: UploadFile = File
         logger.error(f"[{task_id}] 任务不存在")
         raise HTTPException(status_code=404, detail="任务不存在")
 
+    task_row = mysql_client.get_task(task_id) or {}
+    _ensure_workspace_mutable(task_row)
+    if mysql_client.get_active_task_operation(task_id) or task_runtime.is_running(task_id):
+        raise HTTPException(status_code=409, detail="当前已有项目操作正在执行")
     segments = mysql_client.get_segments(task_id)
-    if segment_index >= len(segments):
-        logger.error(f"[{task_id}] 段落索引超出范围: {segment_index} >= {len(segments)}")
+    segment = next(
+        (item for item in segments if int(item.get("segment_index") or 0) == int(segment_index)),
+        None,
+    )
+    if not segment:
+        logger.error(f"[{task_id}] 分镜不存在: {segment_index}")
         raise HTTPException(status_code=404, detail="段落不存在")
-    segment = segments[segment_index]
 
     # 验证文件类型
     allowed_types = ["image/jpeg", "image/jpg", "image/png", "image/webp"]
@@ -3372,9 +4280,9 @@ async def upload_image(task_id: str, segment_index: int, file: UploadFile = File
         raise HTTPException(status_code=400, detail="只支持 JPG、PNG、WEBP 格式的图片")
 
     # 保存到本地临时文件
-    draft_path = Path(task.result.draft_path)
+    draft_path = _workspace_output_dir(task, segments)
     images_dir = draft_path / "images"
-    images_dir.mkdir(exist_ok=True)
+    images_dir.mkdir(parents=True, exist_ok=True)
 
     import time
     timestamp = int(time.time())
@@ -3388,6 +4296,7 @@ async def upload_image(task_id: str, segment_index: int, file: UploadFile = File
 
     # 保存到本地媒体目录
     image_url = None
+    storage_warning = None
     try:
         local_uploader = LocalUploader()
         storage_path = f"{task_id}/images/{local_filename}"
@@ -3395,17 +4304,20 @@ async def upload_image(task_id: str, segment_index: int, file: UploadFile = File
         image_url = local_uploader.upload(str(local_path), storage_path)
         logger.info(f"[{task_id}] 图片保存成功: {image_url}")
     except Exception as e:
-        logger.error(f"[{task_id}] 图片保存失败: {e}")
-        logger.exception(f"[{task_id}] 保存错误详情:")
-        raise HTTPException(status_code=500, detail=f"图片保存失败: {e}")
+        storage_warning = classify_exception(e, provider="local_storage")
+        if storage_warning.code is not ErrorCode.DISK:
+            storage_warning = make_safe_error(
+                ErrorCode.DISK, provider="local_storage"
+            )
+        logger.error(
+            "[%s] 图片本地归档失败: %s",
+            task_id,
+            storage_warning.safe_message,
+        )
 
-    # 更新数据库
+    # 先保留上传版本，再切换当前分镜；切换失败时历史版本仍可找回。
     logger.info(f"[{task_id}] 更新数据库...")
-    mysql_client.update_segment(task_id, segment_index, {
-        'image_path': str(local_path),
-        'image_url': image_url
-    })
-    _record_asset(
+    uploaded_asset = _record_asset(
         task_id,
         "image",
         "upload",
@@ -3414,25 +4326,49 @@ async def upload_image(task_id: str, segment_index: int, file: UploadFile = File
         segment_index=segment_index,
         text=segment.get("text"),
     )
+    if not uploaded_asset:
+        raise HTTPException(status_code=500, detail="上传图片版本保存失败")
+    if not mysql_client.update_segment(task_id, segment_index, {
+        'image_path': str(local_path),
+        'image_url': image_url,
+        'image_status': 'completed',
+        'image_error': storage_warning.safe_message if storage_warning else None,
+        'image_error_code': storage_warning.code.value if storage_warning else None,
+        'image_error_meta': storage_warning.metadata() if storage_warning else None,
+    }):
+        raise HTTPException(
+            status_code=500,
+            detail="图片已保存到历史版本，但切换当前分镜失败",
+        )
     logger.info(f"[{task_id}] 数据库更新完成")
 
     logger.info(f"[{task_id}] ========== 图片上传完成 ==========")
+    updated_task = mysql_client.get_task(task_id) or task_row
+    updated_segments = mysql_client.get_segments(task_id)
     return {
         "message": "图片上传成功",
         "image_path": str(local_path),
         "image_url": image_url,
         "previous_image_path": segment.get("image_path"),
         "previous_image_url": segment.get("image_url"),
+        "snapshot_key": _plan_fingerprint(updated_task, updated_segments),
     }
 
 
-@router.post("/tasks/{task_id}/rebuild")
-async def rebuild_draft(task_id: str):
+@router.post("/tasks/{task_id}/rebuild", deprecated=True)
+async def rebuild_draft(task_id: str, response: Response):
     """
-    根据当前段落数据重新构建草稿和视频
+    兼容旧客户端：根据当前分镜重新构建草稿。
+
+    该入口不再隐式生成 MP4；需要 MP4 时应在 finalize 后创建导出作业。
 
     - **task_id**: 任务ID
     """
+    response.headers["Deprecation"] = "true"
+    response.headers["Warning"] = (
+        '299 - "rebuild is deprecated; use finalize, then create an export job when MP4 is needed"'
+    )
+    logger.warning("[%s] 调用已废弃 rebuild 兼容入口", task_id)
     task = task_manager.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -3441,40 +4377,12 @@ async def rebuild_draft(task_id: str):
     if not segments:
         raise HTTPException(status_code=404, detail="段落数据不存在")
 
-    # 重新构建草稿和视频
-    from src.core.pipeline import VideoEditorPipeline
-    from src.export.ffmpeg_exporter import FFmpegExporter
-
-    pipeline = VideoEditorPipeline(theme=task.theme, output_dir=task.result.draft_path, canvas=_task_canvas(task))
-
-    # 准备数据
-    segment_texts = [seg.get('text') or "" for seg in segments]
-    media_paths = [seg.get('image_path') for seg in segments]
-    voiceover_files = [seg.get('audio_path') for seg in segments]
-    animation_seed = _task_animation_seed(task_id)
-
-    draft_name = Path(task.result.draft_path).name
-
-    # 重新构建草稿
-    draft_path = pipeline.draft_builder.build(
-        segments=segment_texts,
-        media_paths=media_paths,
-        draft_name=draft_name,
-        voiceover_files=voiceover_files,
-        animation_seed=animation_seed,
-        output_dir=task.result.draft_path,
+    task_row = mysql_client.get_task(task_id) or {}
+    return await finalize_task_workspace(
+        task_id,
+        response,
+        {
+            "snapshot_key": _plan_fingerprint(task_row, segments),
+            "force": True,
+        },
     )
-
-    # 重新生成视频
-    ffmpeg_exporter = FFmpegExporter(canvas=_task_canvas(task))
-    video_path = Path(task.result.draft_path) / f"{draft_name}.mp4"
-
-    ffmpeg_exporter.export(
-        segments=segment_texts,
-        media_paths=media_paths,
-        voiceover_files=voiceover_files,
-        output_path=str(video_path),
-        animation_seed=animation_seed,
-    )
-
-    return {"message": "草稿和视频重新构建成功", "draft_path": draft_path, "video_path": str(video_path)}

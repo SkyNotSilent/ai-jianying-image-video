@@ -14,6 +14,12 @@ from urllib.parse import urlparse
 import requests
 
 from src.config import Config
+from src.api.error_model import (
+    ClassifiedError,
+    ErrorCode,
+    classify_exception,
+    make_safe_error,
+)
 
 logger = logging.getLogger(__name__)
 _RATE_LIMIT_LOCK = threading.Lock()
@@ -115,20 +121,34 @@ class ImageGenerator:
                 break
             except requests.HTTPError as e:
                 if attempt == self.max_attempts - 1:
-                    raise
+                    raise ClassifiedError(
+                        classify_exception(e, provider="agnes")
+                    ) from None
                 wait_seconds = self._retry_delay(resp, attempt)
-                logger.warning(f"图像生成失败（第{attempt+1}次），{wait_seconds:.0f}秒后重试: {e}")
+                logger.warning(
+                    "图像生成失败（第%s次），%.0f秒后重试",
+                    attempt + 1,
+                    wait_seconds,
+                )
                 time.sleep(wait_seconds)
             except Exception as e:
                 if attempt == self.max_attempts - 1:
-                    raise
+                    raise ClassifiedError(
+                        classify_exception(e, provider="agnes")
+                    ) from None
                 wait_seconds = self._retry_delay(None, attempt)
-                logger.warning(f"图像生成失败（第{attempt+1}次），{wait_seconds:.0f}秒后重试: {e}")
+                logger.warning(
+                    "图像生成失败（第%s次），%.0f秒后重试",
+                    attempt + 1,
+                    wait_seconds,
+                )
                 time.sleep(wait_seconds)
         data = resp.json()
 
         if not data.get("data"):
-            raise RuntimeError(f"图像生成接口返回异常: {data}")
+            raise ClassifiedError(
+                make_safe_error(ErrorCode.PROVIDER_ERROR, provider="agnes")
+            ) from None
 
         image_bytes = self._extract_image_bytes(data)
         output_path = self.output_dir / f"{output_stem}{self._detect_image_extension(image_bytes)}"
@@ -178,15 +198,23 @@ class ImageGenerator:
                     return img_resp.content
                 except Exception as e:
                     if attempt == self.max_attempts - 1:
-                        raise
+                        raise ClassifiedError(
+                            classify_exception(e, provider="agnes")
+                        ) from None
                     wait_seconds = self._retry_delay(None, attempt)
-                    logger.warning(f"图片下载失败（第{attempt+1}次），{wait_seconds:.0f}秒后重试: {e}")
+                    logger.warning(
+                        "图片下载失败（第%s次），%.0f秒后重试",
+                        attempt + 1,
+                        wait_seconds,
+                    )
                     time.sleep(wait_seconds)
         if item.get("b64_json"):
             return base64.b64decode(item["b64_json"])
         if item.get("base64"):
             return base64.b64decode(item["base64"])
-        raise RuntimeError(f"图像生成接口返回缺少 url/b64_json: {data}")
+        raise ClassifiedError(
+            make_safe_error(ErrorCode.PROVIDER_ERROR, provider="agnes")
+        ) from None
 
     def _detect_image_extension(self, image_bytes: bytes) -> str:
         if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):

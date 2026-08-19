@@ -4,7 +4,9 @@ import wave
 from pathlib import Path
 
 import pytest
+import requests
 
+from src.api.error_model import ClassifiedError
 from src.config import Config
 from src.draft.voice_preview import VoicePreviewService
 from src.draft.voiceover import VoiceOverGenerator
@@ -34,6 +36,39 @@ def wav_bytes(seconds=0.05, sample_rate=24000):
         output.setframerate(sample_rate)
         output.writeframes(b"\x01\x00" * int(seconds * sample_rate))
     return target.getvalue()
+
+
+def test_doubao_401_is_wrapped_as_safe_auth_error(tmp_path, monkeypatch, tts_config):
+    secret = "doubao-provider-secret"
+
+    class UnauthorizedResponse:
+        status_code = 401
+        headers = {"x-request-id": "req-doubao-auth"}
+
+        def raise_for_status(self):
+            raise requests.HTTPError(
+                f"Authorization: Bearer {secret}", response=self
+            )
+
+    config = {**tts_config, "api_key": secret}
+    monkeypatch.setattr(
+        Config,
+        "generation_config",
+        classmethod(lambda cls: {"retry_count": 0, "retry_interval_seconds": 1}),
+    )
+    monkeypatch.setattr(
+        "src.draft.voiceover.requests.post",
+        lambda *_args, **_kwargs: UnauthorizedResponse(),
+    )
+    generator = VoiceOverGenerator(str(tmp_path), tts_config=config)
+
+    with pytest.raises(ClassifiedError) as exc_info:
+        generator.generate("测试语音", filename="unauthorized")
+
+    safe = exc_info.value.safe_error
+    assert safe.code.value == "auth"
+    assert safe.request_id == "req-doubao-auth"
+    assert secret not in str(exc_info.value)
 
 
 @pytest.fixture

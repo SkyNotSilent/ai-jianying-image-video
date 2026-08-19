@@ -18,6 +18,7 @@ from .models import (
 )
 from src.database import db_client, redis_client
 from src.config import Config
+from .error_model import ErrorCode, SafeError, make_safe_error
 from .task_cleanup import DeletionReport, collect_task_paths, delete_task_files
 from .task_runtime import task_runtime
 
@@ -31,6 +32,10 @@ STEP_STALE_TASK_TIMEOUT_SECONDS = {
     "voiceover_generation": 30 * 60,
     "image_generation": 45 * 60,
     "draft_building": 5 * 60,
+}
+WAITING_WORKFLOW_PHASES = {
+    "awaiting_confirmation",
+    "awaiting_finalization",
 }
 
 
@@ -92,6 +97,8 @@ class Task:
         self.status = TaskStatus.PENDING
         self.created_at = datetime.now().isoformat()
         self.error: Optional[str] = None
+        self.error_code: Optional[str] = None
+        self.error_meta: Optional[Dict] = None
         self.can_resume = False
         self.result: Optional[TaskResult] = None
         self.extract_path: Optional[str] = None
@@ -210,6 +217,8 @@ class Task:
             result=self.result,
             extract_path=self.extract_path,
             error=self.error,
+            error_code=self.error_code,
+            error_meta=self.error_meta,
             can_resume=self.can_resume,
             workflow_phase=self.workflow_phase,
             plan_version=self.plan_version,
@@ -366,7 +375,12 @@ class TaskManager:
             task.status = TaskStatus(data["status"])
             task.created_at = data["created_at"]
             if "error" in data:
-                task.error = data["error"]
+                task.error = (
+                    (data.get("error_meta") or {}).get("safe_message")
+                    or data["error"]
+                )
+            task.error_code = data.get("error_code")
+            task.error_meta = data.get("error_meta")
             if "extract_path" in data:
                 task.extract_path = data["extract_path"]
             task.can_resume = bool(data.get("can_resume"))
@@ -414,7 +428,12 @@ class TaskManager:
             task.status = TaskStatus(data["status"])
             task.created_at = data["created_at"].isoformat() if hasattr(data["created_at"], "isoformat") else str(data["created_at"])
             task.current_step = data.get("current_step", "pending")
-            task.error = data.get("error")
+            task.error = (
+                (data.get("error_meta") or {}).get("safe_message")
+                or data.get("error")
+            )
+            task.error_code = data.get("error_code")
+            task.error_meta = data.get("error_meta")
             task.extract_path = data.get("extract_path")
             task.can_resume = self._has_recovery_checkpoint(data)
 
@@ -459,6 +478,8 @@ class TaskManager:
             "status": task.status,
             "created_at": task.created_at,
             "error": task.error,
+            "error_code": task.error_code,
+            "error_meta": task.error_meta,
             "can_resume": task.can_resume,
             "extract_path": task.extract_path,
             "execution_mode": task.execution_mode,
@@ -491,6 +512,8 @@ class TaskManager:
         """Mark an orphaned stale task interrupted without touching live work."""
         if not data or data.get("status") not in {"pending", "processing"}:
             return False
+        if data.get("workflow_phase") in WAITING_WORKFLOW_PHASES:
+            return False
 
         task_id = data["task_id"]
         if task_runtime.is_running(task_id):
@@ -510,8 +533,19 @@ class TaskManager:
             f"任务在 {step_name} 阶段超过 {timeout_seconds // 60} 分钟无进度更新，"
             "已保存现有内容，可继续生成"
         )
+        safe = SafeError(
+            code=ErrorCode.TIMEOUT,
+            retryable=True,
+            safe_message=error,
+        )
         logger.warning("[%s] %s", task_id, error)
-        if not db_client.mark_task_interrupted(task_id, step_name, error):
+        if not db_client.mark_task_interrupted(
+            task_id,
+            step_name,
+            error,
+            error_code=safe.code.value,
+            error_meta=safe.metadata(),
+        ):
             return False
         with self.lock:
             task = self.tasks.get(task_id)
@@ -536,14 +570,19 @@ class TaskManager:
         ) if remaining else []
         interrupted_count = 0
         error = "服务重启导致任务中断，可继续生成"
+        safe = make_safe_error(ErrorCode.UNKNOWN)
 
         for row in pending_rows + processing_rows:
+            if row.get("workflow_phase") in WAITING_WORKFLOW_PHASES:
+                continue
             task_id = row["task_id"]
             if not db_client.update_task_status(
                 task_id,
                 TaskStatus.INTERRUPTED.value,
                 row.get("current_step"),
                 error,
+                error_code=safe.code.value,
+                error_meta=safe.metadata(),
             ):
                 continue
             with self.lock:
@@ -560,6 +599,8 @@ class TaskManager:
             task.status = status
             if status == TaskStatus.PROCESSING:
                 task.error = None
+                task.error_code = None
+                task.error_meta = None
             logger.info(f"[{task_id}] 状态更新: {status}")
 
             # 更新到本地数据库
@@ -568,15 +609,30 @@ class TaskManager:
             # 更新到内存缓存
             redis_client.cache_task(task_id, self._task_to_dict(task))
 
-    def mark_task_interrupted(self, task_id: str, error: str) -> bool:
+    def mark_task_interrupted(
+        self,
+        task_id: str,
+        error: str,
+        *,
+        error_code: Optional[str] = None,
+        error_meta: Optional[Dict] = None,
+    ) -> bool:
         """Preserve checkpoints and expose the task as resumable."""
         task = self.get_task(task_id)
         current_step = task.current_step if task else None
-        if not db_client.mark_task_interrupted(task_id, current_step, error):
+        if not db_client.mark_task_interrupted(
+            task_id,
+            current_step,
+            error,
+            error_code=error_code,
+            error_meta=error_meta,
+        ):
             return False
         if task:
             task.status = TaskStatus.INTERRUPTED
             task.error = error
+            task.error_code = error_code
+            task.error_meta = error_meta
             redis_client.cache_task(task_id, self._task_to_dict(task))
         return True
 
@@ -605,16 +661,32 @@ class TaskManager:
             # 更新到内存缓存
             redis_client.cache_task(task_id, self._task_to_dict(task))
 
-    def set_task_error(self, task_id: str, error: str):
+    def set_task_error(
+        self,
+        task_id: str,
+        error: str,
+        *,
+        error_code: Optional[str] = None,
+        error_meta: Optional[Dict] = None,
+    ):
         """设置任务错误"""
         task = self.get_task(task_id)
         if task:
             task.status = TaskStatus.FAILED
             task.error = error
+            task.error_code = error_code
+            task.error_meta = error_meta
             logger.error(f"[{task_id}] 任务失败: {error}")
 
             # 更新到本地数据库
-            db_client.update_task_status(task_id, "failed", task.current_step, error)
+            db_client.update_task_status(
+                task_id,
+                "failed",
+                task.current_step,
+                error,
+                error_code=error_code,
+                error_meta=error_meta,
+            )
 
             # 更新到内存缓存
             redis_client.cache_task(task_id, self._task_to_dict(task))

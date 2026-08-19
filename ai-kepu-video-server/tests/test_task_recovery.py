@@ -1,3 +1,5 @@
+import errno
+import json
 import sqlite3
 import threading
 import time
@@ -108,7 +110,11 @@ class FakeAssetGenerator:
     def generate(self, value, **kwargs):
         index = kwargs.get("index")
         if index is None:
-            index = int(kwargs["filename"].split("_")[-1])
+            index = next(
+                int(part)
+                for part in kwargs["filename"].split("_")
+                if part.isdigit()
+            )
         self.calls.append(index)
         self.call_kwargs.append({"value": value, **kwargs})
         if index in self.cancel_indexes:
@@ -124,15 +130,55 @@ class FakeAssetGenerator:
 
 
 class FakeDraftBuilder:
-    def __init__(self, error=None):
+    def __init__(self, error=None, write_partial=False):
         self.calls = 0
         self.error = error
+        self.write_partial = write_partial
 
     def build(self, **kwargs):
         self.calls += 1
+        output_dir = Path(kwargs["output_dir"])
+        output_dir.mkdir(parents=True, exist_ok=True)
         if self.error:
+            if self.write_partial:
+                (output_dir / "draft_content.json").write_text(
+                    '{"partial":', encoding="utf-8"
+                )
             raise self.error
-        return str(Path(kwargs["output_dir"]) / "draft")
+
+        def material_path(path):
+            candidate = Path(path)
+            try:
+                return candidate.relative_to(output_dir).as_posix()
+            except ValueError:
+                return str(candidate)
+
+        media_paths = [
+            material_path(path)
+            for path in kwargs.get("media_paths") or []
+        ]
+        audio_paths = [
+            material_path(path)
+            for path in kwargs.get("voiceover_files") or []
+        ]
+        (output_dir / "draft_content.json").write_text(
+            json.dumps(
+                {
+                    "tracks": [{"id": "track-1"}],
+                    "materials": {
+                        "videos": [{"path": path} for path in media_paths],
+                        "audios": [{"path": path} for path in audio_paths],
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        (output_dir / "draft_meta_info.json").write_text(
+            json.dumps({"draft_name": kwargs.get("draft_name")}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return str(output_dir)
 
 
 class FakeUploader:
@@ -143,6 +189,65 @@ class FakeUploader:
 class FailingUploader:
     def upload(self, path, storage_path=None):
         raise OSError("copy failed")
+
+
+class UnauthorizedProviderError(RuntimeError):
+    status_code = 401
+
+
+class UnauthorizedImageGenerator(FakeAssetGenerator):
+    def generate(self, value, **kwargs):
+        index = kwargs.get("index", 0)
+        self.calls.append(index)
+        raise UnauthorizedProviderError("Authorization: Bearer secret-provider-key")
+
+
+class UnauthorizedPromptAgent:
+    def __init__(self):
+        self.calls = 0
+
+    def generate_prompt(self, **_kwargs):
+        self.calls += 1
+        raise UnauthorizedProviderError(
+            "Authorization: Bearer secret-prompt-provider-key"
+        )
+
+
+class RateLimitedProviderError(RuntimeError):
+    status_code = 429
+    headers = {"Retry-After": "13"}
+
+
+class RateLimitedImageGenerator(FakeAssetGenerator):
+    def generate(self, value, **kwargs):
+        index = kwargs.get("index", 0)
+        self.calls.append(index)
+        raise RateLimitedProviderError("provider rate limit")
+
+
+class RateLimitedVoiceGenerator(FakeAssetGenerator):
+    def generate(self, value, **kwargs):
+        index = next(
+            int(part) for part in kwargs["filename"].split("_") if part.isdigit()
+        )
+        self.calls.append(index)
+        raise RateLimitedProviderError("provider rate limit")
+
+
+class SuccessThenUnauthorizedImageGenerator(FakeAssetGenerator):
+    def generate(self, value, **kwargs):
+        index = kwargs.get("index", 0)
+        if index > 0:
+            self.calls.append(index)
+            raise UnauthorizedProviderError("Authorization: Bearer secret-provider-key")
+        return super().generate(value, **kwargs)
+
+
+class DiskFullImageGenerator(FakeAssetGenerator):
+    def generate(self, value, **kwargs):
+        index = kwargs.get("index", 0)
+        self.calls.append(index)
+        raise OSError(errno.ENOSPC, "disk full")
 
 
 class FakeFFmpegExporter:
@@ -185,6 +290,27 @@ def create_task(db, task_id="task-1", status="pending", theme="原始内容"):
     )
     if status != "pending":
         db.update_task_status(task_id, status, "image_generation")
+
+
+def create_asset_resume_task(db, task_id: str, count: int = 5):
+    create_task(db, task_id=task_id, status="interrupted")
+    script = "。".join(f"第 {index + 1} 段" for index in range(count)) + "。"
+    db.save_task_checkpoint(
+        task_id,
+        script_text=script,
+        summary="摘要",
+        input_mode="script",
+    )
+    db.save_segments(task_id, [
+        {
+            "segment_index": index,
+            "text": f"第 {index + 1} 段",
+            "image_prompt": f"prompt-{index}",
+            "image_status": "pending",
+            "audio_status": "pending",
+        }
+        for index in range(count)
+    ])
 
 
 def test_checkpoint_round_trip(temp_db):
@@ -430,6 +556,1209 @@ def test_completed_status_with_missing_file_is_regenerated(tmp_path):
     assert work.voiceover_files == [None]
 
 
+def test_scoped_asset_retry_calls_only_the_missing_image_and_preserves_other_rows(
+    executor_db, tmp_path, monkeypatch
+):
+    executor_db.create_task(
+        "scoped-retry",
+        "主题",
+        "知识科普|电影质感",
+        100,
+        execution_mode="review_first",
+    )
+    project_dir = tmp_path / "project"
+    images_dir = project_dir / "images"
+    audio_dir = project_dir / "voiceovers"
+    images_dir.mkdir(parents=True)
+    audio_dir.mkdir(parents=True)
+    segments = []
+    for index in range(3):
+        image_path = images_dir / f"segment_{index:03d}.png"
+        audio_path = audio_dir / f"seg_{index:03d}.wav"
+        audio_path.write_bytes(b"audio")
+        if index != 1:
+            image_path.write_bytes(b"image")
+        segments.append({
+            "segment_index": index,
+            "text": f"第 {index + 1} 段",
+            "image_prompt": f"prompt-{index}",
+            "image_path": str(image_path) if index != 1 else None,
+            "image_status": "completed" if index != 1 else "failed",
+            "image_error": None if index != 1 else "限流失败",
+            "audio_path": str(audio_path),
+            "audio_status": "completed",
+        })
+    executor_db.save_segments("scoped-retry", segments)
+    executor_db.update_task_workflow(
+        "scoped-retry",
+        "generating_assets",
+        status="interrupted",
+        current_step="image_generation",
+    )
+    with executor_db.get_connection() as connection:
+        for index in range(3):
+            connection.execute(
+                "UPDATE task_segments SET updated_at=? WHERE task_id=? AND segment_index=?",
+                (f"2026-08-18 20:00:0{index}", "scoped-retry", index),
+            )
+    target = [{
+        "segment_index": 1,
+        "asset_type": "image",
+        "mode": "retry",
+        "status": "processing",
+        "error": None,
+    }]
+    operation = executor_db.create_task_operation(
+        "scoped-retry", "retry_assets", "retry-key", "snapshot", target
+    )["operation"]
+    pipeline = FakePipeline(str(project_dir))
+    monkeypatch.setattr(task_executor_module, "LocalUploader", FakeUploader)
+    monkeypatch.setattr(
+        task_executor_module.Config,
+        "generation_config",
+        lambda: {"image_concurrency": 8, "tts_concurrency": 1},
+    )
+
+    TaskExecutor(pipeline_factory=lambda **_kwargs: pipeline)._run_asset_retry(
+        "scoped-retry", operation["operation_id"], target, TaskCancellation()
+    )
+
+    rows = executor_db.get_segments("scoped-retry")
+    assert pipeline.image_generator.calls == [1]
+    assert pipeline.voiceover_generator.calls == []
+    assert pipeline.image_prompt_agent.calls == 0
+    assert pipeline.draft_builder.calls == 0
+    assert rows[0]["updated_at"] == "2026-08-18 20:00:00"
+    assert rows[2]["updated_at"] == "2026-08-18 20:00:02"
+    assert rows[0]["image_path"] == str(images_dir / "segment_000.png")
+    assert rows[2]["audio_path"] == str(audio_dir / "seg_002.wav")
+    assert rows[1]["image_status"] == "completed"
+    assert executor_db.get_task_operation(operation["operation_id"])["state"] == "completed"
+    assert executor_db.get_task("scoped-retry")["status"] == "awaiting_finalization"
+
+
+def test_asset_auth_failure_stops_new_dispatch_and_persists_safe_targets(
+    executor_db, tmp_path, monkeypatch
+):
+    task_id = "auth-stop-dispatch"
+    executor_db.create_task(
+        task_id,
+        "主题",
+        "知识科普|电影质感",
+        100,
+        execution_mode="review_first",
+    )
+    targets = []
+    segments = []
+    for index in range(5):
+        audio = tmp_path / "audio" / f"seg_{index:03d}.wav"
+        audio.parent.mkdir(parents=True, exist_ok=True)
+        audio.write_bytes(b"wav")
+        segments.append({
+            "segment_index": index,
+            "text": f"第 {index + 1} 段",
+            "image_prompt": f"prompt-{index}",
+            "image_status": "pending",
+            "audio_path": str(audio),
+            "audio_status": "completed",
+        })
+        targets.append({
+            "segment_index": index,
+            "asset_type": "image",
+            "status": "processing",
+        })
+    executor_db.save_segments(task_id, segments)
+    operation = executor_db.create_task_operation(
+        task_id,
+        "retry_assets",
+        "auth-stop-key",
+        "snapshot",
+        targets,
+    )["operation"]
+    pipeline = FakePipeline(output_dir=str(tmp_path / "generated"))
+    pipeline.image_generator = UnauthorizedImageGenerator(
+        tmp_path / "generated" / "images", "png"
+    )
+    monkeypatch.setattr(
+        task_executor_module.Config,
+        "generation_config",
+        lambda: {
+            "image_concurrency": 1,
+            "tts_concurrency": 1,
+            "prompt_concurrency": 1,
+        },
+    )
+    monkeypatch.setattr(task_executor_module, "LocalUploader", FakeUploader)
+
+    TaskExecutor(pipeline_factory=lambda **_kwargs: pipeline)._run_asset_retry(
+        task_id,
+        operation["operation_id"],
+        targets,
+        TaskCancellation(),
+    )
+
+    assert pipeline.image_generator.calls == [0]
+    stored_operation = executor_db.get_task_operation(operation["operation_id"])
+    assert stored_operation["state"] == "failed"
+    assert stored_operation["error_code"] == "auth"
+    assert stored_operation["failed_count"] == 5
+    assert sum(bool(item.get("not_dispatched")) for item in stored_operation["targets"]) == 4
+    assert all(item.get("error_code") == "auth" for item in stored_operation["targets"])
+    serialized = json.dumps(stored_operation, ensure_ascii=False)
+    assert "secret-provider-key" not in serialized
+    rows = executor_db.get_segments(task_id)
+    assert all(row["image_error_code"] == "auth" for row in rows)
+
+
+def test_prompt_auth_failure_stops_new_prompt_dispatch(
+    executor_db, tmp_path, monkeypatch
+):
+    task_id = "prompt-auth-stop"
+    executor_db.create_task(
+        task_id,
+        "主题",
+        "知识科普|电影质感",
+        100,
+        execution_mode="review_first",
+    )
+    executor_db.save_task_checkpoint(
+        task_id,
+        script_text="第一段。第二段。第三段。第四段。第五段。",
+        summary="摘要",
+        input_mode="script",
+    )
+    executor_db.save_segments(task_id, [
+        {
+            "segment_index": index,
+            "text": f"第 {index + 1} 段",
+            "image_prompt": "",
+            "prompt_status": "pending",
+            "image_status": "pending",
+            "audio_status": "pending",
+        }
+        for index in range(5)
+    ])
+    pipeline = FakePipeline(output_dir=str(tmp_path / "generated"))
+    pipeline.image_prompt_agent = UnauthorizedPromptAgent()
+    monkeypatch.setattr(
+        task_executor_module.Config,
+        "generation_config",
+        lambda: {
+            "prompt_concurrency": 1,
+            "image_concurrency": 1,
+            "tts_concurrency": 1,
+        },
+    )
+
+    TaskExecutor(pipeline_factory=lambda **_kwargs: pipeline).run_inline(
+        task_id, cancellation=TaskCancellation()
+    )
+
+    assert pipeline.image_prompt_agent.calls == 1
+    rows = executor_db.get_segments(task_id)
+    assert rows[0]["prompt_status"] == "failed"
+    assert rows[0]["prompt_error_code"] == "auth"
+    assert all(row["prompt_status"] == "pending" for row in rows[1:])
+    task = executor_db.get_task(task_id)
+    assert task["status"] == "interrupted"
+    assert task["error_code"] == "auth"
+    assert "secret-prompt-provider-key" not in json.dumps(task, ensure_ascii=False)
+
+
+def test_initial_image_rate_limit_pauses_only_images_and_keeps_tts_running(
+    executor_db, tmp_path, monkeypatch
+):
+    task_id = "initial-image-rate-limit"
+    create_asset_resume_task(executor_db, task_id)
+    pipeline = FakePipeline(output_dir=str(tmp_path / "generated"))
+    pipeline.image_generator = RateLimitedImageGenerator(
+        tmp_path / "generated" / "images", "png"
+    )
+    monkeypatch.setattr(task_executor_module, "LocalUploader", FakeUploader)
+    monkeypatch.setattr(
+        task_executor_module.Config,
+        "generation_config",
+        lambda: {
+            "prompt_concurrency": 1,
+            "image_concurrency": 1,
+            "tts_concurrency": 1,
+        },
+    )
+
+    TaskExecutor(pipeline_factory=lambda **_kwargs: pipeline).run_inline(
+        task_id, cancellation=TaskCancellation()
+    )
+
+    rows = executor_db.get_segments(task_id)
+    assert pipeline.image_generator.calls == [0]
+    assert pipeline.voiceover_generator.calls == [0, 1, 2, 3, 4]
+    assert all(row["image_status"] == "failed" for row in rows)
+    assert all(row["image_error_code"] == "rate_limit" for row in rows)
+    assert all(
+        row["image_error_meta"]["retry_after_seconds"] == 13 for row in rows
+    )
+    assert all(row["audio_status"] == "completed" for row in rows)
+    assert executor_db.get_task(task_id)["error_code"] == "rate_limit"
+    assert pipeline.draft_builder.calls == 0
+
+
+def test_initial_tts_rate_limit_pauses_only_tts_and_keeps_images_running(
+    executor_db, tmp_path, monkeypatch
+):
+    task_id = "initial-tts-rate-limit"
+    create_asset_resume_task(executor_db, task_id)
+    pipeline = FakePipeline(output_dir=str(tmp_path / "generated"))
+    pipeline.voiceover_generator = RateLimitedVoiceGenerator(
+        tmp_path / "generated" / "voiceovers", "wav"
+    )
+    monkeypatch.setattr(task_executor_module, "LocalUploader", FakeUploader)
+    monkeypatch.setattr(
+        task_executor_module.Config,
+        "generation_config",
+        lambda: {
+            "prompt_concurrency": 1,
+            "image_concurrency": 1,
+            "tts_concurrency": 1,
+        },
+    )
+
+    TaskExecutor(pipeline_factory=lambda **_kwargs: pipeline).run_inline(
+        task_id, cancellation=TaskCancellation()
+    )
+
+    rows = executor_db.get_segments(task_id)
+    assert pipeline.voiceover_generator.calls == [0]
+    assert pipeline.image_generator.calls == [0, 1, 2, 3, 4]
+    assert all(row["audio_status"] == "failed" for row in rows)
+    assert all(row["audio_error_code"] == "rate_limit" for row in rows)
+    assert all(
+        row["audio_error_meta"]["retry_after_seconds"] == 13 for row in rows
+    )
+    assert all(row["image_status"] == "completed" for row in rows)
+    assert executor_db.get_task(task_id)["error_code"] == "rate_limit"
+    assert pipeline.draft_builder.calls == 0
+
+
+def test_initial_image_auth_stops_new_images_and_preserves_completed_assets(
+    executor_db, tmp_path, monkeypatch
+):
+    task_id = "initial-image-auth"
+    create_asset_resume_task(executor_db, task_id)
+    pipeline = FakePipeline(output_dir=str(tmp_path / "generated"))
+    pipeline.image_generator = SuccessThenUnauthorizedImageGenerator(
+        tmp_path / "generated" / "images", "png"
+    )
+    monkeypatch.setattr(task_executor_module, "LocalUploader", FakeUploader)
+    monkeypatch.setattr(
+        task_executor_module.Config,
+        "generation_config",
+        lambda: {
+            "prompt_concurrency": 1,
+            "image_concurrency": 1,
+            "tts_concurrency": 1,
+        },
+    )
+
+    TaskExecutor(pipeline_factory=lambda **_kwargs: pipeline).run_inline(
+        task_id, cancellation=TaskCancellation()
+    )
+
+    rows = executor_db.get_segments(task_id)
+    assert pipeline.image_generator.calls == [0, 1]
+    assert pipeline.voiceover_generator.calls == [0, 1, 2, 3, 4]
+    assert rows[0]["image_status"] == "completed"
+    assert Path(rows[0]["image_path"]).is_file()
+    assert all(row["image_status"] == "failed" for row in rows[1:])
+    assert all(row["image_error_code"] == "auth" for row in rows[1:])
+    assert all(row["audio_status"] == "completed" for row in rows)
+    serialized = json.dumps(
+        {
+            "task": executor_db.get_task(task_id),
+            "segments": rows,
+        },
+        ensure_ascii=False,
+    )
+    assert "secret-provider-key" not in serialized
+    assert pipeline.draft_builder.calls == 0
+
+
+def test_initial_disk_failure_stops_both_asset_lanes_after_started_work_drains(
+    executor_db, tmp_path, monkeypatch
+):
+    task_id = "initial-shared-disk-stop"
+    create_asset_resume_task(executor_db, task_id)
+    pipeline = FakePipeline(output_dir=str(tmp_path / "generated"))
+    voice_started = threading.Event()
+
+    def hold_first_voice(_index):
+        voice_started.set()
+        time.sleep(0.05)
+
+    pipeline.voiceover_generator.on_generate = hold_first_voice
+
+    def disk_full_after_voice_started(_value, **kwargs):
+        index = kwargs.get("index", 0)
+        pipeline.image_generator.calls.append(index)
+        assert voice_started.wait(timeout=1)
+        raise OSError(errno.ENOSPC, "disk full")
+
+    pipeline.image_generator.generate = disk_full_after_voice_started
+    monkeypatch.setattr(task_executor_module, "LocalUploader", FakeUploader)
+    monkeypatch.setattr(
+        task_executor_module.Config,
+        "generation_config",
+        lambda: {
+            "prompt_concurrency": 1,
+            "image_concurrency": 1,
+            "tts_concurrency": 1,
+        },
+    )
+
+    TaskExecutor(pipeline_factory=lambda **_kwargs: pipeline).run_inline(
+        task_id, cancellation=TaskCancellation()
+    )
+
+    rows = executor_db.get_segments(task_id)
+    assert pipeline.image_generator.calls == [0]
+    assert pipeline.voiceover_generator.calls == [0]
+    assert rows[0]["image_status"] == "failed"
+    assert rows[0]["image_error_code"] == "disk"
+    assert rows[0]["audio_status"] == "completed"
+    assert all(row["image_error_code"] == "disk" for row in rows[1:])
+    assert all(row["audio_error_code"] == "disk" for row in rows[1:])
+    assert executor_db.get_task(task_id)["error_code"] == "disk"
+    assert pipeline.draft_builder.calls == 0
+
+
+def test_29_segment_retry_changes_only_the_twelfth_missing_image(
+    executor_db, tmp_path, monkeypatch
+):
+    task_id = "twenty-nine-segment-retry"
+    executor_db.create_task(
+        task_id,
+        "主题",
+        "知识科普|电影质感",
+        100,
+        execution_mode="review_first",
+    )
+    project_dir = tmp_path / "project-29"
+    images_dir = project_dir / "images"
+    audio_dir = project_dir / "voiceovers"
+    images_dir.mkdir(parents=True)
+    audio_dir.mkdir(parents=True)
+    segments = []
+    original_mtimes = {}
+    for index in range(29):
+        image_path = images_dir / f"segment_{index:03d}.png"
+        audio_path = audio_dir / f"seg_{index:03d}.wav"
+        if index != 11:
+            image_path.write_bytes(f"image-{index}".encode())
+            original_mtimes[(index, "image")] = image_path.stat().st_mtime_ns
+        audio_path.write_bytes(f"audio-{index}".encode())
+        original_mtimes[(index, "audio")] = audio_path.stat().st_mtime_ns
+        segments.append({
+            "segment_index": index,
+            "text": f"第 {index + 1} 段",
+            "image_prompt": f"prompt-{index}",
+            "image_path": str(image_path) if index != 11 else None,
+            "image_status": "completed" if index != 11 else "failed",
+            "image_error": None if index != 11 else "provider error",
+            "audio_path": str(audio_path),
+            "audio_status": "completed",
+        })
+    executor_db.save_segments(task_id, segments)
+    expected_timestamps = {}
+    with executor_db.get_connection() as connection:
+        for index in range(29):
+            timestamp = f"2026-08-19 12:00:{index:02d}"
+            expected_timestamps[index] = timestamp
+            connection.execute(
+                "UPDATE task_segments SET updated_at=? WHERE task_id=? AND segment_index=?",
+                (timestamp, task_id, index),
+            )
+    target = [{
+        "segment_index": 11,
+        "asset_type": "image",
+        "mode": "retry",
+        "status": "processing",
+        "error": None,
+    }]
+    operation = executor_db.create_task_operation(
+        task_id, "retry_assets", "twenty-nine-retry-key", "snapshot", target
+    )["operation"]
+    pipeline = FakePipeline(str(project_dir))
+    monkeypatch.setattr(task_executor_module, "LocalUploader", FakeUploader)
+    monkeypatch.setattr(
+        task_executor_module.Config,
+        "generation_config",
+        lambda: {"image_concurrency": 8, "tts_concurrency": 1},
+    )
+
+    TaskExecutor(pipeline_factory=lambda **_kwargs: pipeline)._run_asset_retry(
+        task_id, operation["operation_id"], target, TaskCancellation()
+    )
+
+    rows = executor_db.get_segments(task_id)
+    assert pipeline.image_generator.calls == [11]
+    assert pipeline.voiceover_generator.calls == []
+    assert pipeline.image_prompt_agent.calls == 0
+    assert pipeline.draft_builder.calls == 0
+    assert rows[11]["image_status"] == "completed"
+    assert Path(rows[11]["image_path"]).is_file()
+    for row in rows:
+        index = row["segment_index"]
+        if index == 11:
+            assert row["audio_path"] == str(audio_dir / "seg_011.wav")
+            assert (audio_dir / "seg_011.wav").stat().st_mtime_ns == original_mtimes[(11, "audio")]
+            continue
+        assert row["image_path"] == str(images_dir / f"segment_{index:03d}.png")
+        assert row["audio_path"] == str(audio_dir / f"seg_{index:03d}.wav")
+        assert row["updated_at"] == expected_timestamps[index]
+        assert Path(row["image_path"]).stat().st_mtime_ns == original_mtimes[(index, "image")]
+        assert Path(row["audio_path"]).stat().st_mtime_ns == original_mtimes[(index, "audio")]
+
+
+def test_mixed_asset_retry_calls_only_each_requested_provider(
+    executor_db, tmp_path, monkeypatch
+):
+    task_id = "mixed-asset-retry"
+    executor_db.create_task(
+        task_id,
+        "主题",
+        "知识科普|电影质感",
+        100,
+        execution_mode="review_first",
+    )
+    project_dir = tmp_path / "mixed-project"
+    images_dir = project_dir / "images"
+    audio_dir = project_dir / "voiceovers"
+    images_dir.mkdir(parents=True)
+    audio_dir.mkdir(parents=True)
+    image_one = images_dir / "segment_001.png"
+    image_two = images_dir / "segment_002.png"
+    audio_zero = audio_dir / "seg_000.wav"
+    audio_two = audio_dir / "seg_002.wav"
+    for path, content in (
+        (image_one, b"image-one"),
+        (image_two, b"image-two"),
+        (audio_zero, b"audio-zero"),
+        (audio_two, b"audio-two"),
+    ):
+        path.write_bytes(content)
+    executor_db.save_segments(task_id, [
+        {
+            "segment_index": 0,
+            "text": "第一段",
+            "image_prompt": "prompt-0",
+            "image_status": "failed",
+            "audio_path": str(audio_zero),
+            "audio_status": "completed",
+        },
+        {
+            "segment_index": 1,
+            "text": "第二段",
+            "image_prompt": "prompt-1",
+            "image_path": str(image_one),
+            "image_status": "completed",
+            "audio_status": "failed",
+        },
+        {
+            "segment_index": 2,
+            "text": "第三段",
+            "image_prompt": "prompt-2",
+            "image_path": str(image_two),
+            "image_status": "completed",
+            "audio_path": str(audio_two),
+            "audio_status": "completed",
+        },
+    ])
+    with executor_db.get_connection() as connection:
+        connection.execute(
+            "UPDATE task_segments SET updated_at=? WHERE task_id=? AND segment_index=2",
+            ("2026-08-19 13:00:00", task_id),
+        )
+    untouched_image_mtime = image_two.stat().st_mtime_ns
+    untouched_audio_mtime = audio_two.stat().st_mtime_ns
+    targets = [
+        {
+            "segment_index": 0,
+            "asset_type": "image",
+            "mode": "retry",
+            "status": "processing",
+            "error": None,
+        },
+        {
+            "segment_index": 1,
+            "asset_type": "audio",
+            "mode": "retry",
+            "status": "processing",
+            "error": None,
+        },
+    ]
+    operation = executor_db.create_task_operation(
+        task_id, "retry_assets", "mixed-retry-key", "snapshot", targets
+    )["operation"]
+    pipeline = FakePipeline(str(project_dir))
+    monkeypatch.setattr(task_executor_module, "LocalUploader", FakeUploader)
+    monkeypatch.setattr(
+        task_executor_module.Config,
+        "generation_config",
+        lambda: {"image_concurrency": 8, "tts_concurrency": 2},
+    )
+
+    TaskExecutor(pipeline_factory=lambda **_kwargs: pipeline)._run_asset_retry(
+        task_id, operation["operation_id"], targets, TaskCancellation()
+    )
+
+    rows = executor_db.get_segments(task_id)
+    assert pipeline.image_generator.calls == [0]
+    assert pipeline.voiceover_generator.calls == [1]
+    assert pipeline.image_prompt_agent.calls == 0
+    assert pipeline.draft_builder.calls == 0
+    assert rows[0]["image_status"] == "completed"
+    assert rows[1]["audio_status"] == "completed"
+    assert rows[2]["updated_at"] == "2026-08-19 13:00:00"
+    assert image_two.stat().st_mtime_ns == untouched_image_mtime
+    assert audio_two.stat().st_mtime_ns == untouched_audio_mtime
+
+
+def test_full_asset_retry_keeps_legacy_mode_and_exposes_finalize_without_migrating(
+    executor_db, tmp_path, monkeypatch
+):
+    executor_db.create_task(
+        "full-scoped-retry",
+        "主题",
+        "知识科普|电影质感",
+        100,
+        execution_mode="full",
+    )
+    project_dir = tmp_path / "project"
+    audio = project_dir / "voiceovers" / "seg_000.wav"
+    audio.parent.mkdir(parents=True)
+    audio.write_bytes(b"audio")
+    executor_db.save_segments("full-scoped-retry", [{
+        "segment_index": 0,
+        "text": "第一段",
+        "image_prompt": "prompt",
+        "image_status": "failed",
+        "audio_path": str(audio),
+        "audio_status": "completed",
+    }])
+    executor_db.update_task_workflow(
+        "full-scoped-retry",
+        "generating_assets",
+        status="interrupted",
+        current_step="image_generation",
+    )
+    target = [{
+        "segment_index": 0,
+        "asset_type": "image",
+        "mode": "retry",
+        "status": "processing",
+        "error": None,
+    }]
+    operation = executor_db.create_task_operation(
+        "full-scoped-retry", "retry_assets", "full-retry-key", "snapshot", target
+    )["operation"]
+    pipeline = FakePipeline(str(project_dir))
+    monkeypatch.setattr(task_executor_module, "LocalUploader", FakeUploader)
+    monkeypatch.setattr(
+        task_executor_module.Config,
+        "generation_config",
+        lambda: {"image_concurrency": 8, "tts_concurrency": 1},
+    )
+
+    TaskExecutor(pipeline_factory=lambda **_kwargs: pipeline)._run_asset_retry(
+        "full-scoped-retry", operation["operation_id"], target, TaskCancellation()
+    )
+
+    task = executor_db.get_task("full-scoped-retry")
+    assert task["execution_mode"] == "full"
+    assert task["status"] == "interrupted"
+    assert task["workflow_phase"] == "generating_assets"
+    assert task["current_step"] == "draft_building"
+    assert pipeline.image_generator.calls == [0]
+    assert pipeline.voiceover_generator.calls == []
+    assert pipeline.draft_builder.calls == 0
+
+
+def test_stale_update_replaces_only_the_selected_asset_and_keeps_old_file(
+    executor_db, tmp_path, monkeypatch
+):
+    executor_db.create_task(
+        "stale-update",
+        "主题",
+        "知识科普|电影质感",
+        100,
+        execution_mode="review_first",
+    )
+    project_dir = tmp_path / "project"
+    images = project_dir / "images"
+    audio_dir = project_dir / "voiceovers"
+    images.mkdir(parents=True)
+    audio_dir.mkdir(parents=True)
+    old_image = images / "old-000.png"
+    untouched_image = images / "segment-001.png"
+    audio0 = audio_dir / "segment-000.wav"
+    audio1 = audio_dir / "segment-001.wav"
+    old_image.write_bytes(b"old-image")
+    untouched_image.write_bytes(b"untouched-image")
+    audio0.write_bytes(b"audio-0")
+    audio1.write_bytes(b"audio-1")
+    executor_db.save_segments("stale-update", [
+        {
+            "segment_index": 0,
+            "text": "第一段",
+            "image_prompt": "new-prompt",
+            "image_path": str(old_image),
+            "image_status": "stale",
+            "audio_path": str(audio0),
+            "audio_status": "completed",
+        },
+        {
+            "segment_index": 1,
+            "text": "第二段",
+            "image_prompt": "prompt-1",
+            "image_path": str(untouched_image),
+            "image_status": "completed",
+            "audio_path": str(audio1),
+            "audio_status": "completed",
+        },
+    ])
+    executor_db.save_task_result("stale-update", str(project_dir), 2)
+    with executor_db.get_connection() as connection:
+        connection.execute(
+            "UPDATE task_segments SET updated_at=? WHERE task_id=? AND segment_index=1",
+            ("2026-08-19 12:34:56", "stale-update"),
+        )
+    untouched_mtime = untouched_image.stat().st_mtime_ns
+    target = [{
+        "segment_index": 0,
+        "asset_type": "image",
+        "mode": "replace",
+        "status": "processing",
+        "error": None,
+    }]
+    operation = executor_db.create_task_operation(
+        "stale-update", "retry_assets", "stale-update-key", "snapshot", target
+    )["operation"]
+    pipeline = FakePipeline(str(project_dir))
+    monkeypatch.setattr(task_executor_module, "LocalUploader", FakeUploader)
+    monkeypatch.setattr(
+        task_executor_module.Config,
+        "generation_config",
+        lambda: {"image_concurrency": 8, "tts_concurrency": 1},
+    )
+
+    TaskExecutor(pipeline_factory=lambda **_kwargs: pipeline)._run_asset_retry(
+        "stale-update", operation["operation_id"], target, TaskCancellation()
+    )
+
+    rows = executor_db.get_segments("stale-update")
+    task = executor_db.get_task("stale-update")
+    assert pipeline.image_generator.calls == [0]
+    assert pipeline.voiceover_generator.calls == []
+    assert pipeline.image_prompt_agent.calls == 0
+    assert pipeline.draft_builder.calls == 0
+    assert rows[0]["image_status"] == "completed"
+    assert rows[0]["image_path"] != str(old_image)
+    assert Path(rows[0]["image_path"]).is_file()
+    assert old_image.read_bytes() == b"old-image"
+    assert rows[1]["image_path"] == str(untouched_image)
+    assert rows[1]["updated_at"] == "2026-08-19 12:34:56"
+    assert untouched_image.stat().st_mtime_ns == untouched_mtime
+    assert task["status"] == "awaiting_finalization"
+    assert task.get("result") is None
+
+
+def test_failed_replacement_keeps_the_previous_asset_and_ready_draft(
+    executor_db, tmp_path, monkeypatch
+):
+    executor_db.create_task(
+        "replace-failure",
+        "主题",
+        "知识科普|电影质感",
+        100,
+        execution_mode="review_first",
+    )
+    project_dir = tmp_path / "project"
+    image = project_dir / "images" / "segment_000.png"
+    audio = project_dir / "voiceovers" / "seg_000.wav"
+    image.parent.mkdir(parents=True)
+    audio.parent.mkdir(parents=True)
+    image.write_bytes(b"old-image")
+    audio.write_bytes(b"audio")
+    executor_db.save_segments("replace-failure", [{
+        "segment_index": 0,
+        "text": "第一段",
+        "image_prompt": "prompt",
+        "image_path": str(image),
+        "image_status": "completed",
+        "audio_path": str(audio),
+        "audio_status": "completed",
+    }])
+    executor_db.save_task_result("replace-failure", str(project_dir), 1)
+    executor_db.update_task_workflow(
+        "replace-failure", "ready", status="completed", current_step="completed"
+    )
+    target = [{
+        "segment_index": 0,
+        "asset_type": "image",
+        "mode": "replace",
+        "status": "processing",
+        "error": None,
+    }]
+    operation = executor_db.create_task_operation(
+        "replace-failure", "retry_assets", "replace-key", "snapshot", target
+    )["operation"]
+    pipeline = FakePipeline(str(project_dir), fail_assets=True)
+    monkeypatch.setattr(task_executor_module, "LocalUploader", FakeUploader)
+    monkeypatch.setattr(
+        task_executor_module.Config,
+        "generation_config",
+        lambda: {"image_concurrency": 8, "tts_concurrency": 1},
+    )
+
+    TaskExecutor(pipeline_factory=lambda **_kwargs: pipeline)._run_asset_retry(
+        "replace-failure", operation["operation_id"], target, TaskCancellation()
+    )
+
+    row = executor_db.get_segments("replace-failure")[0]
+    assert row["image_path"] == str(image)
+    assert row["image_status"] == "completed"
+    assert image.read_bytes() == b"old-image"
+    assert executor_db.get_task("replace-failure")["status"] == "completed"
+    assert executor_db.get_task("replace-failure")["result"]["draft_path"] == str(project_dir)
+    assert executor_db.get_task_operation(operation["operation_id"])["state"] == "failed"
+
+
+def test_finalize_uses_existing_assets_without_generation_calls(
+    executor_db, tmp_path, monkeypatch
+):
+    executor_db.create_task(
+        "finalize-only",
+        "主题",
+        "知识科普|电影质感",
+        100,
+        execution_mode="review_first",
+    )
+    project_dir = tmp_path / "project"
+    image = project_dir / "images" / "segment_000.png"
+    audio = project_dir / "voiceovers" / "seg_000.wav"
+    image.parent.mkdir(parents=True)
+    audio.parent.mkdir(parents=True)
+    image.write_bytes(b"image")
+    audio.write_bytes(b"audio")
+    executor_db.save_segments("finalize-only", [{
+        "segment_index": 0,
+        "text": "第一段",
+        "image_prompt": "prompt",
+        "image_path": str(image),
+        "image_status": "completed",
+        "audio_path": str(audio),
+        "audio_status": "completed",
+    }])
+    executor_db.update_task_workflow(
+        "finalize-only",
+        "awaiting_finalization",
+        status="awaiting_finalization",
+        current_step="awaiting_finalization",
+    )
+    operation = executor_db.create_task_operation(
+        "finalize-only",
+        "finalize",
+        "finalize-key",
+        "snapshot",
+        [{"asset_type": "draft", "status": "running"}],
+    )["operation"]
+    pipeline = FakePipeline(str(project_dir))
+    monkeypatch.setattr(task_executor_module, "LocalUploader", FakeUploader)
+
+    TaskExecutor(pipeline_factory=lambda **_kwargs: pipeline)._run_finalize_task(
+        "finalize-only", operation["operation_id"], TaskCancellation()
+    )
+
+    published_dir = (
+        project_dir
+        / ".finalize"
+        / "versions"
+        / operation["operation_id"]
+        / "主题"
+    )
+    assert pipeline.image_prompt_agent.calls == 0
+    assert pipeline.script_rewriter.calls == 0
+    assert pipeline.text_segmenter.calls == 0
+    assert pipeline.image_generator.calls == []
+    assert pipeline.voiceover_generator.calls == []
+    assert pipeline.draft_builder.calls == 1
+    assert executor_db.get_task_operation(operation["operation_id"])["state"] == "completed"
+    stored_task = executor_db.get_task("finalize-only")
+    assert stored_task["status"] == "completed"
+    assert stored_task["result"]["draft_path"] == str(published_dir)
+    assert published_dir.is_dir()
+    assert (published_dir / "draft_content.json").is_file()
+    assert (published_dir / "draft_meta_info.json").is_file()
+    assert (published_dir / "主题.zip").is_file()
+    assert (published_dir / "images" / "segment_000.png").read_bytes() == b"image"
+    assert (published_dir / "voiceovers" / "seg_000.wav").read_bytes() == b"audio"
+    published_content = json.loads(
+        (published_dir / "draft_content.json").read_text(encoding="utf-8")
+    )
+    for material_type in ("videos", "audios"):
+        for material in published_content["materials"][material_type]:
+            assert (published_dir / material["path"]).is_file()
+    assert not (
+        project_dir / ".finalize" / "staging" / operation["operation_id"]
+    ).exists()
+
+
+def test_finalize_with_a_missing_asset_routes_to_exact_asset_repair(
+    executor_db, tmp_path, monkeypatch
+):
+    executor_db.create_task(
+        "finalize-missing-asset",
+        "主题",
+        "知识科普|电影质感",
+        100,
+        execution_mode="review_first",
+    )
+    project_dir = tmp_path / "project"
+    image = project_dir / "images" / "segment_000.png"
+    audio = project_dir / "voiceovers" / "seg_000.wav"
+    image.parent.mkdir(parents=True)
+    audio.parent.mkdir(parents=True)
+    image.write_bytes(b"image")
+    audio.write_bytes(b"audio")
+    executor_db.save_segments("finalize-missing-asset", [{
+        "segment_index": 0,
+        "text": "第一段",
+        "image_prompt": "prompt",
+        "image_path": str(image),
+        "image_status": "completed",
+        "audio_path": str(audio),
+        "audio_status": "completed",
+    }])
+    operation = executor_db.create_task_operation(
+        "finalize-missing-asset",
+        "finalize",
+        "finalize-missing-key",
+        "snapshot",
+        [{"asset_type": "draft", "status": "running"}],
+    )["operation"]
+    image.unlink()
+    pipeline = FakePipeline(str(project_dir))
+    monkeypatch.setattr(task_executor_module, "LocalUploader", FakeUploader)
+
+    TaskExecutor(pipeline_factory=lambda **_kwargs: pipeline)._run_finalize_task(
+        "finalize-missing-asset", operation["operation_id"], TaskCancellation()
+    )
+
+    task = executor_db.get_task("finalize-missing-asset")
+    stored_operation = executor_db.get_task_operation(operation["operation_id"])
+    assert pipeline.image_prompt_agent.calls == 0
+    assert pipeline.image_generator.calls == []
+    assert pipeline.voiceover_generator.calls == []
+    assert pipeline.draft_builder.calls == 0
+    assert task["status"] == "interrupted"
+    assert task["current_step"] == "asset_repair"
+    assert "分镜 1 图片" in stored_operation["error"]
+    assert stored_operation["state"] == "failed"
+    assert not (project_dir / ".finalize").exists()
+
+
+def test_finalize_builder_failure_exposes_finalize_failed_without_losing_assets(
+    executor_db, tmp_path, monkeypatch
+):
+    executor_db.create_task(
+        "finalize-builder-failure",
+        "主题",
+        "知识科普|电影质感",
+        100,
+        execution_mode="review_first",
+    )
+    project_dir = tmp_path / "project"
+    image = project_dir / "images" / "segment_000.png"
+    audio = project_dir / "voiceovers" / "seg_000.wav"
+    image.parent.mkdir(parents=True)
+    audio.parent.mkdir(parents=True)
+    image.write_bytes(b"image")
+    audio.write_bytes(b"audio")
+    old_draft = project_dir / "existing-draft"
+    old_draft.mkdir()
+    old_marker = old_draft / "draft_content.json"
+    old_marker.write_text('{"old": true}', encoding="utf-8")
+    assert executor_db.save_task_result(
+        "finalize-builder-failure",
+        str(old_draft),
+        1,
+        draft_url="/media/old-draft.zip",
+    )
+    executor_db.save_segments("finalize-builder-failure", [{
+        "segment_index": 0,
+        "text": "第一段",
+        "image_prompt": "prompt",
+        "image_path": str(image),
+        "image_status": "completed",
+        "audio_path": str(audio),
+        "audio_status": "completed",
+    }])
+    operation = executor_db.create_task_operation(
+        "finalize-builder-failure",
+        "finalize",
+        "finalize-builder-key",
+        "snapshot",
+        [{"asset_type": "draft", "status": "running"}],
+    )["operation"]
+    pipeline = FakePipeline(str(project_dir))
+    pipeline.draft_builder = FakeDraftBuilder(
+        OSError("disk full"), write_partial=True
+    )
+    monkeypatch.setattr(task_executor_module, "LocalUploader", FakeUploader)
+
+    TaskExecutor(pipeline_factory=lambda **_kwargs: pipeline)._run_finalize_task(
+        "finalize-builder-failure", operation["operation_id"], TaskCancellation()
+    )
+
+    task = executor_db.get_task("finalize-builder-failure")
+    assert pipeline.image_generator.calls == []
+    assert pipeline.voiceover_generator.calls == []
+    assert pipeline.draft_builder.calls == 1
+    assert image.read_bytes() == b"image"
+    assert audio.read_bytes() == b"audio"
+    assert old_marker.read_text(encoding="utf-8") == '{"old": true}'
+    assert task["status"] == "interrupted"
+    assert task["current_step"] == "finalize_failed"
+    assert task["result"]["draft_path"] == str(old_draft)
+    assert task["result"]["draft_url"] == "/media/old-draft.zip"
+    assert executor_db.get_task_operation(operation["operation_id"])["state"] == "failed"
+    assert not (
+        project_dir / ".finalize" / "versions" / operation["operation_id"]
+    ).exists()
+    assert not (
+        project_dir / ".finalize" / "staging" / operation["operation_id"]
+    ).exists()
+
+
+def test_finalize_zip_failure_retains_previous_published_draft_and_result(
+    executor_db, tmp_path, monkeypatch
+):
+    executor_db.create_task(
+        "finalize-zip-failure",
+        "主题",
+        "知识科普|电影质感",
+        100,
+        execution_mode="review_first",
+    )
+    project_dir = tmp_path / "project"
+    image = project_dir / "images" / "segment_000.png"
+    audio = project_dir / "voiceovers" / "seg_000.wav"
+    image.parent.mkdir(parents=True)
+    audio.parent.mkdir(parents=True)
+    image.write_bytes(b"image")
+    audio.write_bytes(b"audio")
+    old_draft = project_dir / "existing-draft"
+    old_draft.mkdir()
+    old_marker = old_draft / "draft_content.json"
+    old_marker.write_text('{"old": true}', encoding="utf-8")
+    assert executor_db.save_task_result(
+        "finalize-zip-failure",
+        str(old_draft),
+        1,
+        draft_url="/media/old-draft.zip",
+    )
+    executor_db.save_segments("finalize-zip-failure", [{
+        "segment_index": 0,
+        "text": "第一段",
+        "image_prompt": "prompt",
+        "image_path": str(image),
+        "image_status": "completed",
+        "audio_path": str(audio),
+        "audio_status": "completed",
+    }])
+    operation = executor_db.create_task_operation(
+        "finalize-zip-failure",
+        "finalize",
+        "finalize-zip-key",
+        "snapshot",
+        [{"asset_type": "draft", "status": "running"}],
+    )["operation"]
+    pipeline = FakePipeline(str(project_dir))
+
+    def fail_after_partial_archive(draft_dir, draft_name):
+        (Path(draft_dir) / f".{draft_name}.zip.tmp").write_bytes(b"partial zip")
+        raise OSError("zip write failed")
+
+    monkeypatch.setattr(
+        task_executor_module, "build_finalize_archive", fail_after_partial_archive
+    )
+    monkeypatch.setattr(task_executor_module, "LocalUploader", FakeUploader)
+
+    TaskExecutor(pipeline_factory=lambda **_kwargs: pipeline)._run_finalize_task(
+        "finalize-zip-failure", operation["operation_id"], TaskCancellation()
+    )
+
+    task = executor_db.get_task("finalize-zip-failure")
+    stored_operation = executor_db.get_task_operation(operation["operation_id"])
+    assert pipeline.image_prompt_agent.calls == 0
+    assert pipeline.image_generator.calls == []
+    assert pipeline.voiceover_generator.calls == []
+    assert pipeline.draft_builder.calls == 1
+    assert image.read_bytes() == b"image"
+    assert audio.read_bytes() == b"audio"
+    assert old_marker.read_text(encoding="utf-8") == '{"old": true}'
+    assert task["status"] == "interrupted"
+    assert task["current_step"] == "finalize_failed"
+    assert task["result"]["draft_path"] == str(old_draft)
+    assert task["result"]["draft_url"] == "/media/old-draft.zip"
+    assert stored_operation["state"] == "failed"
+    assert stored_operation["error_code"] == "disk"
+    assert stored_operation["error"] == stored_operation["error_meta"]["safe_message"]
+    assert not (
+        project_dir / ".finalize" / "versions" / operation["operation_id"]
+    ).exists()
+    assert not (
+        project_dir / ".finalize" / "staging" / operation["operation_id"]
+    ).exists()
+
+
+def test_finish_task_operation_rolls_back_operation_task_and_result_together(
+    temp_db,
+):
+    temp_db.create_task(
+        "atomic-finish-rollback",
+        "主题",
+        "知识科普|电影质感",
+        100,
+        execution_mode="review_first",
+    )
+    temp_db.update_task_workflow(
+        "atomic-finish-rollback",
+        "awaiting_finalization",
+        status="awaiting_finalization",
+        current_step="awaiting_finalization",
+    )
+    assert temp_db.save_task_result(
+        "atomic-finish-rollback",
+        "/old/draft",
+        1,
+        draft_url="/media/old.zip",
+    )
+    operation = temp_db.create_task_operation(
+        "atomic-finish-rollback",
+        "finalize",
+        "atomic-finish-key",
+        "snapshot",
+        [{"asset_type": "draft", "status": "running"}],
+    )["operation"]
+    connection = sqlite3.connect(str(sqlite_client_module.DB_PATH))
+    connection.executescript(
+        """
+        CREATE TRIGGER reject_atomic_finish
+        BEFORE UPDATE OF current_step ON tasks
+        WHEN NEW.task_id = 'atomic-finish-rollback'
+             AND NEW.current_step = 'completed'
+        BEGIN
+            SELECT RAISE(ABORT, 'forced task finish failure');
+        END;
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    committed = temp_db.finish_task_operation(
+        operation["operation_id"],
+        "atomic-finish-rollback",
+        operation_state="completed",
+        operation_targets=[{"asset_type": "draft", "status": "completed"}],
+        completed_count=1,
+        failed_count=0,
+        operation_error="",
+        task_status="completed",
+        workflow_phase="ready",
+        current_step="completed",
+        task_error=None,
+        result={
+            "draft_path": "/new/draft",
+            "draft_url": "/media/new.zip",
+            "video_url": None,
+            "segments_count": 1,
+            "total_duration": None,
+        },
+    )
+
+    assert committed is False
+    stored_operation = temp_db.get_task_operation(operation["operation_id"])
+    stored_task = temp_db.get_task("atomic-finish-rollback")
+    assert stored_operation["state"] == "pending"
+    assert stored_operation["targets"] == [
+        {"asset_type": "draft", "status": "running"}
+    ]
+    assert stored_operation["completed_count"] == 0
+    assert stored_operation["failed_count"] == 0
+    assert stored_task["status"] == "awaiting_finalization"
+    assert stored_task["workflow_phase"] == "awaiting_finalization"
+    assert stored_task["current_step"] == "awaiting_finalization"
+    assert stored_task["result"]["draft_path"] == "/old/draft"
+    assert stored_task["result"]["draft_url"] == "/media/old.zip"
+
+
+def test_task_operation_deduplication_and_restart_preserve_completed_replacements(
+    temp_db, tmp_path
+):
+    temp_db.create_task("operation-restart", "主题", "知识科普|电影质感", 100)
+    image = tmp_path / "ready.png"
+    audio = tmp_path / "ready.wav"
+    image.write_bytes(b"image")
+    audio.write_bytes(b"audio")
+    temp_db.save_segments("operation-restart", [
+        {
+            "segment_index": 0,
+            "text": "第一段",
+            "image_prompt": "prompt-0",
+            "image_path": str(image),
+            "image_status": "completed",
+            "audio_path": str(audio),
+            "audio_status": "completed",
+        },
+        {
+            "segment_index": 1,
+            "text": "第二段",
+            "image_prompt": "prompt-1",
+            "image_status": "processing",
+            "audio_path": str(audio),
+            "audio_status": "completed",
+        },
+    ])
+    targets = [
+        {"segment_index": 0, "asset_type": "image", "mode": "replace", "status": "processing"},
+        {"segment_index": 1, "asset_type": "image", "mode": "retry", "status": "processing"},
+    ]
+
+    created = temp_db.create_task_operation(
+        "operation-restart", "retry_assets", "same-request", "snapshot", targets
+    )
+    duplicate = temp_db.create_task_operation(
+        "operation-restart", "retry_assets", "same-request", "snapshot", targets
+    )
+    conflict = temp_db.create_task_operation(
+        "operation-restart", "retry_assets", "other-request", "snapshot", targets
+    )
+    interrupted = temp_db.interrupt_orphaned_task_operation("operation-restart")
+    retried = temp_db.create_task_operation(
+        "operation-restart", "retry_assets", "same-request", "snapshot", targets
+    )
+
+    rows = temp_db.get_segments("operation-restart")
+    assert created["outcome"] == "created"
+    assert duplicate["outcome"] == "duplicate"
+    assert conflict["outcome"] == "conflict"
+    assert interrupted["state"] == "interrupted"
+    assert retried["outcome"] == "created"
+    assert rows[0]["image_status"] == "completed"
+    assert rows[0]["image_path"] == str(image)
+    assert rows[1]["image_status"] == "failed"
+
+
 def test_each_prompt_is_persisted_before_the_next_model_call(
     executor_db, monkeypatch
 ):
@@ -613,8 +1942,10 @@ def test_provider_item_failures_interrupt_before_draft(executor_db):
     assert executor_db.get_task("task-1")["status"] == "interrupted"
     assert all(row["image_status"] == "failed" for row in rows)
     assert all(row["audio_status"] == "failed" for row in rows)
-    assert all(row["image_error"] == "png failed" for row in rows)
-    assert all(row["audio_error"] == "wav failed" for row in rows)
+    assert all(row["image_error_code"] == "provider_error" for row in rows)
+    assert all(row["audio_error_code"] == "provider_error" for row in rows)
+    assert all(row["image_error"] == row["image_error_meta"]["safe_message"] for row in rows)
+    assert all(row["audio_error"] == row["audio_error_meta"]["safe_message"] for row in rows)
     assert pipeline.draft_builder.calls == 0
 
 
@@ -1535,6 +2866,68 @@ def test_cancelled_worker_skips_paid_provider_calls_still_queued(
     assert pipeline.draft_builder.calls == 0
 
 
+def test_executor_cancel_stops_new_dispatch_and_drains_started_assets(
+    executor_db, tmp_path, monkeypatch
+):
+    task_id = "cancel-live-executor"
+    create_asset_resume_task(executor_db, task_id, count=3)
+    registry = TaskRuntimeRegistry()
+    monkeypatch.setattr(task_executor_module, "task_runtime", registry)
+    monkeypatch.setattr(task_executor_module, "LocalUploader", FakeUploader)
+    monkeypatch.setattr(
+        task_executor_module.Config,
+        "generation_config",
+        lambda: {
+            "prompt_concurrency": 1,
+            "image_concurrency": 1,
+            "tts_concurrency": 1,
+        },
+    )
+    pipeline = FakePipeline(output_dir=str(tmp_path / "generated"))
+    started = threading.Event()
+    release = threading.Event()
+    started_count = 0
+    started_lock = threading.Lock()
+
+    def hold_started_asset(_index):
+        nonlocal started_count
+        with started_lock:
+            started_count += 1
+            if started_count == 2:
+                started.set()
+        assert release.wait(timeout=2)
+
+    pipeline.image_generator.on_generate = hold_started_asset
+    pipeline.voiceover_generator.on_generate = hold_started_asset
+    executor = TaskExecutor(pipeline_factory=lambda **_kwargs: pipeline)
+
+    assert executor.execute_task(
+        task_id,
+        "原始内容",
+        "知识科普|电影质感",
+        100,
+    )
+    assert started.wait(timeout=2)
+    releaser = threading.Timer(0.05, release.set)
+    releaser.start()
+    try:
+        assert executor.cancel_task(task_id, timeout=2)
+    finally:
+        release.set()
+        releaser.join()
+
+    rows = executor_db.get_segments(task_id)
+    assert pipeline.image_generator.calls == [0]
+    assert pipeline.voiceover_generator.calls == [0]
+    assert rows[0]["image_status"] == "completed"
+    assert rows[0]["audio_status"] == "completed"
+    assert all(row["image_status"] == "pending" for row in rows[1:])
+    assert all(row["audio_status"] == "pending" for row in rows[1:])
+    assert executor_db.get_task(task_id)["status"] == "interrupted"
+    assert not registry.is_running(task_id)
+    assert pipeline.draft_builder.calls == 0
+
+
 @pytest.mark.parametrize("asset_type", ["image", "audio"])
 def test_upload_copy_failure_keeps_local_asset_reusable_on_resume(
     executor_db, tmp_path, monkeypatch, asset_type
@@ -1574,9 +2967,10 @@ def test_upload_copy_failure_keeps_local_asset_reusable_on_resume(
     asset = executor_db.list_task_assets("task-1", asset_type=asset_type)[0]
     assert Path(row[path_field]).is_file()
     assert row[status_field] == "completed"
-    assert row[error_field] == "Upload failed: copy failed"
+    assert row[error_field] == "本地文件写入失败，请检查磁盘空间和目录权限。"
+    assert row[f"{asset_type}_error_code"] == "disk"
     assert asset["status"] == "completed"
-    assert asset["error_message"] == "Upload failed: copy failed"
+    assert asset["error_message"] == "本地文件写入失败，请检查磁盘空间和目录权限。"
 
     resumed_pipeline = FakePipeline(output_dir=str(tmp_path / "resumed"))
     resumed_pipeline.draft_builder = FakeDraftBuilder(RuntimeError("stop after assets"))
@@ -1592,7 +2986,7 @@ def test_upload_copy_failure_keeps_local_asset_reusable_on_resume(
     resumed_row = executor_db.get_segments("task-1")[0]
     assert resumed_generator.calls == []
     assert resumed_row[status_field] == "completed"
-    assert resumed_row[error_field] == "Upload failed: copy failed"
+    assert resumed_row[error_field] == "本地文件写入失败，请检查磁盘空间和目录权限。"
 
 
 def test_review_first_verbatim_task_pauses_after_persisted_plan(
@@ -1722,3 +3116,8 @@ def test_review_first_asset_generation_honors_segment_voice_override(
     assert calls[1]["volume_ratio"] == 1.2
     assert rows[0]["audio_voice_type"] == ""
     assert rows[1]["audio_voice_type"] == "doubao:zh_male_jieshuoxiaoming_moon_bigtts"
+    task = executor_db.get_task("voice-override-task")
+    assert task["status"] == "awaiting_finalization"
+    assert task["workflow_phase"] == "awaiting_finalization"
+    assert task.get("result") is None
+    assert pipeline.draft_builder.calls == 0

@@ -13,6 +13,12 @@ import time
 from typing import Optional
 
 from src.config import Config
+from src.api.error_model import (
+    ClassifiedError,
+    ErrorCode,
+    SafeError,
+    classify_exception,
+)
 from src.text.provider_catalog import (
     get_provider,
     sanitize_provider_options,
@@ -22,13 +28,9 @@ from src.text.provider_catalog import (
 logger = logging.getLogger(__name__)
 
 
-class _SafeLlmFailure:
-    """Traceback-free marker returned across the credential-safe boundary."""
-
-
-_SAFE_LLM_FAILURE = _SafeLlmFailure()
 _LLM_THROTTLE_LOCK = Lock()
 _LLM_NOT_BEFORE = 0.0
+_LEGACY_SAFE_LLM_MESSAGE = "LLM API 调用失败，请检查模型配置或稍后重试"
 
 
 def _error_status_code(error: Exception) -> Optional[int]:
@@ -89,6 +91,14 @@ def _run_completion_with_retries(completion, kwargs):
             response = completion(**kwargs)
             return response.choices[0].message.content, None
         except Exception as error:
+            safe_error = classify_exception(error, provider="llm")
+            if safe_error.code is ErrorCode.UNKNOWN:
+                safe_error = SafeError(
+                    code=ErrorCode.PROVIDER_ERROR,
+                    retryable=True,
+                    safe_message=_LEGACY_SAFE_LLM_MESSAGE,
+                    provider="llm",
+                )
             is_rate_limited = _error_status_code(error) == 429
             wait_time = (attempt + 1) * retry_interval
             if is_rate_limited:
@@ -96,7 +106,8 @@ def _run_completion_with_retries(completion, kwargs):
                 _pause_llm_requests(wait_time)
             if attempt == max_attempts - 1:
                 logger.error("API 调用失败，已尝试 %s 次", max_attempts)
-                return None, _SAFE_LLM_FAILURE
+                error = None
+                return None, safe_error
             logger.warning(
                 "API 调用失败（第 %s 次），%s 秒后重试",
                 attempt + 1,
@@ -105,8 +116,8 @@ def _run_completion_with_retries(completion, kwargs):
             _wait_for_llm_throttle() if is_rate_limited else time.sleep(wait_time)
 
 
-def _raise_safe_llm_failure():
-    raise RuntimeError("LLM API 调用失败，请检查模型配置或稍后重试") from None
+def _raise_safe_llm_failure(safe_error):
+    raise ClassifiedError(safe_error) from None
 
 
 class ArticleGenerator:
@@ -190,8 +201,7 @@ class ArticleGenerator:
         kwargs = None
         if failure is not None:
             content = None
-            failure = None
-            _raise_safe_llm_failure()
+            _raise_safe_llm_failure(failure)
         return content
 
     def _extract_text(self, data: dict) -> str:
@@ -251,13 +261,12 @@ class ArticleGenerator:
                 messages=[{"role": "user", "content": combined_prompt}],
                 max_tokens=2048,
             )
-        except RuntimeError:
-            failure = _SAFE_LLM_FAILURE
+        except ClassifiedError as error:
+            failure = error.safe_error
         if failure is not None:
             self = None
             article = None
-            failure = None
-            _raise_safe_llm_failure()
+            _raise_safe_llm_failure(failure)
         logger.info(f"文章生成成功，长度: {len(article)} 字")
         return article
 
@@ -284,13 +293,12 @@ class ArticleGenerator:
                 messages=[{"role": "user", "content": user_prompt}],
                 max_tokens=1024,
             )
-        except RuntimeError:
-            failure = _SAFE_LLM_FAILURE
+        except ClassifiedError as error:
+            failure = error.safe_error
         if failure is not None:
             self = None
             text = None
-            failure = None
-            _raise_safe_llm_failure()
+            _raise_safe_llm_failure(failure)
 
         lines = [l.strip() for l in text.strip().splitlines() if l.strip()]
         while len(lines) < len(segments):

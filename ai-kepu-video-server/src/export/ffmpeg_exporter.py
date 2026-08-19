@@ -12,7 +12,7 @@ import tempfile
 import wave
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from src.utils.rendering import subtitle_preset_for_canvas
 from src.utils.subtitle_text import normalize_subtitle_text
@@ -24,6 +24,10 @@ DEFAULT_FADE_SECONDS = 0.3
 RENDER_PIPELINE_VERSION = 2
 SUBTITLE_SAFE_WIDTH_RATIO = 0.86
 SUBTITLE_MIN_LINE_CHARS = 22
+
+
+class RenderCancelled(RuntimeError):
+    """Raised at a safe render checkpoint after the caller requests cancel."""
 
 
 def _load_render_config(config_path: str = "config/settings.json", canvas_override: Optional[dict] = None) -> dict:
@@ -478,8 +482,15 @@ class FFmpegExporter:
         output_path: str,
         animation_seed: Optional[int] = None,
         animation_params: Optional[List[dict]] = None,
+        should_cancel: Optional[Callable[[], bool]] = None,
     ) -> str:
         logger.info(f"[FFmpeg] 开始导出 MP4，共 {len(segments)} 段")
+
+        def raise_if_cancelled() -> None:
+            if should_cancel and should_cancel():
+                raise RenderCancelled("视频生成已取消")
+
+        raise_if_cancelled()
 
         anim_params = animation_params or build_animation_params(len(segments), animation_seed)
 
@@ -491,13 +502,16 @@ class FFmpegExporter:
             clip_paths = [None] * len(segments)
 
             def encode_one(i):
+                # Futures are submitted together but queued work still checks the
+                # shared cancellation flag before spending another FFmpeg call.
+                raise_if_cancelled()
                 vo = None
                 if voiceover_files and i < len(voiceover_files):
                     vo = voiceover_files[i]
                 param = anim_params[i]
                 at = param["anim_type"] if isinstance(param, dict) else param[0]
                 se = param["scale_end"] if isinstance(param, dict) else param[1]
-                return i, self._build_segment_clip(
+                result = self._build_segment_clip(
                     index=i,
                     image_path=media_paths[i],
                     audio_path=vo,
@@ -506,6 +520,8 @@ class FFmpegExporter:
                     scale_end=se,
                     tmp_dir=tmp_dir,
                 )
+                raise_if_cancelled()
+                return i, result
 
             with ThreadPoolExecutor(max_workers=3) as pool:
                 futures = [pool.submit(encode_one, i) for i in range(len(segments))]
@@ -514,7 +530,9 @@ class FFmpegExporter:
                     clip_paths[idx] = path
 
             # 拼接
+            raise_if_cancelled()
             self._concat_clips(clip_paths, output_path)
+            raise_if_cancelled()
             logger.info(f"[FFmpeg] MP4 导出完成: {output_path}")
             return output_path
 
