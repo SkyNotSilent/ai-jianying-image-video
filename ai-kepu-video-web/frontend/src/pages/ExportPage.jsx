@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeft,
   CheckCircle2,
@@ -10,24 +10,29 @@ import {
   HardDriveDownload,
   LoaderCircle,
   PackageOpen,
+  Square,
 } from 'lucide-react'
 import { useNavigate, useParams } from 'react-router'
-import { createExport, getExportJob, getExportState, getMaterialsDownloadUrl, selectDraftFolder } from '../api/task'
+import { cancelExportJob, createExport, getExportJob, getExportState, getMaterialsDownloadUrl, selectDraftFolder } from '../api/task'
+import { PollingFailureNotice } from '../components/PollingFailureNotice'
 import { EmptyState, LoadingState } from '../components/StatusStates'
+import { usePollingResource } from '../hooks/usePollingResource'
 import { detectTargetOS, validateExtractPath } from '../lib/exportPath'
 import { toast } from '../lib/toast'
 import { materialPackageSummary, resolveApiDownloadUrl } from './exportMaterials'
+import { buildExportPollingKey, isActiveExportJob } from './exportPolling'
 import './delivery-pages.css'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:2002'
-const ACTIVE_STATUSES = new Set(['pending', 'processing'])
 
 function isBusy(job) {
-  return ACTIVE_STATUSES.has(job?.status)
+  return isActiveExportJob(job)
 }
 
 function jobLabel(job) {
   if (!job) return ''
+  if (job.cancel_requested && isBusy(job)) return '正在取消'
+  if (job.status === 'cancelled') return '已取消'
   if (job.status === 'completed') return '已完成'
   if (job.status === 'failed') return '失败'
   if (job.status === 'processing') return '处理中'
@@ -54,6 +59,7 @@ export function ExportPage() {
   const notifiedJobs = useRef(new Set())
   const downloadedMp4Jobs = useRef(new Set())
   const downloadedMaterialJobs = useRef(new Set())
+  const activeTaskIdRef = useRef(taskId)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
   const [loadedTaskId, setLoadedTaskId] = useState(null)
@@ -68,51 +74,63 @@ export function ExportPage() {
   const [defaultExport] = useState(() => localStorage.getItem('kepu:mine:default_export') || 'mp4')
   const [folderPicking, setFolderPicking] = useState(false)
   const pathCheck = useMemo(() => validateExtractPath(extractPath, targetOS), [extractPath, targetOS])
-  const activeJobs = useMemo(
-    () => loadedTaskId === taskId ? Object.entries(jobs).filter(([, job]) => isBusy(job)) : [],
+  const activeJobsKey = useMemo(
+    () => loadedTaskId === taskId ? buildExportPollingKey(taskId, jobs) : null,
     [jobs, loadedTaskId, taskId],
   )
 
-  const loadState = async ({ showLoader = false } = {}) => {
+  activeTaskIdRef.current = taskId
+
+  const applyExportState = useCallback((nextState, expectedTaskId, { replaceJobs = false } = {}) => {
+    if (activeTaskIdRef.current !== expectedTaskId) return false
+    const stateJobs = Array.isArray(nextState?.jobs) ? nextState.jobs : []
+    setState(nextState)
+    setLoadedTaskId(expectedTaskId)
+    setJobs(current => {
+      const fallback = replaceJobs
+        ? { mp4: null, materials: null, draft: null, draft_local: null }
+        : current
+      return {
+        mp4: stateJobs.find(job => job.target === 'mp4') || fallback.mp4,
+        materials: stateJobs.find(job => job.target === 'materials') || fallback.materials,
+        draft: stateJobs.find(job => job.target === 'draft') || fallback.draft,
+        draft_local: stateJobs.find(job => job.target === 'draft_local') || fallback.draft_local,
+      }
+    })
+    setLoadError('')
+    return true
+  }, [])
+
+  const loadState = useCallback(async ({ showLoader = false, silent = false } = {}) => {
+    const expectedTaskId = taskId
     if (showLoader) setLoading(true)
     try {
-      const nextState = await getExportState(taskId)
-      const stateJobs = Array.isArray(nextState?.jobs) ? nextState.jobs : []
-      setState(nextState)
-      setLoadedTaskId(taskId)
-      setJobs(current => ({
-        mp4: stateJobs.find(job => job.target === 'mp4') || current.mp4,
-        materials: stateJobs.find(job => job.target === 'materials') || current.materials,
-        draft: stateJobs.find(job => job.target === 'draft') || current.draft,
-        draft_local: stateJobs.find(job => job.target === 'draft_local') || current.draft_local,
-      }))
-      setLoadError('')
+      const nextState = await getExportState(expectedTaskId, { silent: true })
+      applyExportState(nextState, expectedTaskId)
     } catch (error) {
+      if (activeTaskIdRef.current !== expectedTaskId) return
       console.error('加载导出状态失败', error)
-      setLoadError('导出状态不可用，请确认后端服务在线后重试。')
-      toast.error('加载导出状态失败')
+      // 后台对账失败时保留已加载的导出状态，不用全屏错误覆盖现有数据。
+      if (!silent) {
+        setLoadError('导出状态不可用，请确认后端服务在线后重试。')
+        toast.error('加载导出状态失败')
+      }
     } finally {
-      if (showLoader) setLoading(false)
+      if (showLoader && activeTaskIdRef.current === expectedTaskId) setLoading(false)
     }
-  }
+  }, [applyExportState, taskId])
 
   useEffect(() => {
     let active = true
     setLoading(true)
+    setLoadError('')
+    setState(null)
     setLoadedTaskId(null)
-    getExportState(taskId)
+    setJobs({ mp4: null, materials: null, draft: null, draft_local: null })
+    getExportState(taskId, { silent: true })
       .then(nextState => {
         if (!active) return
-        const stateJobs = Array.isArray(nextState?.jobs) ? nextState.jobs : []
-        setState(nextState)
-        setLoadedTaskId(taskId)
-        setJobs({
-          mp4: stateJobs.find(job => job.target === 'mp4') || null,
-          materials: stateJobs.find(job => job.target === 'materials') || null,
-          draft: stateJobs.find(job => job.target === 'draft') || null,
-          draft_local: stateJobs.find(job => job.target === 'draft_local') || null,
-        })
-        setLoadError('')
+        applyExportState(nextState, taskId, { replaceJobs: true })
       })
       .catch(error => {
         if (!active) return
@@ -122,72 +140,68 @@ export function ExportPage() {
       })
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }
-  }, [taskId])
+  }, [applyExportState, taskId])
 
-  useEffect(() => {
-    if (activeJobs.length === 0) return undefined
-    let cancelled = false
-    let polling = false
-
-    const poll = async () => {
-      if (polling) return
-      polling = true
-      try {
-        const results = await Promise.all(activeJobs.map(async ([target, job]) => {
-          try {
-            return [target, await getExportJob(taskId, job.job_id)]
-          } catch (error) {
-            console.error('轮询导出任务失败', error)
-            return [target, null]
-          }
-        }))
-        if (cancelled) return
-        let finished = false
-        results.forEach(([target, job]) => {
-          if (!job || ACTIVE_STATUSES.has(job.status)) return
-          finished = true
-          const notificationKey = `${job.job_id}:${job.status}`
-          if (notifiedJobs.current.has(notificationKey)) return
-          notifiedJobs.current.add(notificationKey)
-          if (job.status === 'completed') {
-            if (target === 'materials') {
-              toast.success(job.result?.complete ? '分镜素材包已整理完成' : '部分素材包已整理完成')
-              if (job.result?.download_url && !downloadedMaterialJobs.current.has(job.job_id)) {
-                downloadedMaterialJobs.current.add(job.job_id)
-                triggerFileDownload(job.result.download_url)
-              }
-            } else {
-              toast.success(target === 'mp4' ? 'MP4 已生成' : target === 'draft_local' ? '已写入剪映草稿目录' : '草稿下载已准备好')
-              if (target === 'mp4' && job.params?.auto_download !== false && !downloadedMp4Jobs.current.has(job.job_id)) {
-                downloadedMp4Jobs.current.add(job.job_id)
-                triggerFileDownload(`/ai/native/video/kepu/tasks/${taskId}/download-mp4`)
-              }
+  const exportJobsPolling = usePollingResource({
+    resourceKey: activeJobsKey,
+    enabled: Boolean(activeJobsKey),
+    interval: 2000,
+    request: async (key, { signal }) => {
+      const batch = JSON.parse(key)
+      const results = await Promise.all(batch.jobs.map(async ({ target, jobId }) => {
+        try {
+          return [target, await getExportJob(batch.taskId, jobId, { silent: true, signal }), false]
+        } catch (error) {
+          if (error?.response?.status === 404) return [target, null, true]
+          throw error
+        }
+      }))
+      return { taskId: batch.taskId, results }
+    },
+    onData: ({ taskId: polledTaskId, results }) => {
+      if (activeTaskIdRef.current !== polledTaskId) return
+      let shouldReconcile = false
+      let finished = false
+      results.forEach(([target, job, missing]) => {
+        if (missing) {
+          shouldReconcile = true
+          return
+        }
+        if (!job || isActiveExportJob(job)) return
+        finished = true
+        const notificationKey = `${job.job_id}:${job.status}`
+        if (notifiedJobs.current.has(notificationKey)) return
+        notifiedJobs.current.add(notificationKey)
+        if (job.status === 'completed') {
+          if (target === 'materials') {
+            toast.success(job.result?.complete ? '分镜素材包已整理完成' : '部分素材包已整理完成')
+            if (job.result?.download_url && !downloadedMaterialJobs.current.has(job.job_id)) {
+              downloadedMaterialJobs.current.add(job.job_id)
+              triggerFileDownload(job.result.download_url)
             }
-          } else if (job.status === 'failed') {
-            toast.error(job.error || '导出失败')
+          } else {
+            toast.success(target === 'mp4' ? 'MP4 已生成' : target === 'draft_local' ? '已写入剪映草稿目录' : '草稿下载已准备好')
+            if (target === 'mp4' && job.params?.auto_download !== false && !downloadedMp4Jobs.current.has(job.job_id)) {
+              downloadedMp4Jobs.current.add(job.job_id)
+              triggerFileDownload(`/ai/native/video/kepu/tasks/${polledTaskId}/download-mp4`)
+            }
           }
+        } else if (job.status === 'failed') {
+          toast.error(job.error || '导出失败')
+        } else if (job.status === 'cancelled') {
+          toast.info('导出已取消，已有可用文件未被覆盖')
+        }
+      })
+      setJobs(current => {
+        const next = { ...current }
+        results.forEach(([target, job]) => {
+          if (job) next[target] = job
         })
-        setJobs(current => {
-          const next = { ...current }
-          results.forEach(([target, job]) => {
-            if (!job) return
-            next[target] = job
-          })
-          return next
-        })
-        if (finished) await loadState()
-      } finally {
-        polling = false
-      }
-    }
-
-    poll()
-    const timer = window.setInterval(poll, 2000)
-    return () => {
-      cancelled = true
-      window.clearInterval(timer)
-    }
-  }, [activeJobs, taskId])
+        return next
+      })
+      if (finished || shouldReconcile) void loadState({ silent: true })
+    },
+  })
 
   const saveExtractPath = value => {
     setExtractPath(value)
@@ -221,6 +235,7 @@ export function ExportPage() {
   }
 
   const startExport = async (target, { forceRender = false } = {}) => {
+    const expectedTaskId = taskId
     const payload = { target, use_preview: !forceRender }
     if (target === 'mp4') payload.auto_download = true
     if (target === 'draft_local') {
@@ -235,12 +250,28 @@ export function ExportPage() {
       })
     }
     try {
-      const job = await createExport(taskId, payload)
+      const job = await createExport(expectedTaskId, payload)
+      if (activeTaskIdRef.current !== expectedTaskId) return
       setJobs(current => ({ ...current, [target]: job }))
       toast.success(target === 'mp4' ? 'MP4 导出已开始' : target === 'materials' ? '正在按分镜顺序整理素材' : target === 'draft_local' ? '正在写入剪映草稿目录' : '草稿下载准备已开始')
     } catch (error) {
+      if (activeTaskIdRef.current !== expectedTaskId) return
       console.error('创建导出任务失败', error)
-      toast.error(error?.response?.data?.detail || '创建导出任务失败')
+      toast.error(error?.response?.data?.detail || '创建导出失败')
+    }
+  }
+
+  const cancelJob = async target => {
+    const job = jobs[target]
+    if (!isBusy(job) || job.cancel_requested) return
+    try {
+      const nextJob = await cancelExportJob(taskId, job.job_id)
+      if (activeTaskIdRef.current !== taskId) return
+      setJobs(current => ({ ...current, [target]: nextJob }))
+      toast.info('已请求取消；正在安全收尾已开始的片段')
+    } catch (error) {
+      if (activeTaskIdRef.current !== taskId) return
+      toast.error(error?.response?.data?.detail || '取消导出失败')
     }
   }
 
@@ -264,8 +295,8 @@ export function ExportPage() {
     if (!triggerFileDownload(url)) toast.error('素材包下载地址不可用，请重新整理')
   }
 
-  if (loading) return <main className="delivery-loading"><LoadingState label="正在读取导出状态..." /></main>
-  if (loadError || !state) {
+  if (loading || (!loadError && loadedTaskId !== taskId)) return <main className="delivery-loading"><LoadingState label="正在读取导出状态..." /></main>
+  if (loadError || !state || loadedTaskId !== taskId) {
     return <main className="delivery-loading"><EmptyState title="导出状态不可用" description={loadError} action={<button className="button button-primary" type="button" onClick={() => loadState({ showLoader: true })}>重试</button>} /></main>
   }
 
@@ -292,18 +323,26 @@ export function ExportPage() {
       </header>
 
       <section className="delivery-status-strip" aria-label="交付状态">
-        <StatusMetric label="高保真预览" value={previewStatus} ready={state.preview?.valid} warning={state.preview?.exists && !state.preview?.valid} />
+        <StatusMetric label="完整视频预览" value={previewStatus} ready={state.preview?.valid} warning={state.preview?.exists && !state.preview?.valid} />
         <StatusMetric label="MP4 成片" value={isBusy(jobs.mp4) ? '生成中' : mp4Available ? '可下载' : state.outputs?.mp4?.stale ? '已过期' : '未生成'} ready={mp4Available} warning={state.outputs?.mp4?.stale} />
         <StatusMetric label="分镜素材" value={materialsSummary.statusLabel} ready={materialsSummary.complete} warning={materialsSummary.available && !materialsSummary.complete} />
         <StatusMetric label="剪映草稿" value={draftStatus} ready={jobs.draft_local?.status === 'completed' || draftAvailable} warning={jobs.draft_local?.status === 'failed'} />
       </section>
 
+      {exportJobsPolling.error ? <PollingFailureNotice
+        title="导出连接中断"
+        description="后台导出可能仍在继续；重新连接只会查询原记录，不会重复创建导出。"
+        onReconnect={exportJobsPolling.reconnect}
+        reconnecting={exportJobsPolling.inFlight}
+      /> : null}
+
       <div className="export-options">
         <section className={`export-option${defaultExport === 'mp4' ? ' is-preferred' : ''}`}>
-          <div className="export-option-title"><span><Film size={19} aria-hidden="true" /></span><div><h2>直接 MP4 视频</h2><p>{mp4Available ? '当前高保真预览就是这份 MP4，下载不会重复渲染。' : state.outputs?.mp4?.stale ? '素材已变更，需要重新渲染当前版本。' : '生成一次后会自动下载，并同时成为高保真预览。'}</p></div></div>
-          <JobState job={jobs.mp4} fallback="尚未创建 MP4 导出任务" />
+          <div className="export-option-title"><span><Film size={19} aria-hidden="true" /></span><div><h2>直接 MP4 视频</h2><p>{mp4Available ? '当前完整视频预览就是这份 MP4，下载不会重复渲染。' : state.outputs?.mp4?.stale ? '素材已变更，需要重新渲染当前版本。' : '生成一次后会自动下载，并同时成为完整视频预览。'}</p></div></div>
+          <JobState job={jobs.mp4} fallback="尚未开始 MP4 导出" />
           <div className="export-actions">
             <button className="button button-primary" type="button" disabled={isBusy(jobs.mp4) || (!mp4Available && !canBuildRenderedOutputs)} onClick={mp4Available ? downloadMp4 : () => startExport('mp4')}>{isBusy(jobs.mp4) ? <LoaderCircle className="spin" size={16} aria-hidden="true" /> : mp4Available ? <Download size={16} aria-hidden="true" /> : <Film size={16} aria-hidden="true" />}{isBusy(jobs.mp4) ? '生成中...' : mp4Available ? '下载 MP4' : state.outputs?.mp4?.stale ? '重新生成并下载' : '生成并下载 MP4'}</button>
+            {isBusy(jobs.mp4) ? <button className="button button-secondary" type="button" disabled={Boolean(jobs.mp4?.cancel_requested)} onClick={() => cancelJob('mp4')}><Square size={15} aria-hidden="true" />{jobs.mp4?.cancel_requested ? '正在取消…' : '取消生成'}</button> : null}
             {mp4Available ? <button className="button button-secondary" type="button" disabled={isBusy(jobs.mp4) || !canBuildRenderedOutputs} onClick={() => startExport('mp4', { forceRender: true })}><Film size={16} aria-hidden="true" />重新生成</button> : null}
           </div>
         </section>

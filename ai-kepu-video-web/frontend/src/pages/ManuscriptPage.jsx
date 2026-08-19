@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { CheckCircle2, ClipboardPaste, FileUp, Sparkles } from 'lucide-react'
 import { useNavigate, useParams } from 'react-router'
-import { createTask, extractDocumentText } from '../api/task'
+import { createTask, extractDocumentText, getConfigReadiness } from '../api/task'
+import { Modal } from '../components/Modal'
+import { EmptyStateCard } from '../components/ui/EmptyStateCard'
+import { VisualStyleCard } from '../components/ui/VisualStyleCard'
 import { toast } from '../lib/toast'
 import { createDraft, estimateDuration, estimateSegments, getDraft, getLatestDraft, ratioOptions, saveDraft, textStyles, visualStyles } from '../utils/projectDrafts'
 import './creation-flow.css'
@@ -9,11 +12,11 @@ import './creation-flow.css'
 const exampleScript = `1  大脑如何影响我们的决策？\n\n你是否有过这样的经历：明明知道不应该买，却在情绪低落时下单了很多东西？或者明明想要好好休息，却因为一时愤怒做了后悔的决定？\n\n这并不是你不够理智，而是情绪正在悄悄影响着你的大脑。\n\n2  情绪与大脑的关系\n\n研究表明，情绪会影响我们大脑中负责决策的区域，改变我们对风险和收益的判断。\n\n例如，在压力状态下，我们的大脑更倾向于选择即时缓解的方案，而忽略了长期后果。\n\n3  如何做出更好的决策？\n\n觉察情绪，暂停片刻，理性评估，再从过去的决策中复盘学习。`
 
 const rotatorItems = [
-  { type: 'text', text: '文稿变成视频', visualClass: 'opening-text-bloom', motionClass: 'opening-anim-bloom' },
-  { type: 'text', text: '导入剪映草稿', visualClass: 'opening-text-push', motionClass: 'opening-anim-push' },
-  { type: 'text', text: '素材自由修改', visualClass: 'opening-text-breathe', motionClass: 'opening-anim-breathe' },
-  { type: 'slots' },
-  { type: 'finale' },
+  '文稿变成视频',
+  '导入剪映草稿',
+  '素材可以逐段修改',
+  '文稿、分镜、素材与剪映草稿都在一个项目里',
+  '一份文稿，一条完整生产链路',
 ]
 const rotatorDurations = [3200, 3000, 3500, 5000, 2900]
 
@@ -31,6 +34,15 @@ function normalizeLength(value) {
   return Math.max(50, Math.min(2000, Math.round(number / 50) * 50))
 }
 
+function readLastTtsOptions() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem('insightcut:last-tts-options') || '{}')
+    return parsed && typeof parsed === 'object' ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
 export function ManuscriptPage() {
   const { draftId } = useParams()
   const navigate = useNavigate()
@@ -44,6 +56,7 @@ export function ManuscriptPage() {
   const [savedAt, setSavedAt] = useState(() => new Date())
   const [rotatorIndex, setRotatorIndex] = useState(0)
   const [starting, setStarting] = useState(false)
+  const [readinessPrompt, setReadinessPrompt] = useState(null)
 
   useEffect(() => {
     if (!draftId) {
@@ -102,18 +115,7 @@ export function ManuscriptPage() {
     return result
   }
 
-  const continueToProduction = async () => {
-    let next = draftRef.current
-    if (next.input_mode !== 'theme' && !String(next.manuscript || '').trim()) next = insertExample()
-    const currentText = next.input_mode === 'theme' ? next.theme : next.manuscript
-    if (!String(currentText || '').trim()) {
-      toast.warning(next.input_mode === 'theme' ? '请先输入视频主题' : '请先输入文稿内容')
-      return
-    }
-    const name = String(next.name || '').trim() || normalizeTitle(currentText)
-    const prepared = { ...next, name, length: next.input_mode === 'theme' ? normalizeLength(next.length) : next.length }
-    draftRef.current = prepared
-    persistDraft(prepared, setDraft, setSaveState, setSavedAt)
+  const createProductionTask = async ({ prepared, currentText, voiceType }) => {
     setStarting(true)
     try {
       const inputMode = prepared.input_mode === 'theme' ? 'theme' : 'script'
@@ -124,7 +126,8 @@ export function ManuscriptPage() {
         style: `${prepared.text_style || '知识科普'}|${prepared.visual_style || '吉卜力'}`,
         ratio: prepared.ratio || '16:9',
         length: inputMode === 'theme' ? normalizeLength(prepared.length) : 0,
-        voice_type: localStorage.getItem('insightcut:last-voice') || undefined,
+        voice_type: voiceType || undefined,
+        tts_options: readLastTtsOptions(),
         execution_mode: 'review_first',
         script_policy: 'verbatim',
       })
@@ -133,10 +136,45 @@ export function ManuscriptPage() {
       persistDraft(saved, setDraft, setSaveState, setSavedAt)
       localStorage.setItem('insightcut:last-workspace', JSON.stringify({ taskId: result.task_id, name: prepared.name, path: `/workspace/${result.task_id}` }))
       window.dispatchEvent(new Event('insightcut:workspace'))
-      toast.success('正在生成内容预案')
+      toast.success('正在生成预案')
       navigate(`/workspace/${result.task_id}`)
     } catch (error) {
-      toast.error(error?.response?.data?.detail || '创建生产预案失败')
+      toast.error(error?.response?.data?.detail || '创建预案失败')
+    } finally {
+      setStarting(false)
+    }
+  }
+
+  const continueToProduction = async () => {
+    let next = draftRef.current
+    if (next.input_mode !== 'theme' && !String(next.manuscript || '').trim()) next = insertExample()
+    const currentText = next.input_mode === 'theme' ? next.theme : next.manuscript
+    if (!String(currentText || '').trim()) {
+      toast.warning(next.input_mode === 'theme' ? '请先输入视频主题' : '请先输入文稿内容')
+      return
+    }
+    const name = String(next.name || '').trim() || normalizeTitle(currentText)
+    const prepared = { ...next, name, length: next.input_mode === 'theme' ? normalizeLength(next.length) : next.length }
+    const voiceType = localStorage.getItem('insightcut:last-voice') || ''
+    const pendingLaunch = { prepared, currentText, voiceType }
+    draftRef.current = prepared
+    persistDraft(prepared, setDraft, setSaveState, setSavedAt)
+    setStarting(true)
+    try {
+      const readiness = await getConfigReadiness({ voiceType })
+      if (readiness?.status === 'not_ready' || readiness?.status === 'unknown') {
+        setReadinessPrompt({ ...readiness, pendingLaunch })
+        return
+      }
+      await createProductionTask(pendingLaunch)
+    } catch {
+      setReadinessPrompt({
+        status: 'unknown',
+        can_continue: true,
+        items: [],
+        pendingLaunch,
+        message: '暂时无法确认模型服务是否可用。这不一定是配置错误，也可能是后端暂时断开。',
+      })
     } finally {
       setStarting(false)
     }
@@ -176,7 +214,7 @@ export function ManuscriptPage() {
     }
   }
 
-  const rotating = rotatorItems[rotatorIndex]
+  const rotatingCopy = rotatorItems[rotatorIndex]
   const draftSummary = useMemo(() => isTheme
     ? { label: '扩写目标', value: `${targetLength} 字`, description: '提交生产后会先扩写成完整文稿，再拆分分镜和计算时长。' }
     : { label: '文稿统计', value: `${estimateDuration(text, draft.voice_speed)}`, description: `预计 ${estimateSegments(text)} 段分镜，当前 ${contentLength} 个正文字符。` }, [contentLength, draft.voice_speed, isTheme, targetLength, text])
@@ -211,7 +249,6 @@ export function ManuscriptPage() {
             </fieldset>
             <div className="button-row"><button type="button" className="button button-secondary" onClick={pasteFromClipboard}><ClipboardPaste size={16} />粘贴文本</button><button type="button" className="button button-secondary" onClick={() => patchDraft({ manuscript: '' })}>清空文稿</button></div>
           </>}
-          <label className="field-label">受众人群<select defaultValue="大众通用"><option>大众通用</option><option>知识创作者</option><option>短视频观众</option><option>专业学习者</option></select></label>
           <section className="summary-strip"><span>{draftSummary.label}</span><strong>{draftSummary.value}</strong><p>{draftSummary.description}</p></section>
         </aside>
 
@@ -219,13 +256,23 @@ export function ManuscriptPage() {
           <header className="canvas-heading"><div><p>{isTheme ? '主题模式' : '脚本画布'}</p><h1>{isTheme ? '主题输入' : '文稿编辑'}</h1></div><span className={`save-indicator ${saveState}`}><CheckCircle2 size={16} />{saveState === 'saved' ? `已保存 ${savedAt.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}` : '保存中...'}</span></header>
           <div className={`paper-editor-shell ${isEmpty ? 'is-empty' : ''}`}>
             <textarea ref={editorRef} value={text || ''} maxLength={isTheme ? 100 : 5000} placeholder={paperFocused ? (isTheme ? '输入 100 字以内的视频主题，例如：为什么普通人越来越需要 AI 助手' : '直接输入或粘贴完整文稿') : ''} onFocus={() => setPaperFocused(true)} onBlur={() => setPaperFocused(false)} onChange={event => patchDraft(isTheme ? { theme: event.target.value.slice(0, 100) } : { manuscript: event.target.value.slice(0, 5000) })} />
-            {isEmpty ? <button type="button" className="empty-prompt" onClick={() => { setPaperFocused(true); editorRef.current?.focus() }}>
+            {isEmpty ? <button type="button" className="empty-prompt" aria-label={isTheme ? '开始输入视频主题' : '开始输入视频文稿'} onClick={() => { setPaperFocused(true); editorRef.current?.focus() }}>
               <span className="empty-prompt-placeholder">{isTheme ? '输入 100 字以内主题...' : '在这里输入或粘贴完整文稿...'}</span>
-              <span className="opening-rotator-stage">
-                {rotating.type === 'slots' ? <span key={`slot-${rotatorIndex}`} className="opening-slot-group opening-anim-slot">{['文稿', '分镜', '成片', '剪映'].map((word, index) => <span key={word} className="opening-slot-item"><span className="opening-slot-word" style={{ animationDelay: `${index * 150}ms` }}>{word}</span></span>)}</span> : null}
-                {rotating.type === 'finale' ? <span key={`finale-${rotatorIndex}`} className="opening-rotator-text opening-text-finale opening-anim-finale">All in one <i>但不</i>是画布</span> : null}
-                {rotating.type === 'text' ? <span key={`text-${rotatorIndex}`} className={`opening-rotator-text ${rotating.visualClass} ${rotating.motionClass}`}>{rotating.text}</span> : null}
-              </span>
+              <EmptyStateCard
+                as="span"
+                variant="manuscript"
+                eyebrow={isTheme ? '主题起稿' : '脚本起稿'}
+                title={isTheme ? '从一个主题开始，也能把每一步看清楚' : '从一份文稿，到一条可继续编辑的视频'}
+                description={isTheme ? '写下方向，完整文稿会在生成后先交给你确认。' : '粘贴或导入原文，脚本内容不会被自动改写。'}
+                className="empty-onboarding"
+              >
+                <span className="empty-onboarding-steps" aria-label="三步制作流程">
+                  <span><b>01</b><em>写文稿</em><small>输入主题或完整脚本</small></span>
+                  <span><b>02</b><em>审预案</em><small>确认分镜、画面与音色</small></span>
+                  <span><b>03</b><em>做成片</em><small>生成素材并按需导出</small></span>
+                </span>
+                <span key={`rotator-${rotatorIndex}`} className="empty-onboarding-note">{rotatingCopy}</span>
+              </EmptyStateCard>
             </button> : null}
             <footer><span>{isTheme ? '主题字数' : '字数'}：{contentLength}</span><span>自动保存到本地草稿</span></footer>
           </div>
@@ -233,12 +280,44 @@ export function ManuscriptPage() {
 
         <aside className="work-panel production-options" aria-label="生产设置">
           <PanelHeading eyebrow="生产设置" title="画面设置" />
-          <fieldset className="control-group"><legend>画面风格</legend><div className="style-thumbnail-grid">{visualStyles.map(style => <button type="button" key={style.value} className={draft.visual_style === style.value ? 'is-selected' : ''} onClick={() => patchDraft({ visual_style: style.value })}><img src={style.image} alt="" /><span>{style.label}</span></button>)}</div></fieldset>
+          <fieldset className="control-group"><legend>画面风格</legend><div className="style-thumbnail-grid">{visualStyles.map(style => <VisualStyleCard key={style.value} style={style} selected={draft.visual_style === style.value} onSelect={value => patchDraft({ visual_style: value })} />)}</div></fieldset>
           <fieldset className="control-group"><legend>视频比例</legend><div className="segmented-control">{ratioOptions.map(ratio => <button type="button" key={ratio} className={draft.ratio === ratio ? 'is-selected' : ''} onClick={() => patchDraft({ ratio })}>{ratio}</button>)}</div></fieldset>
           <label className="field-label">创作风格<select value={draft.text_style || '知识科普'} onChange={event => patchDraft({ text_style: event.target.value })}>{textStyles.map(style => <option key={style}>{style}</option>)}</select></label>
-          <button type="button" className="button button-primary continue-button" disabled={starting} onClick={continueToProduction}>{starting ? '正在创建预案…' : !isTheme && !String(draft.manuscript || '').trim() ? '插入示例并继续' : '生成内容预案'}</button>
+          <button type="button" className="button button-primary continue-button" disabled={starting} onClick={continueToProduction}>{starting ? '正在创建预案…' : !isTheme && !String(draft.manuscript || '').trim() ? '插入示例并继续' : '生成预案'}</button>
         </aside>
       </section>
+      <Modal
+        open={Boolean(readinessPrompt)}
+        title={readinessPrompt?.status === 'not_ready' ? '生成配置还未就绪' : '暂时无法确认服务状态'}
+        onClose={() => setReadinessPrompt(null)}
+        footer={readinessPrompt?.status === 'not_ready' ? <>
+          <button type="button" className="button button-secondary" onClick={() => setReadinessPrompt(null)}>稍后处理</button>
+          <button type="button" className="button button-primary" onClick={() => {
+            const firstMissing = readinessPrompt.items?.find(item => item.status === 'not_ready')
+            setReadinessPrompt(null)
+            navigate(`/settings#${firstMissing?.settings_anchor || 'settings-llm'}`)
+          }}>打开 API 配置</button>
+        </> : <>
+          <button type="button" className="button button-secondary" onClick={() => setReadinessPrompt(null)}>取消</button>
+          <button type="button" className="button button-primary" disabled={starting} onClick={async () => {
+            const pendingLaunch = readinessPrompt?.pendingLaunch
+            setReadinessPrompt(null)
+            if (pendingLaunch) await createProductionTask(pendingLaunch)
+          }}>仍然继续</button>
+        </>}
+      >
+        <div className="readiness-dialog-content">
+          <p>{readinessPrompt?.message || (readinessPrompt?.status === 'not_ready'
+            ? '下列当前项目必需的配置明确缺失，因此还没有创建项目。'
+            : '配置看起来已填写，但运行时可用性需在生成时确认。')}</p>
+          {readinessPrompt?.items?.filter(item => item.status !== 'ready').length ? <ul>
+            {readinessPrompt.items.filter(item => item.status !== 'ready').map(item => <li key={item.key}>
+              <strong>{item.label}</strong>
+              <span>{item.missing?.length ? `缺少：${item.missing.join('、')}` : item.message}</span>
+            </li>)}
+          </ul> : null}
+        </div>
+      </Modal>
     </main>
   )
 }

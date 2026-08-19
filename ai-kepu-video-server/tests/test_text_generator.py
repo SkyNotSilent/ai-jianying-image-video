@@ -178,6 +178,63 @@ def test_rate_limit_retry_uses_retry_after_and_shared_throttle(monkeypatch):
     assert len(waits) == 3
 
 
+def test_terminal_rate_limit_returns_structured_safe_error(monkeypatch):
+    secret = "sk-terminal-rate-limit-secret"
+
+    def completion(**_kwargs):
+        error = RuntimeError(f"Authorization: Bearer {secret}")
+        error.response = SimpleNamespace(
+            status_code=429,
+            headers={"Retry-After": "13", "x-request-id": "req-terminal"},
+        )
+        raise error
+
+    monkeypatch.setattr(
+        Config,
+        "generation_config",
+        classmethod(lambda cls: {"retry_count": 0, "retry_interval_seconds": 1}),
+    )
+    monkeypatch.setattr(generator_module, "_wait_for_llm_throttle", lambda: None)
+    monkeypatch.setattr(generator_module, "_pause_llm_requests", lambda _seconds: None)
+
+    content, failure = generator_module._run_completion_with_retries(completion, {})
+
+    assert content is None
+    assert failure.code.value == "rate_limit"
+    assert failure.retry_after_seconds == 13
+    assert failure.request_id == "req-terminal"
+    assert secret not in str(failure)
+
+
+def test_regular_retry_uses_configured_base_interval(monkeypatch):
+    attempts = 0
+    sleeps = []
+
+    def completion(**_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise RuntimeError("temporary failure")
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
+        )
+
+    monkeypatch.setattr(
+        Config,
+        "generation_config",
+        classmethod(
+            lambda cls: {"retry_count": 2, "retry_interval_seconds": 4}
+        ),
+    )
+    monkeypatch.setattr(generator_module.time, "sleep", sleeps.append)
+
+    content, failure = generator_module._run_completion_with_retries(completion, {})
+
+    assert content == "ok"
+    assert failure is None
+    assert sleeps == [4, 8]
+
+
 @pytest.mark.parametrize(
     "entrypoint", ["direct", "generate", "generate_image_prompts"]
 )

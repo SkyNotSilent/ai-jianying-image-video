@@ -11,7 +11,7 @@ from src.draft.voice_catalog import normalize_tts_options, parse_voice_key
 from src.draft.voiceover import VoiceOverGenerator
 
 PRESET_VOICE_PREVIEW_TEXT = "欢迎来到 InsightCut，让我们一起把灵感变成精彩视频。"
-PRESET_VOICE_PREVIEW_VERSION = "preset-v1"
+PRESET_VOICE_PREVIEW_VERSION = "preset-v2-options"
 
 
 class VoicePreviewService:
@@ -60,21 +60,22 @@ class VoicePreviewService:
         if not clean_text:
             raise ValueError("试听文本不能为空")
         provider_config = config if selection.provider == "doubao" else config.get("mimo") or {}
-        requested_options = tts_options
-        if selection.kind == "preset":
-            requested_options = {
-                "speed_level": "normal",
-                "volume_ratio": 1.0,
-                "style_prompt": "",
-            }
-        options = normalize_tts_options(requested_options, provider_config, selection.provider)
-        if selection.kind == "preset" and selection.provider == "mimo":
-            options["style_prompt"] = ""
+        options = normalize_tts_options(tts_options, provider_config, selection.provider)
         mimo = config.get("mimo") or {}
         if selection.kind == "preset":
             identity = {
                 "version": PRESET_VOICE_PREVIEW_VERSION,
                 "voice_type": selection.key,
+                "options": options,
+                "provider": selection.provider,
+                "request_config": {
+                    "auth_method": config.get("auth_method"),
+                    "api_url": config.get("api_url"),
+                    "cluster": config.get("cluster"),
+                    "mimo_base_url": mimo.get("base_url"),
+                    "mimo_model": mimo.get("model"),
+                    "mimo_format": mimo.get("format"),
+                },
             }
         else:
             identity = {

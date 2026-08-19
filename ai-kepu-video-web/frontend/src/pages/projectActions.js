@@ -1,8 +1,6 @@
 export function getProjectPrimaryAction(project = {}) {
   if (project.type === 'draft') return 'draft'
-  if (project.status === 'interrupted') return 'resume'
-  if (project.status === 'processing') return 'progress'
-  return 'preview'
+  return 'workspace'
 }
 
 export function getDeleteConfirmation(project = {}) {

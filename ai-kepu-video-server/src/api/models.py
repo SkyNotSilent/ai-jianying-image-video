@@ -3,7 +3,7 @@ API 数据模型
 定义请求和响应的数据结构
 """
 
-from typing import Literal, Optional, List
+from typing import Dict, Literal, Optional, List
 from pydantic import BaseModel, Field
 from enum import Enum
 
@@ -13,6 +13,7 @@ class TaskStatus(str, Enum):
     PENDING = "pending"
     PROCESSING = "processing"
     AWAITING_CONFIRMATION = "awaiting_confirmation"
+    AWAITING_FINALIZATION = "awaiting_finalization"
     INTERRUPTED = "interrupted"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -105,6 +106,8 @@ class TaskResponse(BaseModel):
     result: Optional[TaskResult] = Field(None, description="任务结果")
     extract_path: Optional[str] = Field(None, description="用户上次使用的解压路径")
     error: Optional[str] = Field(None, description="错误信息")
+    error_code: Optional[str] = Field(None, description="稳定错误分类")
+    error_meta: Optional[Dict] = Field(None, description="脱敏错误元数据")
     can_resume: bool = Field(False, description="是否存在可继续生成的检查点")
     workflow_phase: Optional[str] = Field(None, description="工作台阶段")
     plan_version: int = Field(0, description="预案版本")

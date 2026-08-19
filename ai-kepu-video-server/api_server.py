@@ -2,11 +2,13 @@
 FastAPI 应用入口
 """
 
+import asyncio
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 # 本地开发时加载 .env 文件
 env_path = Path(__file__).parent / '.env'
@@ -20,6 +22,13 @@ if env_path.exists():
 
 from src.api.routes import router
 from src.api.task_manager import task_manager
+from src.api.task_sweeper import task_sweeper
+from src.api.error_model import (
+    ErrorCode,
+    make_safe_error,
+    sanitize_http_detail,
+    sanitize_persisted_error_text,
+)
 from src.utils.logger import setup_logging, get_logger
 from src.config import Config
 
@@ -27,12 +36,97 @@ from src.config import Config
 setup_logging(log_dir="logs", log_level=Config.LOG_LEVEL)
 logger = get_logger(__name__)
 
+
+async def startup_event():
+    """应用启动事件；保持可直接调用以兼容现有测试。"""
+    deleted_count = await asyncio.to_thread(task_manager.complete_deleting_tasks)
+    if deleted_count:
+        logger.warning(f"启动时已完成 {deleted_count} 个待删除任务的清理")
+    interrupted_count = await asyncio.to_thread(
+        task_manager.mark_orphaned_tasks_interrupted
+    )
+    if interrupted_count:
+        logger.warning(f"启动时已将 {interrupted_count} 个遗留任务标记为中断，可继续生成")
+    logger.info("=" * 60)
+    logger.info("InsightCut API 启动")
+    logger.info("API 文档: http://0.0.0.0:2002/docs")
+    logger.info("健康检查: http://0.0.0.0:2002/health")
+    logger.info("=" * 60)
+
+
+async def shutdown_event():
+    """应用关闭事件；保持可直接调用以兼容现有测试。"""
+    logger.info("API 服务正在关闭...")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Own exactly one sweeper for the lifetime of this worker process."""
+    await startup_event()
+    task_sweeper.start()
+    try:
+        yield
+    finally:
+        task_sweeper.stop()
+        stopped = await asyncio.to_thread(task_sweeper.join, 30.0)
+        if not stopped:
+            logger.warning("后台任务巡检线程未在 30 秒内停止")
+        await shutdown_event()
+
+
 # 创建 FastAPI 应用
 app = FastAPI(
     title="InsightCut API",
     description="批量生成认知科普视频、MP4 与剪映/CapCut 草稿",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan,
 )
+
+
+@app.exception_handler(HTTPException)
+async def structured_http_error(_request: Request, exc: HTTPException):
+    """Preserve FastAPI's detail contract while adding stable safe error fields."""
+
+    header_code = (exc.headers or {}).get("X-Error-Code")
+    if header_code:
+        code = header_code
+    elif exc.status_code in {401, 403}:
+        code = ErrorCode.AUTH.value
+    elif exc.status_code == 409:
+        code = ErrorCode.CONFLICT.value
+    elif exc.status_code == 429:
+        code = ErrorCode.RATE_LIMIT.value
+    elif exc.status_code in {408, 504}:
+        code = ErrorCode.TIMEOUT.value
+    else:
+        code = ErrorCode.UNKNOWN.value
+    safe = make_safe_error(code, http_status=exc.status_code)
+    if isinstance(exc.detail, (dict, list, tuple)):
+        detail = sanitize_http_detail(exc.detail)
+    elif isinstance(exc.detail, str):
+        detail = sanitize_persisted_error_text(exc.detail)
+    else:
+        detail = safe.safe_message
+    headers = {
+        key: value
+        for key, value in (exc.headers or {}).items()
+        if key.lower() not in {
+            "x-error-code",
+            "authorization",
+            "proxy-authorization",
+            "cookie",
+            "set-cookie",
+        }
+    }
+    return JSONResponse(
+        status_code=exc.status_code,
+        headers=headers,
+        content={
+            "detail": detail or safe.safe_message,
+            "error_code": safe.code.value,
+            "error_meta": safe.metadata(),
+        },
+    )
 
 # 配置 CORS
 app.add_middleware(
@@ -110,28 +204,6 @@ async def serve_media(file_path: str):
 
     # 两个目录都没找到文件
     raise HTTPException(status_code=404, detail="媒体文件不存在")
-
-
-@app.on_event("startup")
-async def startup_event():
-    """应用启动事件"""
-    deleted_count = task_manager.complete_deleting_tasks()
-    if deleted_count:
-        logger.warning(f"启动时已完成 {deleted_count} 个待删除任务的清理")
-    interrupted_count = task_manager.mark_orphaned_tasks_interrupted()
-    if interrupted_count:
-        logger.warning(f"启动时已将 {interrupted_count} 个遗留任务标记为中断，可继续生成")
-    logger.info("=" * 60)
-    logger.info("InsightCut API 启动")
-    logger.info(f"API 文档: http://0.0.0.0:2002/docs")
-    logger.info(f"健康检查: http://0.0.0.0:2002/health")
-    logger.info("=" * 60)
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """应用关闭事件"""
-    logger.info("API 服务正在关闭...")
 
 
 @app.get("/")

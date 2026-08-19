@@ -1,4 +1,29 @@
-const SPEED_LEVELS = new Set(['very_slow', 'slow', 'normal', 'fast', 'very_fast'])
+const SPEED_LEVEL_ORDER = ['very_slow', 'slow', 'normal', 'fast', 'very_fast']
+const SPEED_LEVELS = new Set(SPEED_LEVEL_ORDER)
+const DOUBAO_SPEED_RATIOS = {
+  very_slow: 0.8,
+  slow: 1,
+  normal: 1.25,
+  fast: 1.5,
+  very_fast: 1.75,
+}
+
+export function doubaoSpeedRatio(speedLevel) {
+  return DOUBAO_SPEED_RATIOS[SPEED_LEVELS.has(speedLevel) ? speedLevel : 'normal']
+}
+
+export function speedLevelPosition(speedLevel) {
+  const position = SPEED_LEVEL_ORDER.indexOf(speedLevel)
+  return position >= 0 ? position : SPEED_LEVEL_ORDER.indexOf('normal')
+}
+
+export function speedLevelAtPosition(position) {
+  const parsed = Number.parseInt(position, 10)
+  const clamped = Number.isFinite(parsed)
+    ? Math.min(SPEED_LEVEL_ORDER.length - 1, Math.max(0, parsed))
+    : SPEED_LEVEL_ORDER.indexOf('normal')
+  return SPEED_LEVEL_ORDER[clamped]
+}
 
 function canonicalVoiceId(voice = {}) {
   const current = String(voice.id || '').trim()

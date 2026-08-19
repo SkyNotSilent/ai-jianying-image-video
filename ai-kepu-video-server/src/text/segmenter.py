@@ -66,9 +66,18 @@ class TextSegmenter:
 
     def split(self, text: str) -> List[str]:
         logger.info(f"开始分段: 文本长度={len(text)}")
-        text = re.sub(r'\s+', '', text)
-        segments = self._smart_split(text)
-        segments = self._merge_short(segments)
+        # 换行通常来自用户已经确认过的标题、段落或口播停顿，不能在切分前
+        # 直接抹掉，否则相邻段会黏在一起并在 max_length 处被生硬截断。
+        paragraphs = [
+            re.sub(r'[ \t\r\f\v]+', '', paragraph)
+            for paragraph in re.split(r'\n+', text or '')
+            if paragraph.strip()
+        ]
+        segments = []
+        for paragraph in paragraphs:
+            paragraph_segments = self._smart_split(paragraph)
+            # 只在同一自然段内合并短句，绝不跨段落重新黏合。
+            segments.extend(self._merge_short(paragraph_segments))
         segments = [s for s in segments if re.sub(r'[^\w]', '', s)]
         logger.info(f"分段完成: 共 {len(segments)} 段")
         return segments

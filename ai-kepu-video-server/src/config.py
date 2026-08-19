@@ -140,7 +140,11 @@ class Config:
             "generation": {
                 "prompt_concurrency": 4,
                 "tts_concurrency": _clamp_int(_env("TTS_CONCURRENCY", "1"), 1, 1, 8),
-                "image_concurrency": _clamp_int(_env("IMAGE_CONCURRENCY", "1"), 1, 1, 8),
+                "image_concurrency": _clamp_int(_env("IMAGE_CONCURRENCY", "8"), 8, 1, 8),
+                "retry_count": _clamp_int(_env("GENERATION_RETRY_COUNT", "2"), 2, 0, 5),
+                "retry_interval_seconds": _clamp_int(
+                    _env("GENERATION_RETRY_INTERVAL_SECONDS", "5"), 5, 1, 60
+                ),
             },
         }
 
@@ -243,7 +247,13 @@ class Config:
             generation.get("tts_concurrency"), 1, 1, 8
         )
         generation["image_concurrency"] = _clamp_int(
-            generation.get("image_concurrency"), 1, 1, 8
+            generation.get("image_concurrency"), 8, 1, 8
+        )
+        generation["retry_count"] = _clamp_int(
+            generation.get("retry_count"), 2, 0, 5
+        )
+        generation["retry_interval_seconds"] = _clamp_int(
+            generation.get("retry_interval_seconds"), 5, 1, 60
         )
 
     @classmethod

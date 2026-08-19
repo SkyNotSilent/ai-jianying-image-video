@@ -76,3 +76,28 @@ def test_plain_text_keeps_existing_weak_punctuation_boundaries():
         "很多人总想立刻看到回报，今天学了东西，",
         "明天就想变现，最后不断更换方向。",
     ]
+
+
+def test_short_segmenter_preserves_user_paragraph_boundaries_before_length_split():
+    text = (
+        "1  普通人为什么越来越需要 AI 助手\n\n"
+        "你是否有过这样的经历：明明知道不应该买，却在情绪低落时下单了很多东西？"
+    )
+
+    segments = TextSegmenter(max_length=22, min_length=8).split(text)
+
+    assert segments[:3] == [
+        "1普通人为什么越来越需要AI助手",
+        "你是否有过这样的经历：明明知道不应该买，",
+        "却在情绪低落时下单了很多东西？",
+    ]
+    assert not any(segment.endswith("有过这") for segment in segments)
+
+
+def test_short_segmenter_never_merges_a_short_paragraph_across_a_newline():
+    text = "第一章\n这是下一段完整的口播内容。"
+
+    assert TextSegmenter(max_length=22, min_length=8).split(text) == [
+        "第一章",
+        "这是下一段完整的口播内容。",
+    ]

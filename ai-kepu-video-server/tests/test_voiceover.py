@@ -4,7 +4,10 @@ import wave
 from pathlib import Path
 
 import pytest
+import requests
 
+from src.api.error_model import ClassifiedError
+from src.config import Config
 from src.draft.voice_preview import VoicePreviewService
 from src.draft.voiceover import VoiceOverGenerator
 
@@ -33,6 +36,39 @@ def wav_bytes(seconds=0.05, sample_rate=24000):
         output.setframerate(sample_rate)
         output.writeframes(b"\x01\x00" * int(seconds * sample_rate))
     return target.getvalue()
+
+
+def test_doubao_401_is_wrapped_as_safe_auth_error(tmp_path, monkeypatch, tts_config):
+    secret = "doubao-provider-secret"
+
+    class UnauthorizedResponse:
+        status_code = 401
+        headers = {"x-request-id": "req-doubao-auth"}
+
+        def raise_for_status(self):
+            raise requests.HTTPError(
+                f"Authorization: Bearer {secret}", response=self
+            )
+
+    config = {**tts_config, "api_key": secret}
+    monkeypatch.setattr(
+        Config,
+        "generation_config",
+        classmethod(lambda cls: {"retry_count": 0, "retry_interval_seconds": 1}),
+    )
+    monkeypatch.setattr(
+        "src.draft.voiceover.requests.post",
+        lambda *_args, **_kwargs: UnauthorizedResponse(),
+    )
+    generator = VoiceOverGenerator(str(tmp_path), tts_config=config)
+
+    with pytest.raises(ClassifiedError) as exc_info:
+        generator.generate("测试语音", filename="unauthorized")
+
+    safe = exc_info.value.safe_error
+    assert safe.code.value == "auth"
+    assert safe.request_id == "req-doubao-auth"
+    assert secret not in str(exc_info.value)
 
 
 @pytest.fixture
@@ -87,6 +123,34 @@ def test_routes_doubao_per_call_and_maps_speed_volume(tmp_path, monkeypatch, tts
         "speed_ratio": 1.75,
         "volume_ratio": 1.8,
     }
+
+
+def test_doubao_regular_retry_uses_configured_interval(tmp_path, monkeypatch, tts_config):
+    attempts = 0
+    sleeps = []
+
+    def fake_post(_url, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("temporary failure")
+        return FakeResponse({"code": 3000, "data": base64.b64encode(wav_bytes()).decode()})
+
+    monkeypatch.setattr(
+        Config,
+        "generation_config",
+        classmethod(
+            lambda cls: {"retry_count": 2, "retry_interval_seconds": 4}
+        ),
+    )
+    monkeypatch.setattr("src.draft.voiceover.requests.post", fake_post)
+    monkeypatch.setattr("src.draft.voiceover.time.sleep", sleeps.append)
+
+    generator = VoiceOverGenerator(str(tmp_path), tts_config=tts_config)
+    generator.generate("测试重试", filename="retry")
+
+    assert attempts == 2
+    assert sleeps == [4]
 
 
 def test_routes_mimo_and_combines_style_with_speed_instruction(tmp_path, monkeypatch, tts_config):
@@ -176,9 +240,9 @@ def test_preset_preview_cache_is_stable_per_voice(
 
     assert first["cached"] is False
     assert second == {**first, "cached": True}
-    assert len(calls) == 2
+    assert len(calls) == 4
     assert changed_text["path"] == first["path"]
-    assert changed_options["path"] == first["path"]
-    assert changed_model["path"] == first["path"]
+    assert changed_options["path"] != first["path"]
+    assert changed_model["path"] != first["path"]
     assert changed_voice["path"] != first["path"]
     assert first["url"].startswith("/media/_voice_previews/")

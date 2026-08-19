@@ -13,6 +13,11 @@ from typing import Optional, List, Dict
 from contextlib import contextmanager
 from pathlib import Path
 
+from src.api.error_model import (
+    normalize_error_code,
+    normalize_error_metadata,
+    sanitize_persisted_error_text,
+)
 from src.draft.voice_catalog import (
     DOUBAO_DEFAULT_ENABLED_IDS,
     DOUBAO_PRESET_VOICES,
@@ -33,14 +38,23 @@ class SQLiteClient:
     TASK_CHECKPOINT_COLUMNS = frozenset({
         "script_text", "summary", "input_mode", "delete_files_on_delete",
         "execution_mode", "workflow_phase", "script_policy", "voice_confirmed",
+        "error_code", "error_meta_json",
     })
     SEGMENT_CHECKPOINT_COLUMNS = frozenset({
         "text", "image_prompt", "image_path", "image_url", "image_status",
         "image_error", "audio_path", "audio_url", "audio_status", "audio_error",
         "duration", "audio_voice_type", "audio_tts_options_json",
         "prompt_status", "prompt_error", "prompt_manual", "prompt_needs_review",
+        "prompt_error_code", "prompt_error_meta_json",
+        "image_error_code", "image_error_meta_json",
+        "audio_error_code", "audio_error_meta_json",
     })
-    CLEARABLE_SEGMENT_ERROR_COLUMNS = frozenset({"image_error", "audio_error", "prompt_error"})
+    CLEARABLE_SEGMENT_ERROR_COLUMNS = frozenset({
+        "image_error", "audio_error", "prompt_error",
+        "prompt_error_code", "prompt_error_meta_json",
+        "image_error_code", "image_error_meta_json",
+        "audio_error_code", "audio_error_meta_json",
+    })
 
     def __init__(self):
         self._initialized = False
@@ -69,6 +83,8 @@ class SQLiteClient:
                     status TEXT NOT NULL DEFAULT 'pending',
                     current_step TEXT DEFAULT 'pending',
                     error TEXT,
+                    error_code TEXT,
+                    error_meta_json TEXT,
                     extract_path TEXT,
                     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
                     updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
@@ -146,10 +162,16 @@ class SQLiteClient:
                     image_url TEXT,
                     image_status TEXT DEFAULT 'completed',
                     image_error TEXT,
+                    image_error_code TEXT,
+                    image_error_meta_json TEXT,
                     audio_path TEXT,
                     audio_url TEXT,
                     audio_status TEXT DEFAULT 'completed',
                     audio_error TEXT,
+                    audio_error_code TEXT,
+                    audio_error_meta_json TEXT,
+                    prompt_error_code TEXT,
+                    prompt_error_meta_json TEXT,
                     duration REAL,
                     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
                     updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
@@ -172,6 +194,24 @@ class SQLiteClient:
                     metadata_json TEXT,
                     status TEXT DEFAULT 'completed',
                     error_message TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+                );
+
+                CREATE TABLE IF NOT EXISTS task_operations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    operation_id TEXT NOT NULL UNIQUE,
+                    task_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'pending',
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    snapshot_key TEXT,
+                    targets_json TEXT NOT NULL DEFAULT '[]',
+                    completed_count INTEGER NOT NULL DEFAULT 0,
+                    failed_count INTEGER NOT NULL DEFAULT 0,
+                    error TEXT,
+                    error_code TEXT,
+                    error_meta_json TEXT,
                     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
                     updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
                 );
@@ -252,6 +292,31 @@ class SQLiteClient:
                     "input_mode": "TEXT NOT NULL DEFAULT 'script'",
                 },
             )
+            self._apply_migration(
+                cursor,
+                "20260819_task_operations",
+                """
+                CREATE TABLE IF NOT EXISTS task_operations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    operation_id TEXT NOT NULL UNIQUE,
+                    task_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'pending',
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    snapshot_key TEXT,
+                    targets_json TEXT NOT NULL DEFAULT '[]',
+                    completed_count INTEGER NOT NULL DEFAULT 0,
+                    failed_count INTEGER NOT NULL DEFAULT 0,
+                    error TEXT,
+                    error_code TEXT,
+                    error_meta_json TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_task_operations_task_state
+                    ON task_operations(task_id, state, updated_at);
+                """,
+            )
             self._apply_column_migration(
                 cursor,
                 "20260716_tts_task_options",
@@ -296,6 +361,38 @@ class SQLiteClient:
                     "prompt_needs_review": "INTEGER NOT NULL DEFAULT 0",
                 },
             )
+            self._apply_column_migration(
+                cursor,
+                "20260819_structured_errors_tasks",
+                "tasks",
+                {
+                    "error_code": "TEXT",
+                    "error_meta_json": "TEXT",
+                },
+            )
+            self._apply_column_migration(
+                cursor,
+                "20260819_structured_errors_segments",
+                "task_segments",
+                {
+                    "prompt_error_code": "TEXT",
+                    "prompt_error_meta_json": "TEXT",
+                    "image_error_code": "TEXT",
+                    "image_error_meta_json": "TEXT",
+                    "audio_error_code": "TEXT",
+                    "audio_error_meta_json": "TEXT",
+                },
+            )
+            self._apply_column_migration(
+                cursor,
+                "20260819_structured_errors_operations",
+                "task_operations",
+                {
+                    "error_code": "TEXT",
+                    "error_meta_json": "TEXT",
+                },
+            )
+            self._sanitize_legacy_error_storage(cursor)
 
             conn.commit()
             conn.close()
@@ -413,6 +510,134 @@ class SQLiteClient:
         cursor.execute("INSERT INTO schema_migrations (version) VALUES (?)", (version,))
         logger.info(f"SQLite 迁移已应用: {version}")
 
+    @classmethod
+    def _safe_structured_error_values(
+        cls,
+        error,
+        error_code,
+        error_meta,
+    ):
+        """Return canonical public text/code/metadata for one stored error."""
+
+        if isinstance(error_meta, str):
+            try:
+                error_meta = json.loads(error_meta)
+            except (TypeError, ValueError):
+                error_meta = None
+        has_error = bool(error or error_code or isinstance(error_meta, dict))
+        code = normalize_error_code(error_code, has_error=has_error)
+        if code is None:
+            return None, None, None
+        # Historical metadata may itself contain a provider response in
+        # safe_message.  Keep only whitelisted classification fields and always
+        # regenerate the public message from the stable code.
+        metadata_source = dict(error_meta) if isinstance(error_meta, dict) else {}
+        metadata_source.pop("safe_message", None)
+        metadata = normalize_error_metadata(code, metadata_source)
+        # Keep an explicitly authored, harmless operator message (for example
+        # which segment needs repair).  Suspicious provider payloads collapse
+        # to a generic string in sanitize_persisted_error_text; metadata still
+        # carries the stable code-specific action for clients.
+        public_error = sanitize_persisted_error_text(error)
+        return (
+            public_error or metadata["safe_message"],
+            code.value,
+            json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+        )
+
+    @classmethod
+    def _sanitize_operation_targets(cls, targets):
+        """Canonicalize durable per-target errors without changing target scope."""
+
+        if not isinstance(targets, list):
+            return []
+        sanitized = []
+        for raw_target in targets:
+            if not isinstance(raw_target, dict):
+                continue
+            target = dict(raw_target)
+            if any(
+                target.get(key) not in (None, "")
+                for key in ("error", "error_code", "error_meta", "error_meta_json")
+            ):
+                metadata = target.get("error_meta")
+                if metadata is None:
+                    metadata = target.get("error_meta_json")
+                error, code, metadata_json = cls._safe_structured_error_values(
+                    target.get("error"),
+                    target.get("error_code"),
+                    metadata,
+                )
+                target["error"] = error
+                target["error_code"] = code
+                target["error_meta"] = json.loads(metadata_json) if metadata_json else None
+                target.pop("error_meta_json", None)
+            sanitized.append(target)
+        return sanitized
+
+    def _sanitize_legacy_error_storage(self, cursor) -> None:
+        """One-time, idempotent cleanup of pre-structured provider failures."""
+
+        version = "20260819_sanitize_legacy_error_payloads_v1"
+        cursor.execute("SELECT 1 FROM schema_migrations WHERE version=?", (version,))
+        if cursor.fetchone():
+            return
+
+        structured_fields = {
+            "tasks": ("error",),
+            "task_segments": ("prompt_error", "image_error", "audio_error"),
+            "task_operations": ("error",),
+        }
+        for table, error_fields in structured_fields.items():
+            for error_field in error_fields:
+                code_field = f"{error_field}_code"
+                meta_field = f"{error_field}_meta_json"
+                rows = cursor.execute(
+                    f"SELECT id, {error_field}, {code_field}, {meta_field} "
+                    f"FROM {table} WHERE {error_field} IS NOT NULL "
+                    f"OR {code_field} IS NOT NULL OR {meta_field} IS NOT NULL"
+                ).fetchall()
+                for row in rows:
+                    error, code, metadata_json = self._safe_structured_error_values(
+                        row[error_field], row[code_field], row[meta_field]
+                    )
+                    cursor.execute(
+                        f"UPDATE {table} SET {error_field}=?, {code_field}=?, "
+                        f"{meta_field}=? WHERE id=?",
+                        (error, code, metadata_json, row["id"]),
+                    )
+
+        operation_rows = cursor.execute(
+            "SELECT id, targets_json FROM task_operations"
+        ).fetchall()
+        for row in operation_rows:
+            try:
+                targets = json.loads(row["targets_json"] or "[]")
+            except (TypeError, ValueError):
+                targets = []
+            sanitized_targets = self._sanitize_operation_targets(targets)
+            cursor.execute(
+                "UPDATE task_operations SET targets_json=? WHERE id=?",
+                (
+                    json.dumps(sanitized_targets, ensure_ascii=False, sort_keys=True),
+                    row["id"],
+                ),
+            )
+
+        for table in ("task_assets", "tts_voice_clones"):
+            rows = cursor.execute(
+                f"SELECT id, error_message FROM {table} "
+                "WHERE error_message IS NOT NULL AND TRIM(error_message) != ''"
+            ).fetchall()
+            for row in rows:
+                cursor.execute(
+                    f"UPDATE {table} SET error_message=? WHERE id=?",
+                    (sanitize_persisted_error_text(row["error_message"]), row["id"]),
+                )
+
+        cursor.execute("INSERT INTO schema_migrations (version) VALUES (?)", (version,))
+        logger.info(f"SQLite 迁移已应用: {version}")
+
     def _get_conn(self):
         """获取数据库连接"""
         if not self._initialized:
@@ -449,6 +674,91 @@ class SQLiteClient:
 
     def _rows_to_dicts(self, rows):
         return [dict(r) for r in rows]
+
+    @staticmethod
+    def _encode_error_metadata(error_code, error_meta, *, has_error: bool):
+        _error, code, metadata_json = SQLiteClient._safe_structured_error_values(
+            "error" if has_error else None,
+            error_code,
+            error_meta,
+        )
+        return code, metadata_json
+
+    @classmethod
+    def _encode_error_record(cls, error, error_code, error_meta):
+        return cls._safe_structured_error_values(error, error_code, error_meta)
+
+    @classmethod
+    def _decode_error_field(cls, record: Dict, error_field: str) -> Dict:
+        """Add a safe parsed view while retaining raw JSON columns for compatibility."""
+        if not record:
+            return record
+        code_field = f"{error_field}_code"
+        json_field = f"{error_field}_meta_json"
+        parsed_field = f"{error_field}_meta"
+        raw_json = record.get(json_field)
+        try:
+            raw_meta = json.loads(raw_json) if raw_json else None
+        except (TypeError, ValueError):
+            raw_meta = None
+        has_error = bool(record.get(error_field) or raw_json or record.get(code_field))
+        code = normalize_error_code(record.get(code_field), has_error=has_error)
+        if code is None:
+            record[code_field] = None
+            record[parsed_field] = None
+            return record
+        record[code_field] = code.value
+        record[parsed_field] = normalize_error_metadata(code, raw_meta)
+        return record
+
+    @classmethod
+    def _decode_task_error(cls, record: Dict) -> Dict:
+        return cls._decode_error_field(record, "error")
+
+    @classmethod
+    def _decode_segment_errors(cls, record: Dict) -> Dict:
+        for error_field in ("prompt_error", "image_error", "audio_error"):
+            cls._decode_error_field(record, error_field)
+        return record
+
+    @classmethod
+    def _prepare_segment_error_updates(cls, updates: Dict) -> Dict:
+        prepared = dict(updates or {})
+        for error_field in ("prompt_error", "image_error", "audio_error"):
+            code_field = f"{error_field}_code"
+            meta_field = f"{error_field}_meta"
+            json_field = f"{error_field}_meta_json"
+            error_was_supplied = error_field in prepared
+            code_was_supplied = code_field in prepared
+            meta_was_supplied = meta_field in prepared
+            json_was_supplied = json_field in prepared
+            raw_error = prepared.get(error_field)
+            raw_meta = (
+                prepared.pop(meta_field, None)
+                if meta_was_supplied
+                else prepared.get(json_field) if json_was_supplied else None
+            )
+
+            if (
+                error_was_supplied
+                and not raw_error
+                and not code_was_supplied
+                and not meta_was_supplied
+                and not json_was_supplied
+            ):
+                prepared[code_field] = None
+                prepared[json_field] = None
+                continue
+            if raw_error or code_was_supplied or meta_was_supplied or json_was_supplied:
+                safe_error, code, metadata_json = cls._encode_error_record(
+                    raw_error,
+                    prepared.get(code_field),
+                    raw_meta,
+                )
+                prepared[error_field] = safe_error
+                prepared[code_field] = code
+                prepared[json_field] = metadata_json
+        return prepared
 
     def create_task(
         self,
@@ -513,6 +823,7 @@ class SQLiteClient:
         try:
             conn = self._get_conn()
             cur = conn.cursor()
+            cur.execute("DELETE FROM task_operations WHERE task_id=?", (task_id,))
             cur.execute("DELETE FROM task_segments WHERE task_id=?", (task_id,))
             cur.execute("DELETE FROM task_assets WHERE task_id=?", (task_id,))
             cur.execute("DELETE FROM task_steps WHERE task_id=?", (task_id,))
@@ -526,7 +837,443 @@ class SQLiteClient:
             logger.error(f"删除任务记录失败: {e}")
             return False
 
-    def update_task_status(self, task_id: str, status: str, current_step: str = None, error: str = None) -> bool:
+    @staticmethod
+    def _operation_row(row) -> Dict:
+        if not row:
+            return {}
+        result = dict(row)
+        try:
+            result["targets"] = json.loads(result.get("targets_json") or "[]")
+        except (TypeError, ValueError):
+            result["targets"] = []
+        return SQLiteClient._decode_error_field(result, "error")
+
+    def create_task_operation(
+        self,
+        task_id: str,
+        kind: str,
+        idempotency_key: str,
+        snapshot_key: str,
+        targets: List[Dict],
+    ) -> Dict:
+        """Create one durable task operation, deduplicating active requests."""
+        if not self._initialized:
+            self._init_db()
+        if not self._initialized:
+            return {"outcome": "error"}
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute("BEGIN IMMEDIATE")
+            cur.execute(
+                "SELECT * FROM task_operations WHERE idempotency_key=? LIMIT 1",
+                (idempotency_key,),
+            )
+            existing = cur.fetchone()
+            if existing:
+                if existing["state"] in {"pending", "running"}:
+                    conn.commit()
+                    return {"outcome": "duplicate", "operation": self._operation_row(existing)}
+                # A terminal attempt must not permanently block the same explicit retry.
+                idempotency_key = f"{idempotency_key}:{uuid.uuid4().hex}"
+            cur.execute(
+                """SELECT * FROM task_operations
+                   WHERE task_id=? AND state IN ('pending','running')
+                   ORDER BY id DESC LIMIT 1""",
+                (task_id,),
+            )
+            active = cur.fetchone()
+            if active:
+                conn.commit()
+                return {"outcome": "conflict", "operation": self._operation_row(active)}
+            operation_id = uuid.uuid4().hex
+            cur.execute(
+                """INSERT INTO task_operations
+                   (operation_id, task_id, kind, state, idempotency_key,
+                    snapshot_key, targets_json)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (
+                    operation_id,
+                    task_id,
+                    kind,
+                    "pending",
+                    idempotency_key,
+                    snapshot_key,
+                    json.dumps(
+                        self._sanitize_operation_targets(targets),
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
+            conn.commit()
+            return {
+                "outcome": "created",
+                "operation": self.get_task_operation(operation_id),
+            }
+        except Exception as exc:
+            conn.rollback()
+            logger.error(f"创建任务操作失败: {exc}")
+            return {"outcome": "error"}
+        finally:
+            conn.close()
+
+    def get_task_operation(self, operation_id: str) -> Dict:
+        if not self._initialized:
+            self._init_db()
+        if not self._initialized:
+            return {}
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM task_operations WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            return self._operation_row(row)
+        finally:
+            conn.close()
+
+    def get_active_task_operation(self, task_id: str) -> Dict:
+        if not self._initialized:
+            self._init_db()
+        if not self._initialized:
+            return {}
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                """SELECT * FROM task_operations
+                   WHERE task_id=? AND state IN ('pending','running')
+                   ORDER BY id DESC LIMIT 1""",
+                (task_id,),
+            ).fetchone()
+            return self._operation_row(row)
+        finally:
+            conn.close()
+
+    def update_task_operation(
+        self,
+        operation_id: str,
+        *,
+        state: str = None,
+        targets: List[Dict] = None,
+        completed_count: int = None,
+        failed_count: int = None,
+        error: str = None,
+        error_code: str = None,
+        error_meta: Dict = None,
+    ) -> bool:
+        if not self._initialized:
+            self._init_db()
+        if not self._initialized:
+            return False
+        fields = ["updated_at=datetime('now','localtime')"]
+        values = []
+        for key, value in (
+            ("state", state),
+            ("completed_count", completed_count),
+            ("failed_count", failed_count),
+        ):
+            if value is not None:
+                fields.append(f"{key}=?")
+                values.append(value)
+        if error is not None or error_code is not None or error_meta is not None:
+            safe_error, code, metadata_json = self._encode_error_record(
+                error,
+                error_code,
+                error_meta,
+            )
+            fields.extend(["error=?", "error_code=?", "error_meta_json=?"])
+            values.extend([safe_error if safe_error is not None else error, code, metadata_json])
+        if targets is not None:
+            fields.append("targets_json=?")
+            values.append(json.dumps(
+                self._sanitize_operation_targets(targets),
+                ensure_ascii=False,
+            ))
+        values.append(operation_id)
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                f"UPDATE task_operations SET {', '.join(fields)} WHERE operation_id=?",
+                values,
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        except Exception as exc:
+            logger.error(f"更新任务操作失败: {exc}")
+            return False
+        finally:
+            conn.close()
+
+    def start_task_operation(
+        self,
+        operation_id: str,
+        task_id: str,
+        *,
+        operation_targets: List[Dict],
+        workflow_phase: str,
+        current_step: str,
+        mark_asset_targets_processing: bool = False,
+        mark_prompt_targets_processing: bool = False,
+    ) -> bool:
+        """Atomically expose an operation and its matching task running state."""
+        if not self._initialized:
+            self._init_db()
+        if not self._initialized:
+            return False
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute("BEGIN IMMEDIATE")
+            cur.execute(
+                """UPDATE task_operations
+                   SET state='running', targets_json=?, completed_count=0,
+                       failed_count=0, error='', error_code=NULL, error_meta_json=NULL,
+                       updated_at=datetime('now','localtime')
+                   WHERE operation_id=? AND task_id=? AND state='pending'""",
+                (
+                    json.dumps(
+                        self._sanitize_operation_targets(operation_targets or []),
+                        ensure_ascii=False,
+                    ),
+                    operation_id,
+                    task_id,
+                ),
+            )
+            if cur.rowcount != 1:
+                conn.rollback()
+                return False
+            if mark_asset_targets_processing:
+                for target in operation_targets or []:
+                    asset_type = target.get("asset_type")
+                    segment_index = target.get("segment_index")
+                    if (
+                        asset_type not in {"image", "audio"}
+                        or segment_index is None
+                        or target.get("mode") == "replace"
+                    ):
+                        continue
+                    cur.execute(
+                        f"""UPDATE task_segments
+                            SET {asset_type}_status='processing', {asset_type}_error=NULL,
+                                {asset_type}_error_code=NULL,
+                                {asset_type}_error_meta_json=NULL,
+                                updated_at=datetime('now','localtime')
+                            WHERE task_id=? AND segment_index=?""",
+                        (task_id, int(segment_index)),
+                    )
+                    if cur.rowcount != 1:
+                        conn.rollback()
+                        return False
+            if mark_prompt_targets_processing:
+                for target in operation_targets or []:
+                    if (
+                        target.get("asset_type") != "prompt"
+                        or target.get("segment_index") is None
+                    ):
+                        continue
+                    cur.execute(
+                        """UPDATE task_segments
+                           SET prompt_status='processing', prompt_error=NULL,
+                               prompt_error_code=NULL, prompt_error_meta_json=NULL,
+                               updated_at=datetime('now','localtime')
+                           WHERE task_id=? AND segment_index=?""",
+                        (task_id, int(target["segment_index"])),
+                    )
+                    if cur.rowcount != 1:
+                        conn.rollback()
+                        return False
+            cur.execute(
+                """UPDATE tasks
+                   SET status='processing', workflow_phase=?, current_step=?, error=NULL,
+                       error_code=NULL, error_meta_json=NULL,
+                       updated_at=datetime('now','localtime')
+                   WHERE task_id=?""",
+                (workflow_phase, current_step, task_id),
+            )
+            if cur.rowcount != 1:
+                conn.rollback()
+                return False
+            conn.commit()
+            return True
+        except Exception as exc:
+            conn.rollback()
+            logger.error(f"原子启动任务操作失败: {exc}")
+            return False
+        finally:
+            conn.close()
+
+    def finish_task_operation(
+        self,
+        operation_id: str,
+        task_id: str,
+        *,
+        operation_state: str,
+        operation_targets: List[Dict],
+        completed_count: int,
+        failed_count: int,
+        operation_error: Optional[str],
+        task_status: str,
+        workflow_phase: str,
+        current_step: str,
+        task_error: Optional[str],
+        result: Optional[Dict] = None,
+        clear_result: bool = False,
+        operation_error_code: Optional[str] = None,
+        operation_error_meta: Optional[Dict] = None,
+        task_error_code: Optional[str] = None,
+        task_error_meta: Optional[Dict] = None,
+    ) -> bool:
+        """Atomically finish an operation and expose its resulting task state."""
+        if not self._initialized:
+            self._init_db()
+        if not self._initialized:
+            return False
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute("BEGIN IMMEDIATE")
+            safe_operation_error, encoded_operation_code, encoded_operation_meta = self._encode_error_record(
+                operation_error,
+                operation_error_code,
+                operation_error_meta,
+            )
+            safe_task_error, encoded_task_code, encoded_task_meta = self._encode_error_record(
+                task_error,
+                task_error_code,
+                task_error_meta,
+            )
+            cur.execute(
+                """UPDATE task_operations
+                   SET state=?, targets_json=?, completed_count=?, failed_count=?,
+                       error=?, error_code=?, error_meta_json=?,
+                       updated_at=datetime('now','localtime')
+                   WHERE operation_id=? AND task_id=?
+                     AND state IN ('pending','running')""",
+                (
+                    operation_state,
+                    json.dumps(
+                        self._sanitize_operation_targets(operation_targets or []),
+                        ensure_ascii=False,
+                    ),
+                    int(completed_count or 0),
+                    int(failed_count or 0),
+                    safe_operation_error if safe_operation_error is not None else operation_error,
+                    encoded_operation_code,
+                    encoded_operation_meta,
+                    operation_id,
+                    task_id,
+                ),
+            )
+            if cur.rowcount != 1:
+                conn.rollback()
+                return False
+            completed_at_sql = (
+                "datetime('now','localtime')" if task_status == "completed" else "completed_at"
+            )
+            cur.execute(
+                f"""UPDATE tasks
+                    SET status=?, workflow_phase=?, current_step=?, error=?,
+                        error_code=?, error_meta_json=?,
+                        completed_at={completed_at_sql},
+                        updated_at=datetime('now','localtime')
+                    WHERE task_id=?""",
+                (
+                    task_status,
+                    workflow_phase,
+                    current_step,
+                    safe_task_error if safe_task_error is not None else task_error,
+                    encoded_task_code,
+                    encoded_task_meta,
+                    task_id,
+                ),
+            )
+            if cur.rowcount != 1:
+                conn.rollback()
+                return False
+            if result is not None:
+                cur.execute(
+                    """INSERT INTO task_results
+                       (task_id, draft_path, draft_url, video_url, segments_count, total_duration)
+                       VALUES (?,?,?,?,?,?)
+                       ON CONFLICT(task_id) DO UPDATE SET
+                       draft_path=excluded.draft_path, draft_url=excluded.draft_url,
+                       video_url=excluded.video_url, segments_count=excluded.segments_count,
+                       total_duration=excluded.total_duration""",
+                    (
+                        task_id,
+                        result.get("draft_path"),
+                        result.get("draft_url"),
+                        result.get("video_url"),
+                        int(result.get("segments_count") or 0),
+                        result.get("total_duration"),
+                    ),
+                )
+            elif clear_result:
+                cur.execute("DELETE FROM task_results WHERE task_id=?", (task_id,))
+            conn.commit()
+            return True
+        except Exception as exc:
+            conn.rollback()
+            logger.error(f"原子完成任务操作失败: {exc}")
+            return False
+        finally:
+            conn.close()
+
+    def interrupt_orphaned_task_operation(self, task_id: str) -> Dict:
+        """Expose a previous-process operation as retryable without touching completed assets."""
+        operation = self.get_active_task_operation(task_id)
+        if not operation:
+            return {}
+        targets = operation.get("targets") or []
+        for target in targets:
+            if target.get("status") in {"pending", "processing"}:
+                target["status"] = "failed"
+                target["error"] = "服务重启导致本次操作中断，可再次重试"
+                if (
+                    target.get("asset_type") in {"image", "audio"}
+                    and target.get("mode") != "replace"
+                    and target.get("segment_index") is not None
+                ):
+                    self.update_segment(
+                        task_id,
+                        int(target["segment_index"]),
+                        {
+                            f"{target['asset_type']}_status": "failed",
+                            f"{target['asset_type']}_error": target["error"],
+                        },
+                    )
+                elif (
+                    target.get("asset_type") == "prompt"
+                    and target.get("segment_index") is not None
+                ):
+                    self.update_segment(
+                        task_id,
+                        int(target["segment_index"]),
+                        {
+                            "prompt_status": "failed",
+                            "prompt_error": target["error"],
+                        },
+                    )
+        self.update_task_operation(
+            operation["operation_id"],
+            state="interrupted",
+            targets=targets,
+            completed_count=sum(1 for item in targets if item.get("status") == "completed"),
+            failed_count=sum(1 for item in targets if item.get("status") == "failed"),
+            error="服务重启导致本次操作中断",
+        )
+        return self.get_task_operation(operation["operation_id"])
+
+    def update_task_status(
+        self,
+        task_id: str,
+        status: str,
+        current_step: str = None,
+        error: str = None,
+        error_code: str = None,
+        error_meta: Dict = None,
+    ) -> bool:
         if not self._initialized:
             self._init_db()
         if not self._initialized:
@@ -534,15 +1281,26 @@ class SQLiteClient:
         try:
             conn = self._get_conn()
             cur = conn.cursor()
+            safe_error, encoded_code, encoded_meta = self._encode_error_record(
+                error,
+                error_code,
+                error_meta,
+            )
+            stored_error = safe_error if safe_error is not None else error
             if status == "completed":
                 cur.execute(
-                    "UPDATE tasks SET status=?, current_step=?, error=?, completed_at=datetime('now','localtime'), updated_at=datetime('now','localtime') WHERE task_id=?",
-                    (status, current_step, error, task_id)
+                    """UPDATE tasks SET status=?, current_step=?, error=?,
+                       error_code=?, error_meta_json=?,
+                       completed_at=datetime('now','localtime'),
+                       updated_at=datetime('now','localtime') WHERE task_id=?""",
+                    (status, current_step, stored_error, encoded_code, encoded_meta, task_id)
                 )
             else:
                 cur.execute(
-                    "UPDATE tasks SET status=?, current_step=?, error=?, updated_at=datetime('now','localtime') WHERE task_id=?",
-                    (status, current_step, error, task_id)
+                    """UPDATE tasks SET status=?, current_step=?, error=?,
+                       error_code=?, error_meta_json=?,
+                       updated_at=datetime('now','localtime') WHERE task_id=?""",
+                    (status, current_step, stored_error, encoded_code, encoded_meta, task_id)
                 )
             conn.commit()
             conn.close()
@@ -552,7 +1310,12 @@ class SQLiteClient:
             return False
 
     def mark_task_interrupted(
-        self, task_id: str, current_step: str = None, error: str = None
+        self,
+        task_id: str,
+        current_step: str = None,
+        error: str = None,
+        error_code: str = None,
+        error_meta: Dict = None,
     ) -> bool:
         """Mark a task interrupted unless deletion has already claimed it."""
         if not self._initialized:
@@ -562,12 +1325,24 @@ class SQLiteClient:
         try:
             conn = self._get_conn()
             cur = conn.cursor()
+            safe_error, encoded_code, encoded_meta = self._encode_error_record(
+                error,
+                error_code,
+                error_meta,
+            )
             cur.execute(
                 """UPDATE tasks
-                   SET status='interrupted', current_step=?, error=?,
+                   SET status='interrupted', current_step=?, error=?, error_code=?,
+                       error_meta_json=?,
                        updated_at=datetime('now','localtime')
                    WHERE task_id=? AND status != 'deleting'""",
-                (current_step, error, task_id),
+                (
+                    current_step,
+                    safe_error if safe_error is not None else error,
+                    encoded_code,
+                    encoded_meta,
+                    task_id,
+                ),
             )
             updated = cur.rowcount > 0
             conn.commit()
@@ -716,8 +1491,9 @@ class SQLiteClient:
         expected_plan_version: int = None,
     ) -> Optional[int]:
         """Atomically edit one segment and advance the task plan version."""
+        prepared_updates = self._prepare_segment_error_updates(updates)
         fields = {
-            key: value for key, value in updates.items()
+            key: value for key, value in prepared_updates.items()
             if key in self.SEGMENT_CHECKPOINT_COLUMNS
         }
         if not fields:
@@ -847,6 +1623,23 @@ class SQLiteClient:
             logger.error(f"保存任务结果失败: {e}")
             return False
 
+    def clear_task_result(self, task_id: str) -> bool:
+        """Invalidate the draft record while leaving local files recoverable."""
+        if not self._initialized:
+            self._init_db()
+        if not self._initialized:
+            return False
+        conn = self._get_conn()
+        try:
+            conn.execute("DELETE FROM task_results WHERE task_id=?", (task_id,))
+            conn.commit()
+            return True
+        except Exception as exc:
+            logger.error(f"清除任务结果记录失败: {exc}")
+            return False
+        finally:
+            conn.close()
+
     def update_step(self, task_id: str, step_name: str, status: str,
                     progress: int = None, total: int = None, duration: float = None) -> bool:
         if not self._initialized:
@@ -891,7 +1684,7 @@ class SQLiteClient:
             if not task:
                 conn.close()
                 return None
-            task = dict(task)
+            task = self._decode_task_error(dict(task))
 
             cur.execute("SELECT * FROM task_results WHERE task_id=?", (task_id,))
             result = cur.fetchone()
@@ -1008,7 +1801,8 @@ class SQLiteClient:
                     record["clone_id"], record["name"], record["reference_path"],
                     record.get("duration"), record.get("file_size"),
                     record.get("status", "draft"), record.get("preview_path"),
-                    record.get("error_message"), 1 if record.get("is_enabled") else 0,
+                    sanitize_persisted_error_text(record.get("error_message")),
+                    1 if record.get("is_enabled") else 0,
                     1 if record.get("consent_confirmed") else 0,
                 ),
             )
@@ -1053,6 +1847,10 @@ class SQLiteClient:
             "preview_path", "error_message", "is_enabled", "consent_confirmed",
         }
         fields = {key: value for key, value in updates.items() if key in allowed}
+        if "error_message" in fields:
+            fields["error_message"] = sanitize_persisted_error_text(
+                fields["error_message"]
+            )
         if not fields:
             return self.get_voice_clone(clone_id)
         if not self._initialized:
@@ -1187,7 +1985,7 @@ class SQLiteClient:
                        ORDER BY t.created_at DESC LIMIT ? OFFSET ?""",
                     ("deleting", limit, offset)
                 )
-            rows = [dict(r) for r in cur.fetchall()]
+            rows = [self._decode_task_error(dict(r)) for r in cur.fetchall()]
             conn.close()
             return rows
         except Exception as e:
@@ -1202,29 +2000,38 @@ class SQLiteClient:
         try:
             conn = self._get_conn()
             cur = conn.cursor()
-            for seg in segments:
+            for raw_segment in segments:
+                seg = self._prepare_segment_error_updates(raw_segment)
                 cur.execute(
                     """INSERT INTO task_segments
                        (task_id, segment_index, text, image_prompt, image_path,
-                        image_url, image_status, image_error, audio_path, audio_url,
-                        audio_status, audio_error, duration, audio_voice_type,
-                        audio_tts_options_json, prompt_status, prompt_error,
-                        prompt_manual, prompt_needs_review)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        image_url, image_status, image_error, image_error_code,
+                        image_error_meta_json, audio_path, audio_url, audio_status,
+                        audio_error, audio_error_code, audio_error_meta_json,
+                        duration, audio_voice_type, audio_tts_options_json,
+                        prompt_status, prompt_error, prompt_error_code,
+                        prompt_error_meta_json, prompt_manual, prompt_needs_review)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(task_id, segment_index) DO UPDATE SET
                        text=excluded.text, image_prompt=excluded.image_prompt,
                        image_path=COALESCE(excluded.image_path, task_segments.image_path),
                        image_url=COALESCE(excluded.image_url, task_segments.image_url),
                        image_status=COALESCE(excluded.image_status, task_segments.image_status),
                        image_error=COALESCE(excluded.image_error, task_segments.image_error),
+                       image_error_code=COALESCE(excluded.image_error_code, task_segments.image_error_code),
+                       image_error_meta_json=COALESCE(excluded.image_error_meta_json, task_segments.image_error_meta_json),
                        audio_path=COALESCE(excluded.audio_path, task_segments.audio_path),
                        audio_url=COALESCE(excluded.audio_url, task_segments.audio_url),
                        audio_status=COALESCE(excluded.audio_status, task_segments.audio_status),
                        audio_error=COALESCE(excluded.audio_error, task_segments.audio_error),
+                       audio_error_code=COALESCE(excluded.audio_error_code, task_segments.audio_error_code),
+                       audio_error_meta_json=COALESCE(excluded.audio_error_meta_json, task_segments.audio_error_meta_json),
                        audio_voice_type=COALESCE(excluded.audio_voice_type, task_segments.audio_voice_type),
                        audio_tts_options_json=COALESCE(excluded.audio_tts_options_json, task_segments.audio_tts_options_json),
                        prompt_status=COALESCE(excluded.prompt_status, task_segments.prompt_status),
                        prompt_error=COALESCE(excluded.prompt_error, task_segments.prompt_error),
+                       prompt_error_code=COALESCE(excluded.prompt_error_code, task_segments.prompt_error_code),
+                       prompt_error_meta_json=COALESCE(excluded.prompt_error_meta_json, task_segments.prompt_error_meta_json),
                        prompt_manual=COALESCE(excluded.prompt_manual, task_segments.prompt_manual),
                        prompt_needs_review=COALESCE(excluded.prompt_needs_review, task_segments.prompt_needs_review),
                        duration=COALESCE(excluded.duration, task_segments.duration),
@@ -1233,12 +2040,15 @@ class SQLiteClient:
                      seg.get('image_prompt'),
                      seg.get('image_path'), seg.get('image_url'),
                      seg.get('image_status'), seg.get('image_error'),
+                     seg.get('image_error_code'), seg.get('image_error_meta_json'),
                      seg.get('audio_path'), seg.get('audio_url'),
                      seg.get('audio_status'), seg.get('audio_error'),
+                     seg.get('audio_error_code'), seg.get('audio_error_meta_json'),
                      seg.get('duration'), seg.get('audio_voice_type'),
                      seg.get('audio_tts_options_json'),
                      seg.get('prompt_status') or ('completed' if seg.get('image_prompt') else 'pending'),
-                     seg.get('prompt_error'), int(bool(seg.get('prompt_manual'))),
+                     seg.get('prompt_error'), seg.get('prompt_error_code'),
+                     seg.get('prompt_error_meta_json'), int(bool(seg.get('prompt_manual'))),
                      int(bool(seg.get('prompt_needs_review'))))
                 )
             conn.commit()
@@ -1258,7 +2068,7 @@ class SQLiteClient:
             conn = self._get_conn()
             cur = conn.cursor()
             cur.execute("SELECT * FROM task_segments WHERE task_id=? ORDER BY segment_index ASC", (task_id,))
-            rows = [dict(r) for r in cur.fetchall()]
+            rows = [self._decode_segment_errors(dict(r)) for r in cur.fetchall()]
             conn.close()
             return rows
         except Exception as e:
@@ -1281,7 +2091,8 @@ class SQLiteClient:
             cur = conn.cursor()
             set_parts = []
             values = []
-            for key, value in updates.items():
+            prepared_updates = self._prepare_segment_error_updates(updates)
+            for key, value in prepared_updates.items():
                 if value is None and key not in self.CLEARABLE_SEGMENT_ERROR_COLUMNS:
                     continue
                 if key in self.SEGMENT_CHECKPOINT_COLUMNS:
@@ -1313,6 +2124,7 @@ class SQLiteClient:
         if not self._initialized:
             return {}
         try:
+            error_message = sanitize_persisted_error_text(error_message)
             conn = self._get_conn()
             cur = conn.cursor()
             if source == "generated" and segment_index is not None:

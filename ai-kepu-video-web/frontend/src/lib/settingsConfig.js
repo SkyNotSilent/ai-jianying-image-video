@@ -33,6 +33,18 @@ export function normalizeConcurrency(value, fallback = 1) {
   return Math.min(8, Math.max(1, parsed))
 }
 
+export function normalizeRetryCount(value, fallback = 2) {
+  const parsed = Number.parseInt(value, 10)
+  if (!Number.isFinite(parsed)) return fallback
+  return Math.min(5, Math.max(0, parsed))
+}
+
+export function normalizeRetryInterval(value, fallback = 5) {
+  const parsed = Number.parseInt(value, 10)
+  if (!Number.isFinite(parsed)) return fallback
+  return Math.min(60, Math.max(1, parsed))
+}
+
 export function normalizeMimoConfig(config = {}) {
   return {
     ...MIMO_PRESET,
@@ -108,7 +120,9 @@ export function normalizeConfig(config = {}) {
       ...(source.generation || {}),
       prompt_concurrency: normalizeConcurrency(source.generation?.prompt_concurrency, 4),
       tts_concurrency: normalizeConcurrency(source.generation?.tts_concurrency),
-      image_concurrency: 1,
+      image_concurrency: normalizeConcurrency(source.generation?.image_concurrency, 8),
+      retry_count: normalizeRetryCount(source.generation?.retry_count),
+      retry_interval_seconds: normalizeRetryInterval(source.generation?.retry_interval_seconds),
     },
   }
 }

@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   buildVoiceTaskPayload,
+  doubaoSpeedRatio,
   groupVisibleVoices,
   hasUsableVoice,
   mergeTtsOptions,
@@ -10,6 +11,8 @@ import {
   normalizeVoiceCatalog,
   reconcileTtsVoiceConfig,
   resolveEnabledVoiceDefaults,
+  speedLevelAtPosition,
+  speedLevelPosition,
 } from '../src/lib/voiceCatalog.js'
 
 const catalog = [
@@ -103,6 +106,25 @@ test('merges inherited options and emits only provider-relevant task fields', ()
       tts_options: { speed_level: 'very_fast', volume_ratio: 1.8 },
     },
   )
+})
+
+test('uses the same doubao speed multipliers as final TTS generation', () => {
+  assert.equal(doubaoSpeedRatio('very_slow'), 0.8)
+  assert.equal(doubaoSpeedRatio('slow'), 1)
+  assert.equal(doubaoSpeedRatio('normal'), 1.25)
+  assert.equal(doubaoSpeedRatio('fast'), 1.5)
+  assert.equal(doubaoSpeedRatio('very_fast'), 1.75)
+  assert.equal(doubaoSpeedRatio('unknown'), 1.25)
+})
+
+test('maps the linked speed slider to the same five speed levels', () => {
+  assert.equal(speedLevelPosition('very_slow'), 0)
+  assert.equal(speedLevelPosition('normal'), 2)
+  assert.equal(speedLevelPosition('very_fast'), 4)
+  assert.equal(speedLevelPosition('unknown'), 2)
+  assert.equal(speedLevelAtPosition(0), 'very_slow')
+  assert.equal(speedLevelAtPosition(3), 'fast')
+  assert.equal(speedLevelAtPosition(99), 'very_fast')
 })
 
 test('preview state keeps one active voice and ignores stale completions', () => {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ArrowRight, FileText, ImageOff, LoaderCircle, MoreHorizontal, Plus, RotateCcw, Search, Trash2 } from 'lucide-react'
+import { ArrowRight, FileText, ImageOff, MoreHorizontal, Plus, RotateCcw, Search, Trash2 } from 'lucide-react'
 import { useNavigate } from 'react-router'
-import { deleteTask, getSegments, listTasks, resumeTask } from '../api/task'
+import { deleteTask, getSegments, listTasks } from '../api/task'
 import { ConfirmDialog } from '../components/Modal'
 import { EmptyState, LoadingState } from '../components/StatusStates'
 import { toast } from '../lib/toast'
@@ -64,7 +64,6 @@ export function ProjectAssetsPage() {
   const [openMenuId, setOpenMenuId] = useState(null)
   const [projectToDelete, setProjectToDelete] = useState(null)
   const [deletingId, setDeletingId] = useState(null)
-  const [resumingId, setResumingId] = useState(null)
 
   const loadProjects = useCallback(async () => {
     setLoading(true)
@@ -92,7 +91,7 @@ export function ProjectAssetsPage() {
     } catch (error) {
       console.warn('加载任务列表失败', error)
       setRemoteTasks([])
-      toast.error('加载项目任务失败，本地草稿仍可使用')
+      toast.error('加载云端项目失败，本地草稿仍可使用')
     } finally {
       setLoading(false)
     }
@@ -128,12 +127,12 @@ export function ProjectAssetsPage() {
       return {
         id: task.task_id,
         type: 'task',
-        name: task.name || task.result?.theme || task.theme || `视频任务 ${task.task_id?.slice(0, 6)}`,
+        name: task.name || task.result?.theme || task.theme || `视频项目 ${task.task_id?.slice(0, 6)}`,
         status: state.key,
         statusLabel: state.label,
         tone: state.tone,
         actionLabel: state.actionLabel,
-        provider: task.voice_type ? `TTS · ${task.voice_type}` : '生成任务',
+        provider: task.voice_type ? `TTS · ${task.voice_type}` : '生成项目',
         duration: durationSeconds ? secondsToLabel(durationSeconds) : '--:--',
         durationSeconds,
         updatedAt: formatLocalTime(task.updated_at || task.created_at || task.result?.created_at),
@@ -184,22 +183,10 @@ export function ProjectAssetsPage() {
     navigate(`/manuscript/${draft.draft_id}`)
   }
 
-  const openProject = async project => {
+  const openProject = project => {
     const action = getProjectPrimaryAction(project)
     if (action === 'draft') { navigate(`/manuscript/${project.id}`); return }
-    if (action === 'progress') { navigate(`/process/${project.id}`); return }
-    if (action === 'preview') { navigate(`/preview/${project.id}`); return }
-
-    setResumingId(project.id)
-    try {
-      await resumeTask(project.id)
-      navigate(`/process/${project.id}`)
-    } catch (error) {
-      console.warn('继续生成失败', error)
-      toast.error('任务暂时无法继续，请稍后重试')
-    } finally {
-      setResumingId(null)
-    }
+    navigate(`/workspace/${project.id}`)
   }
 
   const selectDelete = project => {
@@ -239,6 +226,15 @@ export function ProjectAssetsPage() {
     setDeletingId(projectToDelete.id)
     try {
       const result = await deleteTask(projectToDelete.id, { deleteFiles: true })
+      try {
+        const recent = JSON.parse(localStorage.getItem('insightcut:last-workspace') || 'null')
+        if (recent?.taskId === projectToDelete.id) {
+          localStorage.removeItem('insightcut:last-workspace')
+          window.dispatchEvent(new Event('insightcut:workspace'))
+        }
+      } catch {
+        localStorage.removeItem('insightcut:last-workspace')
+      }
       removeTaskFromView(projectToDelete.id)
       setProjectToDelete(null)
       const issueCount = getDeletionIssueCount(result)
@@ -256,6 +252,7 @@ export function ProjectAssetsPage() {
   const deleteConfirmation = getDeleteConfirmation(projectToDelete || {})
 
   const sectionTitle = STATUS_FILTERS.find(item => item.key === statusFilter)?.label || '全部项目'
+  const isProjectLibraryEmpty = projects.length === 0
 
   return (
     <main className="assets-page">
@@ -276,20 +273,20 @@ export function ProjectAssetsPage() {
           </div>
         </header>
 
-        {loading ? <LoadingState label="正在汇总本地草稿和任务..." /> : filteredProjects.length === 0 ? <EmptyState title="暂无匹配项目" description="调整筛选条件，或创建一份新文稿。" action={<button className="button button-primary" type="button" onClick={createProject}><Plus size={16} aria-hidden="true" />新建文稿</button>} /> : (
+        {loading ? <LoadingState label="正在汇总本地草稿和项目..." /> : filteredProjects.length === 0 ? <EmptyState variant="projects" eyebrow={isProjectLibraryEmpty ? '项目档案' : '筛选结果'} title={isProjectLibraryEmpty ? '还没有项目' : '没有匹配的项目'} description={isProjectLibraryEmpty ? '从一份文稿开始，后续的分镜、素材和导出会按项目归档在这里。' : '当前筛选条件下没有结果，可以调整左侧筛选，或直接开始新文稿。'} action={<button className="button button-primary" type="button" onClick={createProject}><Plus size={16} aria-hidden="true" />新建文稿</button>} /> : (
           <div className="asset-project-grid">
             {filteredProjects.map(project => {
               const usableCover = Boolean(project.cover && !brokenCovers[project.id])
               return (
                 <article className="asset-project-card" key={project.id}>
-                  <button className="asset-project-open" type="button" disabled={resumingId === project.id} onClick={() => openProject(project)} aria-label={`打开 ${project.name}`}>
+                  <button className="asset-project-open" type="button" onClick={() => openProject(project)} aria-label={`打开 ${project.name}`}>
                     <div className={`asset-project-thumb${usableCover ? '' : ' is-empty'}`}>
                       {usableCover ? <img src={project.cover} alt="" onError={() => setBrokenCovers(current => ({ ...current, [project.id]: true }))} /> : <div><ImageOff size={22} aria-hidden="true" /><strong>{project.name.slice(0, 2)}</strong><small>{project.type === 'draft' ? '文稿草稿' : '暂无画面'}</small></div>}
                       <span>{project.duration}</span>
                     </div>
                     <div className="asset-project-copy">
                       <h2>{project.name}</h2>
-                      <div className="asset-project-status"><span className={`status-pill is-${project.tone}`}>{project.statusLabel}</span><strong>{resumingId === project.id ? <><LoaderCircle className="spin" size={13} aria-hidden="true" />正在继续</> : <>{project.type === 'draft' ? '继续文稿' : project.actionLabel || '查看预览'} <ArrowRight size={13} aria-hidden="true" /></>}</strong></div>
+                      <div className="asset-project-status"><span className={`status-pill is-${project.tone}`}>{project.statusLabel}</span><strong>{project.type === 'draft' ? '继续文稿' : project.actionLabel || '查看工作台'} <ArrowRight size={13} aria-hidden="true" /></strong></div>
                       <div className="asset-project-meta"><span>{project.provider}</span><time>{project.updatedAt}</time></div>
                     </div>
                   </button>

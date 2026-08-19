@@ -4,6 +4,7 @@
 """
 
 import base64
+from collections import deque
 import logging
 import threading
 import time
@@ -13,11 +14,18 @@ from urllib.parse import urlparse
 import requests
 
 from src.config import Config
+from src.api.error_model import (
+    ClassifiedError,
+    ErrorCode,
+    classify_exception,
+    make_safe_error,
+)
 
 logger = logging.getLogger(__name__)
 _RATE_LIMIT_LOCK = threading.Lock()
-_LAST_IMAGE_REQUEST_AT = 0.0
-_DEFAULT_REQUEST_INTERVAL_SECONDS = 3.0
+_IMAGE_REQUEST_TIMESTAMPS = deque()
+_IMAGE_RATE_LIMIT = 20
+_IMAGE_RATE_WINDOW_SECONDS = 60.0
 
 # 风格预设（附加到 prompt 末尾）
 STYLE_PRESETS = {
@@ -46,6 +54,13 @@ class ImageGenerator:
         self.api_key = self.image_config.get("api_key") or Config.SEEDREAM_API_KEY
         self.model = self.image_config.get("model") or Config.SEEDREAM_MODEL
         self.size = self.image_config.get("size") or "auto"
+        generation_config = Config.generation_config()
+        retry_count = generation_config.get("retry_count", 2)
+        self.max_attempts = max(1, min(6, int(retry_count) + 1))
+        self.retry_interval_seconds = max(
+            1,
+            min(60, int(generation_config.get("retry_interval_seconds", 5))),
+        )
 
     def generate(
         self,
@@ -98,27 +113,42 @@ class ImageGenerator:
             payload["stream"] = False
 
         resp = None
-        for attempt in range(3):
+        for attempt in range(self.max_attempts):
             try:
                 self._wait_for_rate_limit()
                 resp = requests.post(self.api_url, headers=headers, json=payload, timeout=90)
                 resp.raise_for_status()
                 break
             except requests.HTTPError as e:
-                if attempt == 2:
-                    raise
-                wait_seconds = self._retry_delay(resp)
-                logger.warning(f"图像生成失败（第{attempt+1}次），{wait_seconds:.0f}秒后重试: {e}")
+                if attempt == self.max_attempts - 1:
+                    raise ClassifiedError(
+                        classify_exception(e, provider="agnes")
+                    ) from None
+                wait_seconds = self._retry_delay(resp, attempt)
+                logger.warning(
+                    "图像生成失败（第%s次），%.0f秒后重试",
+                    attempt + 1,
+                    wait_seconds,
+                )
                 time.sleep(wait_seconds)
             except Exception as e:
-                if attempt == 2:
-                    raise
-                logger.warning(f"图像生成失败（第{attempt+1}次），3秒后重试: {e}")
-                time.sleep(3)
+                if attempt == self.max_attempts - 1:
+                    raise ClassifiedError(
+                        classify_exception(e, provider="agnes")
+                    ) from None
+                wait_seconds = self._retry_delay(None, attempt)
+                logger.warning(
+                    "图像生成失败（第%s次），%.0f秒后重试",
+                    attempt + 1,
+                    wait_seconds,
+                )
+                time.sleep(wait_seconds)
         data = resp.json()
 
         if not data.get("data"):
-            raise RuntimeError(f"图像生成接口返回异常: {data}")
+            raise ClassifiedError(
+                make_safe_error(ErrorCode.PROVIDER_ERROR, provider="agnes")
+            ) from None
 
         image_bytes = self._extract_image_bytes(data)
         output_path = self.output_dir / f"{output_stem}{self._detect_image_extension(image_bytes)}"
@@ -131,42 +161,60 @@ class ImageGenerator:
         return parsed.netloc in {"api.openai.com", "api.openai.com:443"}
 
     def _wait_for_rate_limit(self) -> None:
-        global _LAST_IMAGE_REQUEST_AT
         with _RATE_LIMIT_LOCK:
-            now = time.monotonic()
-            elapsed = now - _LAST_IMAGE_REQUEST_AT
-            if elapsed < _DEFAULT_REQUEST_INTERVAL_SECONDS:
-                time.sleep(_DEFAULT_REQUEST_INTERVAL_SECONDS - elapsed)
-            _LAST_IMAGE_REQUEST_AT = time.monotonic()
+            while True:
+                now = time.monotonic()
+                while (
+                    _IMAGE_REQUEST_TIMESTAMPS
+                    and now - _IMAGE_REQUEST_TIMESTAMPS[0] >= _IMAGE_RATE_WINDOW_SECONDS
+                ):
+                    _IMAGE_REQUEST_TIMESTAMPS.popleft()
+                if len(_IMAGE_REQUEST_TIMESTAMPS) < _IMAGE_RATE_LIMIT:
+                    _IMAGE_REQUEST_TIMESTAMPS.append(now)
+                    return
+                wait_seconds = max(
+                    0.01,
+                    _IMAGE_RATE_WINDOW_SECONDS - (now - _IMAGE_REQUEST_TIMESTAMPS[0]),
+                )
+                time.sleep(wait_seconds)
 
-    def _retry_delay(self, resp) -> float:
+    def _retry_delay(self, resp, attempt: int = 0) -> float:
         if resp is not None and resp.status_code == 429:
             retry_after = resp.headers.get("retry-after")
             try:
-                return max(float(retry_after), _DEFAULT_REQUEST_INTERVAL_SECONDS)
+                return max(0.0, float(retry_after))
             except (TypeError, ValueError):
                 return 60.0
-        return _DEFAULT_REQUEST_INTERVAL_SECONDS
+        return float(self.retry_interval_seconds * (attempt + 1))
 
     def _extract_image_bytes(self, data: dict) -> bytes:
         item = data["data"][0]
         if item.get("url"):
-            # 下载图片，超时 90 秒，失败后重试 1 次
-            for attempt in range(2):
+            # 下载阶段沿用统一失败重试次数。
+            for attempt in range(self.max_attempts):
                 try:
                     img_resp = requests.get(item["url"], timeout=90)
                     img_resp.raise_for_status()
                     return img_resp.content
                 except Exception as e:
-                    if attempt == 1:
-                        raise
-                    logger.warning(f"图片下载失败（第{attempt+1}次），3秒后重试: {e}")
-                    time.sleep(3)
+                    if attempt == self.max_attempts - 1:
+                        raise ClassifiedError(
+                            classify_exception(e, provider="agnes")
+                        ) from None
+                    wait_seconds = self._retry_delay(None, attempt)
+                    logger.warning(
+                        "图片下载失败（第%s次），%.0f秒后重试",
+                        attempt + 1,
+                        wait_seconds,
+                    )
+                    time.sleep(wait_seconds)
         if item.get("b64_json"):
             return base64.b64decode(item["b64_json"])
         if item.get("base64"):
             return base64.b64decode(item["base64"])
-        raise RuntimeError(f"图像生成接口返回缺少 url/b64_json: {data}")
+        raise ClassifiedError(
+            make_safe_error(ErrorCode.PROVIDER_ERROR, provider="agnes")
+        ) from None
 
     def _detect_image_extension(self, image_bytes: bytes) -> str:
         if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):

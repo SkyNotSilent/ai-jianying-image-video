@@ -103,9 +103,17 @@
 }
 
 .voice-advanced label { display: grid; gap: 7px; color: #566072; font-size: 11px; font-weight: 650; }
-.voice-advanced label span { display: flex; justify-content: space-between; }
+.voice-advanced label > span:first-child { display: flex; justify-content: space-between; }
 .voice-advanced select,
 .voice-advanced input:not([type='range']) { min-height: 36px; border: 1px solid rgba(30, 45, 70, .14); border-radius: 8px; background: #fff; padding: 0 10px; }
+.voice-speed-control.is-wide { grid-column: 1 / -1; }
+.voice-speed-control input[type='range'] { width: 100%; margin: 3px 0 0; accent-color: #286fd2; cursor: pointer; }
+.voice-speed-ticks { display: grid; grid-template-columns: repeat(5, 1fr); color: #8a93a3; font-size: 9px; font-weight: 550; }
+.voice-speed-ticks small { text-align: center; transition: color .16s ease, font-weight .16s ease; }
+.voice-speed-ticks small:first-child { text-align: left; }
+.voice-speed-ticks small:last-child { text-align: right; }
+.voice-speed-ticks small.is-active { color: #286fd2; font-weight: 750; }
+.voice-speed-hint { color: #8a93a3; font-size: 10px; font-weight: 500; line-height: 1.4; }
 .voice-style-field { grid-column: 2; }
 
 .voice-preview-error,
@@ -115,6 +123,7 @@
 .voice-picker.is-compact .voice-card-grid { grid-template-columns: 1fr; }
 .voice-picker.is-compact .voice-provider-group > header small { display: none; }
 .voice-picker.is-compact .voice-advanced { grid-template-columns: 1fr; }
+.voice-picker.is-compact .voice-speed-control { grid-column: 1; }
 .voice-picker.is-compact .voice-style-field { grid-column: 1; }
 
 @media (max-width: 720px) {

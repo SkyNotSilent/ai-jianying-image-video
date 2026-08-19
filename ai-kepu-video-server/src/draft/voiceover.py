@@ -12,6 +12,12 @@ from pathlib import Path
 import requests
 
 from src.config import Config
+from src.api.error_model import (
+    ClassifiedError,
+    ErrorCode,
+    classify_exception,
+    make_safe_error,
+)
 from src.draft.voice_catalog import (
     MIMO_PRESET_VOICES,
     normalize_tts_options,
@@ -56,6 +62,13 @@ class VoiceOverGenerator:
         self.default_voice = self.tts_config.get("default_voice") or Config.DOUBAO_TTS_DEFAULT_VOICE
         self.mimo_config = self.tts_config.get("mimo") or {}
         self.clone_store = clone_store
+        generation_config = Config.generation_config()
+        retry_count = generation_config.get("retry_count", 2)
+        self.max_attempts = max(1, min(6, int(retry_count) + 1))
+        self.retry_interval_seconds = max(
+            1,
+            min(60, int(generation_config.get("retry_interval_seconds", 5))),
+        )
 
     def _clone_store(self):
         if self.clone_store is None:
@@ -189,28 +202,40 @@ class VoiceOverGenerator:
             },
         }
 
-        for attempt in range(5):
+        for attempt in range(self.max_attempts):
             try:
                 resp = requests.post(self.api_url, headers=headers, json=payload, timeout=30)
                 if resp.status_code == 429:
                     wait = int(resp.headers.get("Retry-After", 30 * (attempt + 1)))
+                    if attempt == self.max_attempts - 1:
+                        resp.raise_for_status()
                     logger.warning(f"TTS 限流 429（第{attempt+1}次），等待 {wait}s 后重试")
                     time.sleep(wait)
                     continue
                 resp.raise_for_status()
                 break
-            except requests.exceptions.HTTPError:
-                raise
+            except requests.exceptions.HTTPError as error:
+                raise ClassifiedError(
+                    classify_exception(error, provider="doubao")
+                ) from None
             except Exception as e:
-                if attempt == 4:
-                    raise
-                wait = 10 * (attempt + 1)
-                logger.warning(f"TTS 请求失败（第{attempt+1}次），{wait}s 后重试: {e}")
+                if attempt == self.max_attempts - 1:
+                    raise ClassifiedError(
+                        classify_exception(e, provider="doubao")
+                    ) from None
+                wait = self.retry_interval_seconds * (attempt + 1)
+                logger.warning(
+                    "TTS 请求失败（第%s次），%ss 后重试",
+                    attempt + 1,
+                    wait,
+                )
                 time.sleep(wait)
 
         data = resp.json()
         if data.get("code") != 3000 or not data.get("data"):
-            raise RuntimeError(f"豆包 TTS 失败: code={data.get('code')} msg={data.get('message')}")
+            raise ClassifiedError(
+                make_safe_error(ErrorCode.PROVIDER_ERROR, provider="doubao")
+            ) from None
 
         audio_bytes = base64.b64decode(data["data"])
         output_path.write_bytes(audio_bytes)
@@ -281,34 +306,47 @@ class VoiceOverGenerator:
         )
 
         resp = None
-        for attempt in range(5):
+        for attempt in range(self.max_attempts):
             try:
                 resp = requests.post(endpoint, headers=headers, json=payload, timeout=90)
                 if resp.status_code == 429:
                     wait = int(resp.headers.get("Retry-After", 60))
-                    if attempt == 4:
+                    if attempt == self.max_attempts - 1:
                         resp.raise_for_status()
                     logger.warning(f"小米 MiMo TTS 限流 429（第{attempt+1}次），等待 {wait}s 后重试")
                     time.sleep(wait)
                     continue
                 resp.raise_for_status()
                 break
-            except requests.exceptions.HTTPError:
-                raise
+            except requests.exceptions.HTTPError as error:
+                raise ClassifiedError(
+                    classify_exception(error, provider="mimo")
+                ) from None
             except Exception as e:
-                if attempt == 4:
-                    raise
-                wait = 10 * (attempt + 1)
-                logger.warning(f"小米 MiMo TTS 请求失败（第{attempt+1}次），{wait}s 后重试: {e}")
+                if attempt == self.max_attempts - 1:
+                    raise ClassifiedError(
+                        classify_exception(e, provider="mimo")
+                    ) from None
+                wait = self.retry_interval_seconds * (attempt + 1)
+                logger.warning(
+                    "小米 MiMo TTS 请求失败（第%s次），%ss 后重试",
+                    attempt + 1,
+                    wait,
+                )
                 time.sleep(wait)
 
         data = resp.json()
         try:
             audio_data = data["choices"][0]["message"]["audio"]["data"]
         except (KeyError, IndexError, TypeError) as exc:
-            raise RuntimeError("小米 MiMo TTS 响应缺少 choices[0].message.audio.data") from exc
+            exc = None
+            raise ClassifiedError(
+                make_safe_error(ErrorCode.PROVIDER_ERROR, provider="mimo")
+            ) from None
         if not audio_data:
-            raise RuntimeError("小米 MiMo TTS 返回空音频")
+            raise ClassifiedError(
+                make_safe_error(ErrorCode.PROVIDER_ERROR, provider="mimo")
+            ) from None
 
         audio_bytes = base64.b64decode(audio_data)
         output_path.write_bytes(audio_bytes)

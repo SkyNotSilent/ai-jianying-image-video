@@ -46,3 +46,11 @@ class TestFFmpegExporter(unittest.TestCase):
         self.assertNotIn("pad=", vf)
         self.assertNotIn(":black", vf)
         self.assertNotIn("fade=t=in", vf)
+        self.assertNotIn("-af", captured["cmd"])
+        self.assertNotIn("highpass", " ".join(captured["cmd"]))
+        self.assertNotIn("afftdn", " ".join(captured["cmd"]))
+
+    def test_render_config_versions_audio_pipeline_for_cache_invalidation(self):
+        config = FFmpegExporter.get_render_config(canvas={"width": 1920, "height": 1080, "fps": 30})
+
+        self.assertGreaterEqual(config["pipeline_version"], 2)

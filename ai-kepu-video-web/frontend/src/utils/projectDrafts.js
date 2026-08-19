@@ -1,12 +1,12 @@
 const STORAGE_KEY = 'insightcut:project-drafts'
 
 export const visualStyles = [
-  { value: '电影质感', label: '电影质感', image: '/styles/电影质感.jpg' },
-  { value: '吉卜力', label: '吉卜力', image: '/styles/吉卜力.webp' },
-  { value: '3D动画', label: '3D 动画', image: '/styles/3D动画.webp' },
-  { value: '毛毡风', label: '毛毡风', image: '/styles/毛毡风格.webp' },
-  { value: '油彩画', label: '油彩画', image: '/styles/油彩画.jpg' },
-  { value: '国风', label: '国风', image: '/styles/国风.webp' },
+  { value: '电影质感', label: '电影质感', description: '真实光影与镜头叙事', image: '/styles/电影质感.jpg' },
+  { value: '吉卜力', label: '吉卜力', description: '温暖手绘与自然色彩', image: '/styles/吉卜力.webp' },
+  { value: '3D动画', label: '3D 动画', description: '立体角色与明快质感', image: '/styles/3D动画.webp' },
+  { value: '毛毡风', label: '毛毡风', description: '柔软材质与微缩场景', image: '/styles/毛毡风格.webp' },
+  { value: '油彩画', label: '油彩画', description: '厚重笔触与艺术色块', image: '/styles/油彩画.jpg' },
+  { value: '国风', label: '国风', description: '东方构图与水墨意境', image: '/styles/国风.webp' },
 ]
 
 export const projectCovers = [

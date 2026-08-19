@@ -28,7 +28,7 @@ export function deriveTaskState({ task = {}, segments = [], exportState = null }
       key: 'interrupted',
       label: rawStatus === 'failed' ? '失败可继续' : '生成已中断',
       tone: 'warning',
-      actionLabel: '继续生成',
+      actionLabel: '查看并继续',
       canPreview: hasSegmentEvidence,
       canExport: false,
       canRecover: true,

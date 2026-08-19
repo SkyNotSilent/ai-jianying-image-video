@@ -75,6 +75,19 @@ npm run dev
 - 本地维护巡检：在 `ai-kepu-video-server/` 下运行 `python scripts/maintenance_report.py --dry-run` 查看日志、数据库、媒体目录体量和未引用素材；只有显式使用 `--apply` 才会删除未被数据库引用的媒体文件。
 - **任务失败不能丢已生成内容**：任何任务被标记为 `failed` 时，已经生成的分镜文本、图片 prompt、图片、音频、草稿文件等资产必须继续入库并在素材库/预览页正常展示；失败状态只表示后续流程停止，不代表清空或隐藏已有资产。
 - **超时失败也要先保资产**：自动超时、手动失败、异常失败前，必须尽量保存当前已生成的 `task_segments` 和 `task_assets`，让用户能查看、替换、重新生成或基于已有素材继续处理。
+- **后台任务巡检**：`TASK_SWEEPER_INTERVAL_SECONDS` 控制超时任务与孤儿 operation 的后台巡检间隔，默认 `300` 秒；等待确认和等待完成生产阶段不参与超时判定。
+
+### 外部开发工具：README Observatory
+
+- **用途**：供开发者在本地查看本仓库及其他 Git 仓库的 README 工作区版本、历史提交、GitHub 风格渲染效果和逐行差异，用于发布前检查文档变化；它不是 InsightCut 的产品功能。
+- **位置**：工具位于本仓库外的同级目录 `../readme-version-monitor/`，与 `Auto-jianji/` 相互独立，不会随本仓库提交或上传到 GitHub。
+- **边界**：不得把该工具的页面、导航、API、测试或依赖复制回 InsightCut；工具通过只读 Git 命令读取目标仓库，不应向目标仓库写入文件。
+- **启动方式**：
+  ```bash
+  cd ../readme-version-monitor
+  python3 app.py --repo ../Auto-jianji --port 4178
+  ```
+- **访问地址**：http://127.0.0.1:4178；默认每 15 秒只读刷新一次 README 历史，也可在页面中手动刷新。
 
 ## 模型调用架构
 
@@ -99,7 +112,8 @@ npm run dev
 - **配置方式**：`api_url` + `api_key` + `model`
 - **核心文件**：`src/media/image_generator.py`
 - **请求格式注意**：Agnes 的 `response_format` 必须放在 `extra_body.response_format`，不能放在请求体顶层
-- **免费限速注意**：附件文档未列出明确 RPM；当前按公开资料的免费 `RPM 20` 处理，项目内生图请求至少间隔 3 秒，`IMAGE_CONCURRENCY` 保持 `1`，遇到 429 按 `retry-after` 或 60 秒等待后重试
+- **免费限速注意**：2026-08-18 使用当前免费账号实测，8 路瞬时请求全部成功，但滚动一分钟累计成功 20 次后继续请求会返回 429；`IMAGE_CONCURRENCY` 默认 `8`，项目内按滚动 60 秒最多 20 次请求节流，遇到 429 按 `retry-after` 或 60 秒等待后重试
+- **统一重试策略**：`GENERATION_RETRY_COUNT` 控制额外重试次数（0–5，默认 2），`GENERATION_RETRY_INTERVAL_SECONDS` 控制普通失败的基础等待秒数（1–60，默认 5）并按尝试次数递增；HTTP 429 仍优先遵循服务商 `Retry-After`
 
 ### TTS 模块
 

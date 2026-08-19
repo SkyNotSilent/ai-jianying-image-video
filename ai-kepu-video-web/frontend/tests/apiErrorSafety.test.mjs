@@ -111,3 +111,18 @@ test('unsafe server detail falls back instead of echoing a credential', () => {
   assert.equal(safe.response.data.detail, '请求失败')
   assert.equal(graphText(safe).includes(credential), false)
 })
+
+test('an intentional aborted request remains distinguishable from a network failure', () => {
+  const raw = Object.assign(new Error('canceled'), {
+    name: 'CanceledError',
+    code: 'ERR_CANCELED',
+    config: { method: 'get', url: '/ai/native/video/kepu/tasks/task-a/workspace' },
+  })
+
+  const safe = toSafeApiError(raw)
+
+  assert.equal(safe.kind, 'cancelled')
+  assert.equal(safe.message, '请求已取消')
+  assert.equal(safe.path, '/ai/native/video/kepu/tasks/task-a/workspace')
+  assert.equal(safe.response, undefined)
+})

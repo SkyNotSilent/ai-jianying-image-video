@@ -8,6 +8,7 @@ import {
   buildModelPayload,
   normalizeConfig,
   normalizeConcurrency,
+  normalizeRetryCount,
   restoreAgnesPreset,
   restoreMimoTechnicalPreset,
   validateConfig,
@@ -35,7 +36,7 @@ test('normalizes a partial config without dropping provider fields', () => {
       default_voice: 'voice',
       mimo: { api_key: 'mimo-key', default_voice: 'Mia' },
     },
-    generation: { prompt_concurrency: 7, tts_concurrency: 99, image_concurrency: 5 },
+    generation: { prompt_concurrency: 7, tts_concurrency: 99, image_concurrency: 5, retry_count: 4, retry_interval_seconds: 9 },
   })
 
   assert.equal(config.llm.provider, 'anthropic')
@@ -52,7 +53,9 @@ test('normalizes a partial config without dropping provider fields', () => {
   assert.equal(config.tts.mimo.clone_model, 'mimo-v2.5-tts-voiceclone')
   assert.equal(config.generation.prompt_concurrency, 7)
   assert.equal(config.generation.tts_concurrency, 8)
-  assert.equal(config.generation.image_concurrency, 1)
+  assert.equal(config.generation.image_concurrency, 5)
+  assert.equal(config.generation.retry_count, 4)
+  assert.equal(config.generation.retry_interval_seconds, 9)
 })
 
 test('normalizes missing or invalid LLM provider state to custom defaults', () => {
@@ -68,8 +71,15 @@ test('normalizes prompt concurrency to four by default and clamps runtime concur
   assert.equal(normalizeConfig({}).generation.prompt_concurrency, 4)
   assert.equal(normalizeConfig({ generation: { prompt_concurrency: 0 } }).generation.prompt_concurrency, 1)
   assert.equal(normalizeConfig({ generation: { prompt_concurrency: 12 } }).generation.prompt_concurrency, 8)
-  assert.equal(normalizeConfig({ generation: { image_concurrency: 8 } }).generation.image_concurrency, 1)
-  assert.equal(normalizeConfig(null).generation.image_concurrency, 1)
+  assert.equal(normalizeConfig({ generation: { image_concurrency: 12 } }).generation.image_concurrency, 8)
+  assert.equal(normalizeConfig(null).generation.image_concurrency, 8)
+  assert.equal(normalizeRetryCount('-1'), 0)
+  assert.equal(normalizeRetryCount('6'), 5)
+  assert.equal(normalizeRetryCount('bad'), 2)
+  assert.equal(normalizeConfig({}).generation.retry_count, 2)
+  assert.equal(normalizeConfig({}).generation.retry_interval_seconds, 5)
+  assert.equal(normalizeConfig({ generation: { retry_interval_seconds: 0 } }).generation.retry_interval_seconds, 1)
+  assert.equal(normalizeConfig({ generation: { retry_interval_seconds: 90 } }).generation.retry_interval_seconds, 60)
 })
 
 test('uses exact MiMo voice IDs', () => {

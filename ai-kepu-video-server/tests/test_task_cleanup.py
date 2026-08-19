@@ -362,6 +362,18 @@ def test_task_detail_reports_script_only_resume_capability(
     assert response.can_resume is True
 
 
+def test_task_detail_reports_theme_only_resume_capability(
+    temp_db, isolated_manager
+):
+    manager, _ = isolated_manager
+    task_id = "theme-checkpoint"
+    create_task(temp_db, task_id, status="interrupted")
+
+    response = manager.get_task(task_id).to_response()
+
+    assert response.can_resume is True
+
+
 def test_file_cleanup_failure_does_not_restore_deleted_rows(
     temp_db, isolated_manager, monkeypatch, caplog
 ):
